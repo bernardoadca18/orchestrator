@@ -1,2 +1,9 @@
+__pycache__/
+*.pyc
 .env
-setup_orchestrator.sh
+.venv/
+venv/
+node_modules/
+dist/
+data/audio/*
+!data/audio/.gitkeep

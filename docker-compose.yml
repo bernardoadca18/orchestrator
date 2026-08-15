@@ -1,0 +1,77 @@
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    container_name: orchestrator-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: orchestrator
+      POSTGRES_PASSWORD: orchestrator
+      POSTGRES_DB: orchestrator
+    ports:
+      - "5434:5432"
+    volumes:
+      - orchestrator-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orchestrator"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: orchestrator-redis
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+
+  api:
+    build: ./backend
+    container_name: orchestrator-api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@db:5432/orchestrator
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "8011:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - ./data/audio:/data/audio
+
+  worker:
+    build: ./backend
+    container_name: orchestrator-worker
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@db:5432/orchestrator
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --concurrency=1 -l info
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./backend:/app
+      - ./data/audio:/data/audio
+
+  frontend:
+    build: ./frontend
+    container_name: orchestrator-frontend
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "5174:5174"
+    depends_on:
+      - api
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+volumes:
+  orchestrator-db-data:
+    name: orchestrator-db-data
