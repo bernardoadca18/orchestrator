@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
-from app.schemas.workflow import RoteiroDisponivelOut, WorkflowCreateIn, WorkflowDetailOut, WorkflowOut
+from app.schemas.workflow import RoteiroDisponivelOut, WorkflowCreateIn, WorkflowDetailOut, WorkflowOut, PacoteProducaoOut
 from app.tasks.audio_tasks import gerar_audio_workflow
 
 router = APIRouter()
