@@ -45,6 +45,7 @@ class WorkflowExecucao(Base):
     ideia_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, index=True)
     roteiro_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, index=True)
     roteiro_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    perfil_producao: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     status: Mapped[str] = mapped_column(
         PgEnum(
@@ -67,6 +68,9 @@ class WorkflowExecucao(Base):
 
     blocos: Mapped[list["AudioBloco"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan", order_by="AudioBloco.ordem"
+    )
+    transcricao: Mapped["TranscricaoAudio | None"] = relationship(
+        back_populates="workflow", uselist=False, cascade="all, delete-orphan"
     )
 
 
@@ -98,3 +102,18 @@ class AudioBloco(Base):
     )
 
     workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="blocos")
+
+
+class TranscricaoAudio(Base):
+    __tablename__ = "transcricoes_audio"
+
+    id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("workflow_execucoes.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    texto_completo: Mapped[str] = mapped_column(Text, nullable=False)
+    palavras_timestamps: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    criado_em: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="transcricao")

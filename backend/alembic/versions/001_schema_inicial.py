@@ -16,14 +16,21 @@ depends_on = None
 
 
 def upgrade() -> None:
-    status_workflow = postgresql.ENUM(
-        "agendada", "gerando_audio", "audio_concluido", "erro", "cancelada", name="status_workflow"
-    )
-    status_audio_bloco = postgresql.ENUM("pendente", "gerando", "concluido", "erro", name="status_audio_bloco")
-
-    bind = op.get_bind()
-    status_workflow.create(bind, checkfirst=True)
-    status_audio_bloco.create(bind, checkfirst=True)
+    # Criar ENUMs explicitamente com checkfirst para evitar duplicação
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE status_workflow AS ENUM ('agendada', 'gerando_audio', 'audio_concluido', 'erro', 'cancelada');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
+    op.execute("""
+        DO $$ BEGIN
+            CREATE TYPE status_audio_bloco AS ENUM ('pendente', 'gerando', 'concluido', 'erro');
+        EXCEPTION
+            WHEN duplicate_object THEN null;
+        END $$;
+    """)
 
     op.create_table(
         "workflow_execucoes",
@@ -31,7 +38,7 @@ def upgrade() -> None:
         sa.Column("ideia_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("roteiro_id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("roteiro_snapshot", postgresql.JSONB, nullable=False),
-        sa.Column("status", status_workflow, nullable=False, server_default="agendada"),
+        sa.Column("status", postgresql.ENUM("agendada", "gerando_audio", "audio_concluido", "erro", "cancelada", name="status_workflow", create_type=False), nullable=False, server_default="agendada"),
         sa.Column("audio_final_path", sa.String(500), nullable=True),
         sa.Column("duracao_audio_segundos", sa.Float, nullable=True),
         sa.Column("erro_mensagem", sa.Text, nullable=True),
@@ -54,7 +61,7 @@ def upgrade() -> None:
         sa.Column("tipo", sa.String(50), nullable=False),
         sa.Column("texto", sa.Text, nullable=False),
         sa.Column("job_id_voz", sa.String(64), nullable=True),
-        sa.Column("status", status_audio_bloco, nullable=False, server_default="pendente"),
+        sa.Column("status", postgresql.ENUM("pendente", "gerando", "concluido", "erro", name="status_audio_bloco", create_type=False), nullable=False, server_default="pendente"),
         sa.Column("audio_path", sa.String(500), nullable=True),
         sa.Column("duracao_segundos", sa.Float, nullable=True),
         sa.Column("erro_mensagem", sa.Text, nullable=True),

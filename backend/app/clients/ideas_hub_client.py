@@ -23,5 +23,12 @@ class IdeasHubClient:
             resp.raise_for_status()
             return resp.json()
 
+    async def obter_ideia(self, ideia_id: uuid.UUID) -> dict:
+        """Busca detalhes da ideia no ideas-hub, incluindo perfil_producao."""
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=self._timeout) as client:
+            resp = await client.get(f"/ideias/{ideia_id}")
+            resp.raise_for_status()
+            return resp.json()
+
 
 ideas_hub_client = IdeasHubClient()

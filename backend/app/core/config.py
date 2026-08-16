@@ -31,5 +31,8 @@ class Settings(BaseSettings):
     api_port: int = 8001
     cors_origins: str = "http://localhost:5174"
 
+    # --- Logging --------------------------------------------------------------
+    json_logging: bool = True
+
 
 settings = Settings()

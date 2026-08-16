@@ -2,7 +2,7 @@
 import datetime as dt
 import uuid
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, computed_field
 
 
 class RoteiroDisponivelOut(BaseModel):
@@ -34,6 +34,7 @@ class WorkflowOut(BaseModel):
     id: uuid.UUID
     ideia_id: uuid.UUID
     roteiro_id: uuid.UUID
+    perfil_producao: str | None
     status: str
     audio_final_path: str | None
     duracao_audio_segundos: float | None
@@ -45,3 +46,28 @@ class WorkflowOut(BaseModel):
 
 class WorkflowDetailOut(WorkflowOut):
     blocos: list[AudioBlocoOut] = []
+
+    @computed_field
+    @property
+    def total_blocos(self) -> int:
+        return len(self.blocos)
+
+    @computed_field
+    @property
+    def blocos_concluidos(self) -> int:
+        return sum(1 for b in self.blocos if b.status == "concluido")
+
+    @computed_field
+    @property
+    def blocos_pendentes(self) -> int:
+        return sum(1 for b in self.blocos if b.status == "pendente")
+
+    @computed_field
+    @property
+    def blocos_gerando(self) -> int:
+        return sum(1 for b in self.blocos if b.status == "gerando")
+
+    @computed_field
+    @property
+    def blocos_erro(self) -> int:
+        return sum(1 for b in self.blocos if b.status == "erro")

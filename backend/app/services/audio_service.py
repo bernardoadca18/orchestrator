@@ -12,10 +12,11 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.voice_client import VoiceClientError, voice_client
+from app.clients.voice_client import VoiceClientError, VoiceClientTransientError, voice_client
 from app.core.config import settings
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.ffmpeg_utils import concatenar_com_silencio, obter_duracao_segundos
+from app.services.transcription_service import transcrever_audio
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,12 @@ async def processar_workflow(session: AsyncSession, workflow_id: uuid.UUID) -> N
     wf = await repo.obter_por_id(workflow_id, com_blocos=True)
     if wf is None:
         logger.warning("Workflow %s não encontrado — abortando task", workflow_id)
+        return
+
+    # Verificar se foi cancelado antes de começar
+    wf = await repo.obter_por_id(workflow_id)
+    if wf.status == "cancelada":
+        logger.info("Workflow %s está cancelado — abortando", workflow_id)
         return
 
     await repo.atualizar_status(wf.id, "gerando_audio")
@@ -40,6 +47,12 @@ async def processar_workflow(session: AsyncSession, workflow_id: uuid.UUID) -> N
     caminhos_blocos: list[Path] = []
 
     for ordem, bloco_estrutura in enumerate(blocos_estrutura):
+        # Verificar se workflow foi cancelado a cada iteração
+        wf_atual = await repo.obter_por_id(workflow_id)
+        if wf_atual.status == "cancelada":
+            logger.info("Workflow %s cancelado durante processamento — abortando", workflow_id)
+            return
+
         texto = bloco_estrutura["conteudo"]
         tipo = bloco_estrutura.get("tipo", f"bloco_{ordem}")
         bloco = await repo.upsert_bloco(wf.id, ordem=ordem, tipo=tipo, texto=texto)
@@ -61,7 +74,7 @@ async def processar_workflow(session: AsyncSession, workflow_id: uuid.UUID) -> N
             )
             caminhos_blocos.append(caminho_bloco)
 
-        except VoiceClientError as exc:
+        except (VoiceClientError, VoiceClientTransientError) as exc:
             logger.exception("Falha ao gerar bloco %s do workflow %s", ordem, wf.id)
             await repo.atualizar_bloco(bloco.id, status="erro", erro_mensagem=str(exc))
             await repo.atualizar_status(
@@ -72,6 +85,14 @@ async def processar_workflow(session: AsyncSession, workflow_id: uuid.UUID) -> N
     caminho_final = pasta_workflow / "audio_final.wav"
     await concatenar_com_silencio(caminhos_blocos, settings.silencio_entre_blocos_ms, caminho_final)
     duracao_total = await obter_duracao_segundos(caminho_final)
+
+    # Transcrever áudio final com Faster-Whisper
+    try:
+        texto_completo, palavras_timestamps = transcrever_audio(caminho_final)
+        await repo.criar_transcricao(wf.id, texto_completo, palavras_timestamps)
+        logger.info("Transcrição concluída para workflow %s — %d palavras", wf.id, len(palavras_timestamps))
+    except Exception as exc:
+        logger.warning("Falha na transcrição do workflow %s: %s — continuando sem transcrição", wf.id, exc)
 
     await repo.atualizar_status(
         wf.id,
