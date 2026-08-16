@@ -35,6 +35,7 @@ export interface Workflow {
   id: string;
   ideia_id: string;
   roteiro_id: string;
+  perfil_producao?: string | null;
   status: string;
   audio_final_path: string | null;
   duracao_audio_segundos: number | null;
@@ -43,15 +44,34 @@ export interface Workflow {
   criado_em: string;
   atualizado_em: string;
   blocos?: AudioBloco[];
+  total_blocos?: number;
+  blocos_concluidos?: number;
+  blocos_pendentes?: number;
+  blocos_gerando?: number;
+  blocos_erro?: number;
+}
+
+export interface DashboardStats {
+  fila_tamanho: number;
+  workflows_ativos: number;
+  blocos_concluidos_24h: number;
+  blocos_erro_24h: number;
+  tempo_medio_bloco_segundos: number | null;
+  taxa_erro_24h_percent: number;
 }
 
 export const api = {
   listarRoteirosDisponiveis: () => request<RoteiroDisponivel[]>("/workflow/roteiros-disponiveis"),
-  listarWorkflows: () => request<Workflow[]>("/workflow"),
+  listarWorkflows: (status?: string) => {
+    const params = status ? `?status=${status}` : "";
+    return request<Workflow[]>(`/workflow${params}`);
+  },
   obterWorkflow: (id: string) => request<Workflow>(`/workflow/${id}`),
   criarWorkflow: (roteiro_id: string) =>
     request<Workflow>("/workflow", { method: "POST", body: JSON.stringify({ roteiro_id }) }),
   repetirWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/retry`, { method: "PATCH" }),
   cancelarWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/cancelar`, { method: "PATCH" }),
+  obterDashboardStats: () => request<DashboardStats>("/dashboard/stats"),
   urlAudio: (id: string) => `${BASE_URL}/workflow/${id}/audio`,
+  urlAudioBloco: (workflowId: string, blocoId: string) => `${BASE_URL}/workflow/${workflowId}/blocos/${blocoId}/audio`,
 };

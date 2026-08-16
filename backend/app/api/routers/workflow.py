@@ -143,3 +143,124 @@ async def obter_transcricao(workflow_id: uuid.UUID, session: Annotated[AsyncSess
         raise HTTPException(404, "Transcrição ainda não disponível para este workflow")
 
     return transcricao
+
+
+@router.get("/{workflow_id}/blocos/{bloco_id}/audio")
+async def baixar_audio_bloco(workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+    """Retorna o áudio de um bloco específico."""
+    repo = WorkflowRepository(session)
+    bloco = await repo.obter_bloco_por_id(bloco_id)
+
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    if not bloco.audio_path:
+        raise HTTPException(404, "Áudio do bloco ainda não disponível")
+
+    return FileResponse(bloco.audio_path, media_type="audio/wav", filename=f"bloco_{bloco.ordem:02d}.wav")
+
+
+@router.get("/{workflow_id}/pacote-producao", response_model=PacoteProducaoOut)
+async def obter_pacote_producao(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+    """
+    Retorna o pacote consolidado de produção visual.
+
+    Agrega todos os dados necessários para o serviço visual iniciar a produção:
+    - Roteiro completo com blocos
+    - Áudio final e por bloco
+    - Transcrição com timestamps por palavra
+    - Perfil de produção
+    - Metadata de controle
+
+    O serviço visual deve consumir este endpoint em vez de bater em múltiplos.
+    """
+    from app.schemas.workflow import (
+        AudioPacoteOut,
+        BlocoAudioPacoteOut,
+        BlocoRoteiroPacote,
+        MetadataPacoteOut,
+        PacoteProducaoOut,
+        PalavraTimestampPacote,
+        RoteiroPacoteOut,
+        TranscricaoPacoteOut,
+    )
+
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
+
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+
+    if wf.status != "audio_concluido":
+        raise HTTPException(400, f"Workflow ainda não concluído (status: {wf.status})")
+
+    # Montar seção do roteiro
+    blocos_roteiro = [
+        BlocoRoteiroPacote(
+            ordem=b.get("ordem", i),
+            tipo=b.get("tipo", f"bloco_{i}"),
+            conteudo=b.get("conteudo", ""),
+        )
+        for i, b in enumerate(wf.roteiro_snapshot.get("blocos", []))
+    ]
+
+    roteiro = RoteiroPacoteOut(
+        titulo=wf.roteiro_snapshot.get("titulo", ""),
+        duracao_total_segundos=wf.roteiro_snapshot.get("duracao_total_segundos", 0),
+        blocos=blocos_roteiro,
+    )
+
+    # Montar seção de áudio
+    blocos_audio = [
+        BlocoAudioPacoteOut(
+            id=bloco.id,
+            ordem=bloco.ordem,
+            tipo=bloco.tipo,
+            audio_url=f"/workflow/{workflow_id}/blocos/{bloco.id}/audio" if bloco.audio_path else None,
+            duracao_segundos=bloco.duracao_segundos,
+        )
+        for bloco in (wf.blocos or [])
+    ]
+
+    audio = AudioPacoteOut(
+        url=f"/workflow/{workflow_id}/audio",
+        arquivo_path=wf.audio_final_path,
+        duracao_segundos=wf.duracao_audio_segundos,
+        blocos=blocos_audio,
+    )
+
+    # Montar seção de transcrição
+    transcricao_data = await repo.obter_transcricao(workflow_id)
+    transcricao = None
+    if transcricao_data:
+        transcricao = TranscricaoPacoteOut(
+            texto_completo=transcricao_data.texto_completo,
+            palavras_timestamps=[
+                PalavraTimestampPacote(
+                    palavra=p.get("palavra", ""),
+                    inicio=p.get("inicio", 0.0),
+                    fim=p.get("fim", 0.0),
+                )
+                for p in (transcricao_data.palavras or [])
+            ],
+        )
+
+    # Montar metadata
+    metadata = MetadataPacoteOut(
+        criado_em=wf.criado_em,
+        atualizado_em=wf.atualizado_em,
+        tentativas=wf.tentativas,
+    )
+
+    return PacoteProducaoOut(
+        workflow_id=wf.id,
+        ideia_id=wf.ideia_id,
+        roteiro_id=wf.roteiro_id,
+        status=wf.status,
+        duracao_audio_segundos=wf.duracao_audio_segundos,
+        perfil_producao=wf.perfil_producao,
+        roteiro=roteiro,
+        audio=audio,
+        transcricao=transcricao,
+        metadata=metadata,
+    )

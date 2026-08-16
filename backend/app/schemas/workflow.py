@@ -71,3 +71,80 @@ class WorkflowDetailOut(WorkflowOut):
     @property
     def blocos_erro(self) -> int:
         return sum(1 for b in self.blocos if b.status == "erro")
+
+
+# ============================================================================
+# Pacote de Produção Visual (Fase 6)
+# ============================================================================
+
+class BlocoAudioPacoteOut(BaseModel):
+    """Bloco de áudio no pacote de produção."""
+    id: uuid.UUID
+    ordem: int
+    tipo: str
+    audio_url: str | None
+    duracao_segundos: float | None
+
+
+class AudioPacoteOut(BaseModel):
+    """Seção de áudio do pacote de produção."""
+    url: str
+    arquivo_path: str | None
+    duracao_segundos: float | None
+    blocos: list[BlocoAudioPacoteOut] = []
+
+
+class PalavraTimestampPacote(BaseModel):
+    """Timestamp de uma palavra na transcrição."""
+    palavra: str
+    inicio: float
+    fim: float
+
+
+class TranscricaoPacoteOut(BaseModel):
+    """Seção de transcrição do pacote de produção."""
+    texto_completo: str
+    palavras_timestamps: list[PalavraTimestampPacote] = []
+
+
+class BlocoRoteiroPacote(BaseModel):
+    """Bloco do roteiro no pacote de produção."""
+    ordem: int
+    tipo: str
+    conteudo: str
+
+
+class RoteiroPacoteOut(BaseModel):
+    """Seção de roteiro do pacote de produção."""
+    titulo: str
+    duracao_total_segundos: int
+    blocos: list[BlocoRoteiroPacote] = []
+
+
+class MetadataPacoteOut(BaseModel):
+    """Metadata do pacote de produção."""
+    criado_em: dt.datetime
+    atualizado_em: dt.datetime
+    tentativas: int
+
+
+class PacoteProducaoOut(BaseModel):
+    """
+    Payload consolidado para handoff ao serviço de produção visual.
+
+    Este endpoint agrega todos os dados necessários para o serviço visual
+    iniciar a produção do vídeo: roteiro, áudio, transcrição e metadata.
+    """
+    workflow_id: uuid.UUID
+    ideia_id: uuid.UUID
+    roteiro_id: uuid.UUID
+
+    status: str
+    duracao_audio_segundos: float | None
+
+    perfil_producao: str | None
+
+    roteiro: RoteiroPacoteOut
+    audio: AudioPacoteOut
+    transcricao: TranscricaoPacoteOut | None = None
+    metadata: MetadataPacoteOut
