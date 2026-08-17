@@ -30,8 +30,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@db:5432/orchestrator
+      DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
       REDIS_URL: redis://redis:6379/0
+      VOICE_API_URL: http://voice-orchestrator:9000
     ports:
       - "8011:8000"
     depends_on:
@@ -47,8 +48,9 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@db:5432/orchestrator
+      DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
       REDIS_URL: redis://redis:6379/0
+      VOICE_API_URL: http://voice-orchestrator:9000
     command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --concurrency=1 -l info
     depends_on:
       db:
