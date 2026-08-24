@@ -48,7 +48,9 @@ export default function WorkflowDetail() {
         <p><strong>Status:</strong> <span style={{ color: statusColors[workflow.status] }}>{workflow.status}</span></p>
         <p><strong>Perfil de Produção:</strong> {workflow.perfil_producao || "—"}</p>
         <p><strong>Tentativas:</strong> {workflow.tentativas}</p>
+        <p><strong>Fase de áudio:</strong> {workflow.audio_phase}</p>
         <p><strong>Duração Total:</strong> {workflow.duracao_audio_segundos ? `${workflow.duracao_audio_segundos.toFixed(1)}s` : "—"}</p>
+        <p><strong>Formato final:</strong> {workflow.audio_final_sample_rate ? `${workflow.audio_final_sample_rate} Hz / ${workflow.audio_final_channels} canal` : "—"}</p>
 
         {workflow.erro_mensagem && (
           <p style={{ color: "crimson" }}><strong>Erro:</strong> {workflow.erro_mensagem}</p>
@@ -68,7 +70,7 @@ export default function WorkflowDetail() {
         )}
 
         <div style={{ marginTop: "1rem" }}>
-          {workflow.status === "audio_concluido" && workflow.audio_final_path && (
+          {workflow.status === "audio_concluido" && workflow.audio_available && (
             <div>
               <p><strong>Áudio Final:</strong></p>
               <audio controls src={api.urlAudio(workflow.id)} style={{ width: "100%", maxWidth: "500px" }} />
@@ -98,6 +100,8 @@ export default function WorkflowDetail() {
               <th style={{ padding: "8px" }}>Tipo</th>
               <th style={{ padding: "8px" }}>Status</th>
               <th style={{ padding: "8px" }}>Duração</th>
+              <th style={{ padding: "8px" }}>Voz / geração</th>
+              <th style={{ padding: "8px" }}>Seed</th>
               <th style={{ padding: "8px" }}>Erro</th>
               <th style={{ padding: "8px" }}>Áudio</th>
             </tr>
@@ -115,11 +119,15 @@ export default function WorkflowDetail() {
                 <td style={{ padding: "8px" }}>
                   {bloco.duracao_segundos ? `${bloco.duracao_segundos.toFixed(1)}s` : "—"}
                 </td>
+                <td style={{ padding: "8px" }}>
+                  {bloco.voice_profile || "—"} / {bloco.generation_profile || "—"}
+                </td>
+                <td style={{ padding: "8px" }}>{bloco.resolved_seed ?? "—"}</td>
                 <td style={{ padding: "8px", color: "crimson" }}>
                   {bloco.erro_mensagem || "—"}
                 </td>
                 <td style={{ padding: "8px" }}>
-                  {bloco.status === "concluido" && bloco.audio_path && (
+                  {bloco.status === "concluido" && bloco.audio_sha256 && (
                     <audio controls src={api.urlAudioBloco(workflow.id, bloco.id)} style={{ height: 30 }} />
                   )}
                 </td>

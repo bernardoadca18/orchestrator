@@ -2,10 +2,11 @@
 App Celery do orchestrator.
 
 A fila "audio_producao" roda com --concurrency=1 propositalmente: o
-voice-workshop só processa uma narração por vez (lock de GPU), então
-paralelizar workers aqui só geraria erro 500 do lado do voice-workshop.
+O Voice Service possui sua própria fila GPU serial e durável. Mantemos uma
+task de workflow por vez para simplificar montagem, mastering e recuperação.
 Mesmo padrão já usado no pipeline de vídeo para filas de GPU.
 """
+
 from celery import Celery
 
 from app.core.config import settings
@@ -22,4 +23,5 @@ celery_app.conf.update(
     task_track_started=True,
     worker_prefetch_multiplier=1,
     task_acks_late=True,
+    broker_connection_retry_on_startup=True,
 )

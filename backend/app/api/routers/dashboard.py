@@ -1,6 +1,6 @@
 """Endpoints de dashboard: métricas de fila, performance e saúde do sistema."""
-import time
-from datetime import datetime, timedelta, timezone
+
+from datetime import UTC, datetime, timedelta
 
 import redis.asyncio as redis
 from fastapi import APIRouter
@@ -16,6 +16,7 @@ router = APIRouter()
 
 class DashboardStats(BaseModel):
     """Métricas de saúde do sistema de produção de áudio."""
+
     fila_tamanho: int
     workflows_ativos: int
     blocos_concluidos_24h: int
@@ -37,12 +38,14 @@ async def dashboard_stats():
         await r.close()
 
     async with AsyncSessionLocal() as session:
-        agora = datetime.now(timezone.utc)
+        agora = datetime.now(UTC)
         ultimas_24h = agora - timedelta(hours=24)
 
         # Workflows ativos (agendada ou gerando_audio)
-        stmt_ativos = select(func.count()).select_from(WorkflowExecucao).where(
-            WorkflowExecucao.status.in_(["agendada", "gerando_audio"])
+        stmt_ativos = (
+            select(func.count())
+            .select_from(WorkflowExecucao)
+            .where(WorkflowExecucao.status.in_(["agendada", "gerando_audio"]))
         )
         workflows_ativos = (await session.execute(stmt_ativos)).scalar() or 0
 

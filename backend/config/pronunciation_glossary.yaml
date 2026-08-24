@@ -1,0 +1,8 @@
+version: "1"
+global:
+  Aard: "Árd"
+  Kaer Morhen: "Kér Mórren"
+  Scoia'tael: "Scóiatael"
+  Yennefer: "Iênefer"
+  Dijkstra: "Dáikstra"
+projects: {}

@@ -27,7 +27,18 @@ export interface AudioBloco {
   ordem: number;
   tipo: string;
   status: string;
+  synthesis_text: string | null;
+  voice_profile: string | null;
+  generation_profile: string | null;
+  resolved_seed: number | null;
+  generation_attempt: number;
   duracao_segundos: number | null;
+  audio_sha256: string | null;
+  audio_sample_rate: number | null;
+  audio_channels: number | null;
+  audio_byte_size: number | null;
+  narration_start_seconds: number | null;
+  narration_end_seconds: number | null;
   erro_mensagem: string | null;
 }
 
@@ -37,8 +48,13 @@ export interface Workflow {
   roteiro_id: string;
   perfil_producao?: string | null;
   status: string;
-  audio_final_path: string | null;
+  audio_available: boolean;
   duracao_audio_segundos: number | null;
+  audio_phase: string;
+  audio_final_sha256: string | null;
+  audio_final_sample_rate: number | null;
+  audio_final_channels: number | null;
+  audio_final_byte_size: number | null;
   erro_mensagem: string | null;
   tentativas: number;
   criado_em: string;

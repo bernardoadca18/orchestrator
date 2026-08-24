@@ -12,3 +12,8 @@ redis==5.2.*
 python-json-logger==3.2.*
 faster-whisper==1.0.*
 requests==2.32.*
+numpy==1.26.*
+scipy==1.14.*
+soundfile==0.12.*
+pyloudnorm==0.1.1
+PyYAML==6.0.*

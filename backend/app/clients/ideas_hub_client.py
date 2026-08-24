@@ -1,4 +1,5 @@
 """Client HTTP para o serviço ideas-hub (somente leitura, sem acoplamento de DB)."""
+
 import uuid
 
 import httpx

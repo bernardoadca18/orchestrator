@@ -1,4 +1,5 @@
 """Camada de acesso a dados para WorkflowExecucao e AudioBloco."""
+
 import uuid
 from collections.abc import Sequence
 
@@ -38,7 +39,12 @@ class WorkflowRepository:
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
-    async def obter_por_id(self, workflow_id: uuid.UUID, com_blocos: bool = False, com_transcricao: bool = False) -> WorkflowExecucao | None:
+    async def obter_por_id(
+        self,
+        workflow_id: uuid.UUID,
+        com_blocos: bool = False,
+        com_transcricao: bool = False,
+    ) -> WorkflowExecucao | None:
         stmt = select(WorkflowExecucao).where(WorkflowExecucao.id == workflow_id)
         if com_blocos:
             stmt = stmt.options(selectinload(WorkflowExecucao.blocos))
@@ -72,22 +78,63 @@ class WorkflowRepository:
 
     # --- AudioBloco ----------------------------------------------------------
 
-    async def upsert_bloco(
-        self, workflow_id: uuid.UUID, ordem: int, tipo: str, texto: str
-    ) -> AudioBloco:
+    async def ensure_bloco(
+        self,
+        *,
+        workflow_id: uuid.UUID,
+        ordem: int,
+        tipo: str,
+        texto: str,
+        synthesis_text: str,
+        source_text_sha256: str,
+        synthesis_text_sha256: str,
+        synthesis_identity: str,
+        pronunciation_glossary_identity: str,
+        idempotency_key: str,
+        voice_profile: str,
+        voice_profile_identity: str,
+        generation_profile: str,
+        generation_profile_identity: str,
+    ) -> tuple[AudioBloco, bool]:
+        """Create/update a block and report whether its synthesis identity is unchanged."""
         stmt = select(AudioBloco).where(
             AudioBloco.workflow_execucao_id == workflow_id, AudioBloco.ordem == ordem
         )
         bloco = (await self.session.execute(stmt)).scalar_one_or_none()
+        unchanged = bloco is not None and bloco.synthesis_identity == synthesis_identity
         if bloco is None:
-            bloco = AudioBloco(workflow_execucao_id=workflow_id, ordem=ordem, tipo=tipo, texto=texto)
+            bloco = AudioBloco(workflow_execucao_id=workflow_id, ordem=ordem)
             self.session.add(bloco)
-        else:
+        elif not unchanged:
             bloco.status = "pendente"
             bloco.erro_mensagem = None
+            bloco.job_id_voz = None
+            bloco.resolved_seed = None
+            bloco.generation_attempt = 0
+            bloco.audio_path = None
+            bloco.duracao_segundos = None
+            bloco.audio_sha256 = None
+            bloco.audio_sample_rate = None
+            bloco.audio_channels = None
+            bloco.audio_byte_size = None
+            bloco.narration_start_seconds = None
+            bloco.narration_end_seconds = None
+        bloco.tipo = tipo
+        bloco.texto = texto
+        bloco.synthesis_text = synthesis_text
+        bloco.source_text_sha256 = source_text_sha256
+        bloco.synthesis_text_sha256 = synthesis_text_sha256
+        bloco.synthesis_identity = synthesis_identity
+        bloco.pronunciation_glossary_identity = pronunciation_glossary_identity
+        if bloco.idempotency_key is None or not unchanged:
+            bloco.idempotency_key = idempotency_key
+        bloco.voice_profile = voice_profile
+        bloco.voice_profile_identity = voice_profile_identity
+        bloco.generation_profile = generation_profile
+        bloco.generation_profile_identity = generation_profile_identity
         await self.session.commit()
         await self.session.refresh(bloco)
-        return bloco
+        return bloco, unchanged
 
     async def atualizar_bloco(self, bloco_id: uuid.UUID, **campos) -> None:
         stmt = select(AudioBloco).where(AudioBloco.id == bloco_id)
@@ -115,17 +162,36 @@ class WorkflowRepository:
         stmt = select(AudioBloco).where(AudioBloco.id == bloco_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    async def obter_bloco_por_ordem(self, workflow_id: uuid.UUID, ordem: int) -> AudioBloco | None:
+        stmt = select(AudioBloco).where(
+            AudioBloco.workflow_execucao_id == workflow_id,
+            AudioBloco.ordem == ordem,
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
     # --- TranscricaoAudio ----------------------------------------------------
 
-    async def criar_transcricao(
-        self, workflow_id: uuid.UUID, texto_completo: str, palavras_timestamps: list[dict]
+    async def upsert_transcricao(
+        self,
+        workflow_id: uuid.UUID,
+        *,
+        texto_completo: str,
+        palavras_timestamps: list[dict],
+        audio_sha256: str,
+        provider: str,
+        model: str,
+        language: str | None,
     ) -> TranscricaoAudio:
-        transcricao = TranscricaoAudio(
-            workflow_execucao_id=workflow_id,
-            texto_completo=texto_completo,
-            palavras_timestamps=palavras_timestamps,
-        )
-        self.session.add(transcricao)
+        transcricao = await self.obter_transcricao(workflow_id)
+        if transcricao is None:
+            transcricao = TranscricaoAudio(workflow_execucao_id=workflow_id)
+            self.session.add(transcricao)
+        transcricao.texto_completo = texto_completo
+        transcricao.palavras_timestamps = palavras_timestamps
+        transcricao.audio_sha256 = audio_sha256
+        transcricao.provider = provider
+        transcricao.model = model
+        transcricao.language = language
         await self.session.commit()
         await self.session.refresh(transcricao)
         return transcricao

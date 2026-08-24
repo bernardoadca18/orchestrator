@@ -1,13 +1,16 @@
 """Configuração de logging estruturado (JSON) com contexto de workflow."""
+
 import contextvars
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from pythonjsonlogger import jsonlogger
 
 # Context variable para propagar workflow_id em toda a requisição/tarefa
-workflow_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar("workflow_id", default=None)
+workflow_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "workflow_id", default=None
+)
 
 
 def set_workflow_id(workflow_id: str | None) -> None:
@@ -27,7 +30,7 @@ class WorkflowJsonFormatter(jsonlogger.JsonFormatter):
         super().add_fields(log_record, record, message_dict)
 
         # Adicionar timestamp ISO 8601
-        log_record["timestamp"] = datetime.now(timezone.utc).isoformat()
+        log_record["timestamp"] = datetime.now(UTC).isoformat()
 
         # Adicionar workflow_id do contexto se disponível
         wf_id = get_workflow_id()
@@ -54,6 +57,7 @@ def setup_logging(json_format: bool = True) -> None:
     # Criar handler para stdout
     handler = logging.StreamHandler(sys.stdout)
 
+    formatter: logging.Formatter
     if json_format:
         formatter = WorkflowJsonFormatter(
             "%(timestamp)s %(level)s %(name)s %(message)s",

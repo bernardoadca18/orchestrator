@@ -2,6 +2,7 @@
 Endpoints de workflow: listar roteiros aprovados disponíveis no ideas-hub,
 enfileirar geração de áudio, acompanhar progresso e baixar o resultado.
 """
+
 import uuid
 from typing import Annotated
 
@@ -10,11 +11,16 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
-from app.core.config import settings
 from app.core.database import get_db
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
-from app.schemas.workflow import RoteiroDisponivelOut, WorkflowCreateIn, WorkflowDetailOut, WorkflowOut, PacoteProducaoOut
+from app.schemas.workflow import (
+    PacoteProducaoOut,
+    RoteiroDisponivelOut,
+    WorkflowCreateIn,
+    WorkflowDetailOut,
+    WorkflowOut,
+)
 from app.tasks.audio_tasks import gerar_audio_workflow
 
 router = APIRouter()
@@ -48,7 +54,9 @@ async def criar_workflow(
 
     roteiro = await ideas_hub_client.obter_roteiro(payload.roteiro_id)
     if roteiro["status"] != "aprovado":
-        raise HTTPException(400, "Roteiro precisa estar aprovado no ideas-hub para entrar na fila de produção")
+        raise HTTPException(
+            400, "Roteiro precisa estar aprovado no ideas-hub para entrar na fila de produção"
+        )
 
     # Buscar perfil_producao da ideia associada
     ideia = await ideas_hub_client.obter_ideia(uuid.UUID(roteiro["ideia_id"]))
@@ -68,12 +76,17 @@ async def criar_workflow(
             # Race condition: dois requests simultâneos passaram pela checagem de aplicação
             existente = await repo.obter_ativo_por_roteiro(payload.roteiro_id)
             if existente:
-                raise HTTPException(409, f"Já existe um workflow ativo para este roteiro (id={existente.id})")
+                raise HTTPException(
+                    409,
+                    f"Já existe um workflow ativo para este roteiro (id={existente.id})",
+                ) from exc
         raise
 
 
 @router.get("", response_model=list[WorkflowOut])
-async def listar_workflows(session: Annotated[AsyncSession, Depends(get_db)], status: str | None = None):
+async def listar_workflows(
+    session: Annotated[AsyncSession, Depends(get_db)], status: str | None = None
+):
     repo = WorkflowRepository(session)
     return await repo.listar(status=status)
 
@@ -88,7 +101,9 @@ async def obter_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSession
 
 
 @router.patch("/{workflow_id}/retry", response_model=WorkflowOut)
-async def repetir_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+async def repetir_workflow(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
     repo = WorkflowRepository(session)
     wf = await repo.obter_por_id(workflow_id)
     if wf is None:
@@ -104,7 +119,9 @@ async def repetir_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSessi
 
 
 @router.patch("/{workflow_id}/cancelar", response_model=WorkflowOut)
-async def cancelar_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+async def cancelar_workflow(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
     from app.core.celery_app import celery_app
 
     repo = WorkflowRepository(session)
@@ -115,14 +132,18 @@ async def cancelar_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSess
     # Revogar task Celery se ainda estiver pendente
     if wf.status == "agendada":
         # Revoga todas as tasks pendentes para este workflow
-        celery_app.control.revoke(f"app.tasks.audio_tasks.gerar_audio_workflow-{workflow_id}", terminate=True)
+        celery_app.control.revoke(
+            f"app.tasks.audio_tasks.gerar_audio_workflow-{workflow_id}", terminate=True
+        )
 
     await repo.atualizar_status(wf.id, "cancelada")
     return await repo.obter_por_id(wf.id)
 
 
 @router.get("/{workflow_id}/audio")
-async def baixar_audio_final(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+async def baixar_audio_final(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
     repo = WorkflowRepository(session)
     wf = await repo.obter_por_id(workflow_id)
     if wf is None or not wf.audio_final_path:
@@ -131,7 +152,9 @@ async def baixar_audio_final(workflow_id: uuid.UUID, session: Annotated[AsyncSes
 
 
 @router.get("/{workflow_id}/transcricao", response_model=TranscricaoOut)
-async def obter_transcricao(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+async def obter_transcricao(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
     """Retorna a transcrição do áudio final do workflow com timestamps por palavra."""
     repo = WorkflowRepository(session)
     wf = await repo.obter_por_id(workflow_id)
@@ -146,7 +169,9 @@ async def obter_transcricao(workflow_id: uuid.UUID, session: Annotated[AsyncSess
 
 
 @router.get("/{workflow_id}/blocos/{bloco_id}/audio")
-async def baixar_audio_bloco(workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+async def baixar_audio_bloco(
+    workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
     """Retorna o áudio de um bloco específico."""
     repo = WorkflowRepository(session)
     bloco = await repo.obter_bloco_por_id(bloco_id)
@@ -157,11 +182,15 @@ async def baixar_audio_bloco(workflow_id: uuid.UUID, bloco_id: uuid.UUID, sessio
     if not bloco.audio_path:
         raise HTTPException(404, "Áudio do bloco ainda não disponível")
 
-    return FileResponse(bloco.audio_path, media_type="audio/wav", filename=f"bloco_{bloco.ordem:02d}.wav")
+    return FileResponse(
+        bloco.audio_path, media_type="audio/wav", filename=f"bloco_{bloco.ordem:02d}.wav"
+    )
 
 
 @router.get("/{workflow_id}/pacote-producao", response_model=PacoteProducaoOut)
-async def obter_pacote_producao(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+async def obter_pacote_producao(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
     """
     Retorna o pacote consolidado de produção visual.
 
@@ -183,6 +212,7 @@ async def obter_pacote_producao(workflow_id: uuid.UUID, session: Annotated[Async
         PalavraTimestampPacote,
         RoteiroPacoteOut,
         TranscricaoPacoteOut,
+        VisualQueryPacote,
     )
 
     repo = WorkflowRepository(session)
@@ -200,6 +230,9 @@ async def obter_pacote_producao(workflow_id: uuid.UUID, session: Annotated[Async
             ordem=b.get("ordem", i),
             tipo=b.get("tipo", f"bloco_{i}"),
             conteudo=b.get("conteudo", ""),
+            visual_queries=[
+                VisualQueryPacote.model_validate(item) for item in b.get("visual_queries", [])
+            ],
         )
         for i, b in enumerate(wf.roteiro_snapshot.get("blocos", []))
     ]
@@ -216,16 +249,33 @@ async def obter_pacote_producao(workflow_id: uuid.UUID, session: Annotated[Async
             id=bloco.id,
             ordem=bloco.ordem,
             tipo=bloco.tipo,
-            audio_url=f"/workflow/{workflow_id}/blocos/{bloco.id}/audio" if bloco.audio_path else None,
+            audio_url=f"/workflow/{workflow_id}/blocos/{bloco.id}/audio"
+            if bloco.audio_path
+            else None,
             duracao_segundos=bloco.duracao_segundos,
+            sha256=bloco.audio_sha256,
+            sample_rate=bloco.audio_sample_rate,
+            channels=bloco.audio_channels,
+            byte_size=bloco.audio_byte_size,
+            narration_start_seconds=bloco.narration_start_seconds,
+            narration_end_seconds=bloco.narration_end_seconds,
+            voice_profile=bloco.voice_profile,
+            generation_profile=bloco.generation_profile,
+            resolved_seed=bloco.resolved_seed,
+            generation_attempt=bloco.generation_attempt,
         )
         for bloco in (wf.blocos or [])
     ]
 
     audio = AudioPacoteOut(
         url=f"/workflow/{workflow_id}/audio",
-        arquivo_path=wf.audio_final_path,
         duracao_segundos=wf.duracao_audio_segundos,
+        sha256=wf.audio_final_sha256,
+        sample_rate=wf.audio_final_sample_rate,
+        channels=wf.audio_final_channels,
+        byte_size=wf.audio_final_byte_size,
+        mastering_config=wf.mastering_config,
+        mastering_metrics=wf.mastering_metrics,
         blocos=blocos_audio,
     )
 
@@ -241,8 +291,12 @@ async def obter_pacote_producao(workflow_id: uuid.UUID, session: Annotated[Async
                     inicio=p.get("inicio", 0.0),
                     fim=p.get("fim", 0.0),
                 )
-                for p in (transcricao_data.palavras or [])
+                for p in (transcricao_data.palavras_timestamps or [])
             ],
+            audio_sha256=transcricao_data.audio_sha256,
+            provider=transcricao_data.provider,
+            model=transcricao_data.model,
+            language=transcricao_data.language,
         )
 
     # Montar metadata

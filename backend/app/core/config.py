@@ -1,4 +1,8 @@
 """Configuração central do orchestrator, via variáveis de ambiente."""
+
+from pathlib import Path
+
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -6,26 +10,47 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
     # --- Banco de dados / fila ---------------------------------------------
-    database_url: str = "postgresql+asyncpg://orchestrator:orchestrator@localhost:5433/orchestrator"
+    database_url: str = "postgresql+asyncpg://orchestrator:orchestrator@localhost:5434/orchestrator"
     redis_url: str = "redis://localhost:6380/0"
 
     # --- Serviços integrados -------------------------------------------------
-    ideas_hub_api_url: str = "http://localhost:8010"
+    ideas_hub_api_url: str = "http://localhost:8000"
     ideas_hub_api_timeout: int = 30
 
-    voice_api_url: str = "http://localhost:9000"
-    voice_run_name: str = "minha_voz_v1"
-    voice_qualidade_padrao: str = "final"  # "draft" | "final"
-    voice_poll_interval_seconds: int = 5
-    voice_job_timeout_seconds: int = 900
+    voice_api_url: str = "http://localhost:8889"
+    voice_profile: str = "bernardo_v1"
+    voice_generation_profile: str = "narration_v1"
+    voice_language: str = "Portuguese"
+    voice_seed: int = 0
+    voice_poll_interval_seconds: float = 5.0
+    voice_job_timeout_seconds: float = 1800.0
+    voice_create_timeout_seconds: float = 30.0
+    voice_status_timeout_seconds: float = 15.0
+    voice_download_timeout_seconds: float = 120.0
+    voice_http_max_retries: int = 2
+    voice_http_backoff_seconds: float = 1.0
 
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
+    pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
 
     # --- Parâmetros calibráveis do fluxo -------------------------------------
     # Silêncio inserido entre blocos narrativos na concatenação final.
     silencio_entre_blocos_ms: int = 500
+    audio_final_sample_rate: int = 48_000
+    audio_target_lufs: float = -16.0
+    audio_max_true_peak_db: float = -1.0
+    audio_true_peak_tolerance_db: float = 0.02
+    audio_true_peak_safety_margin_db: float = 0.05
+    audio_min_acceptable_lufs: float = -18.0
+    audio_max_acceptable_lufs: float = -15.0
+    audio_duration_tolerance_seconds: float = 0.01
     workflow_max_tentativas: int = 3
+
+    transcription_model: str = "small"
+    transcription_device: str = "cpu"
+    transcription_compute_type: str = "int8"
+    transcription_language: str | None = None
 
     # --- API -----------------------------------------------------------------
     api_port: int = 8001
@@ -33,6 +58,25 @@ class Settings(BaseSettings):
 
     # --- Logging --------------------------------------------------------------
     json_logging: bool = True
+
+    @field_validator("voice_api_url", "ideas_hub_api_url")
+    @classmethod
+    def strip_service_url(cls, value: str) -> str:
+        return value.rstrip("/")
+
+    @field_validator("audio_final_sample_rate")
+    @classmethod
+    def validate_sample_rate(cls, value: int) -> int:
+        if value < 8_000 or value > 192_000:
+            raise ValueError("audio_final_sample_rate must be between 8000 and 192000")
+        return value
+
+    @field_validator("voice_seed")
+    @classmethod
+    def validate_seed(cls, value: int) -> int:
+        if value < 0 or value > 2**31 - 1:
+            raise ValueError("voice_seed must be between 0 and 2147483647")
+        return value
 
 
 settings = Settings()

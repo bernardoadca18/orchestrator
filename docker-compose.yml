@@ -32,7 +32,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
       REDIS_URL: redis://redis:6379/0
-      VOICE_API_URL: http://voice-orchestrator:9000
+      IDEAS_HUB_API_URL: ${IDEAS_HUB_API_URL_DOCKER:-http://host.docker.internal:8000}
+      VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
     ports:
       - "8011:8000"
     depends_on:
@@ -41,6 +42,8 @@ services:
     volumes:
       - ./backend:/app
       - ./data/audio:/data/audio
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   worker:
     build: ./backend
@@ -50,7 +53,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
       REDIS_URL: redis://redis:6379/0
-      VOICE_API_URL: http://voice-orchestrator:9000
+      IDEAS_HUB_API_URL: ${IDEAS_HUB_API_URL_DOCKER:-http://host.docker.internal:8000}
+      VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
     command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --concurrency=1 -l info
     depends_on:
       db:
@@ -60,6 +64,9 @@ services:
     volumes:
       - ./backend:/app
       - ./data/audio:/data/audio
+      - ./cache/huggingface:/root/.cache/huggingface
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   frontend:
     build: ./frontend

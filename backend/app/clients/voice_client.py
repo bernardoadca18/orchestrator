@@ -1,140 +1,269 @@
-"""
-Client HTTP para o voice-workshop (síntese + conversão de voz).
+"""Provider-neutral client for the canonical asynchronous Voice Service."""
 
-Ver API_REFERENCE.md do voice-workshop: POST /narrar retorna job_id
-imediatamente; status é consultado via polling em GET /jobs/{job_id};
-áudio é baixado uma única vez via GET /jobs/{job_id}/audio (o arquivo é
-removido do lado do voice-workshop após o download).
-"""
+from __future__ import annotations
+
 import asyncio
+import time
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import httpx
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from app.core.config import settings
+from app.core.config import Settings, settings
 
 
 class VoiceClientError(RuntimeError):
-    """Erro permanente - não deve ser retentado."""
-    pass
+    """Permanent request or contract failure."""
 
 
 class VoiceClientTransientError(RuntimeError):
-    """Erro transitório - pode ser retentado com backoff."""
-    pass
+    """Temporary network, backpressure or service failure."""
 
 
 class VoiceClientTimeoutError(VoiceClientTransientError):
-    pass
+    """The remote narration did not finish within its overall deadline."""
+
+
+class VoiceJobNotFoundError(VoiceClientError):
+    """A persisted remote job identifier no longer exists."""
+
+
+class VoiceJobFailedError(VoiceClientError):
+    """The remote job reached its explicit failed state."""
+
+
+class VoiceClientCancelledError(VoiceClientError):
+    """The local workflow was cancelled while polling."""
+
+
+class VoiceNarrationJob(BaseModel):
+    model_config = ConfigDict(extra="ignore", protected_namespaces=())
+
+    id: str
+    status: Literal["queued", "running", "completed", "failed"]
+    created: bool | None = None
+    voice_profile: str
+    generation_profile: str
+    resolved_seed: int
+    model_id: str
+    model_revision: str
+    result_duration_seconds: float | None = None
+    result_sample_rate: int | None = None
+    result_channels: int | None = None
+    result_subtype: str | None = None
+    result_byte_size: int | None = None
+    result_sha256: str | None = None
+    error_category: str | None = None
+    error_message: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VoiceProfileDescriptor(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    version: str
+    identity: str
+
+
+class GenerationProfileDescriptor(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    name: str
+    version: str
+    identity: str
+
+
+@dataclass(frozen=True)
+class VoiceProfileProvenance:
+    voice: VoiceProfileDescriptor
+    generation: GenerationProfileDescriptor
 
 
 class VoiceClient:
-    def __init__(self):
-        self._base_url = settings.voice_api_url
-        self._max_retries = 2
-        self._backoff_base_seconds = 2
+    """One task-scoped HTTP client, safe with Celery's per-task event loops."""
 
-    async def _retry_com_backoff(self, coro_func, *args, **kwargs):
-        """Executa coro_func com retry exponencial para erros transitórios."""
-        ultima_excecao = None
-        for tentativa in range(self._max_retries + 1):
+    def __init__(
+        self,
+        config: Settings = settings,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.settings = config
+        self._transport = transport
+        self._client: httpx.AsyncClient | None = None
+
+    async def __aenter__(self) -> VoiceClient:
+        self._client = httpx.AsyncClient(
+            base_url=self.settings.voice_api_url,
+            transport=self._transport,
+        )
+        return self
+
+    async def __aexit__(self, *_: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+    async def create_narration(
+        self,
+        *,
+        text: str,
+        voice_profile: str,
+        generation_profile: str,
+        idempotency_key: str,
+        language: str,
+        seed: int = 0,
+    ) -> VoiceNarrationJob:
+        if not idempotency_key:
+            raise VoiceClientError("Idempotency-Key is required for narration creation")
+        response = await self._request_with_retry(
+            "POST",
+            "/v1/narrations",
+            timeout=self.settings.voice_create_timeout_seconds,
+            headers={"Idempotency-Key": idempotency_key},
+            json={
+                "text": text,
+                "language": language,
+                "voice_profile": voice_profile,
+                "generation_profile": generation_profile,
+                "seed": seed,
+            },
+        )
+        return self._parse_job(response)
+
+    async def get_narration(self, job_id: str) -> VoiceNarrationJob:
+        response = await self._request_with_retry(
+            "GET",
+            f"/v1/narrations/{job_id}",
+            timeout=self.settings.voice_status_timeout_seconds,
+        )
+        return self._parse_job(response)
+
+    async def wait_for_narration(
+        self,
+        job_id: str,
+        *,
+        should_stop: Callable[[], Awaitable[bool]] | None = None,
+    ) -> VoiceNarrationJob:
+        deadline = time.monotonic() + self.settings.voice_job_timeout_seconds
+        while time.monotonic() < deadline:
+            if should_stop is not None and await should_stop():
+                raise VoiceClientCancelledError(
+                    "workflow was cancelled while narration was running"
+                )
+            job = await self.get_narration(job_id)
+            if job.status == "completed":
+                return job
+            if job.status == "failed":
+                category = job.error_category or "provider_failure"
+                message = job.error_message or "remote narration failed"
+                raise VoiceJobFailedError(f"{category}: {message}")
+            await asyncio.sleep(self.settings.voice_poll_interval_seconds)
+        raise VoiceClientTimeoutError(
+            f"narration job exceeded {self.settings.voice_job_timeout_seconds:g}s"
+        )
+
+    async def download_audio(self, job_id: str) -> bytes:
+        response = await self._request_with_retry(
+            "GET",
+            f"/v1/narrations/{job_id}/audio",
+            timeout=self.settings.voice_download_timeout_seconds,
+        )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"audio/wav", "audio/x-wav", "audio/wave"}:
+            raise VoiceClientError("Voice Service returned an unexpected audio content type")
+        if not response.content:
+            raise VoiceClientError("Voice Service returned an empty audio result")
+        return response.content
+
+    async def resolve_profiles(
+        self, voice_profile: str, generation_profile: str
+    ) -> VoiceProfileProvenance:
+        voices_response, generations_response = await asyncio.gather(
+            self._request_with_retry(
+                "GET",
+                "/v1/voices",
+                timeout=self.settings.voice_status_timeout_seconds,
+            ),
+            self._request_with_retry(
+                "GET",
+                "/v1/generation-profiles",
+                timeout=self.settings.voice_status_timeout_seconds,
+            ),
+        )
+        try:
+            voices = [
+                VoiceProfileDescriptor.model_validate(item) for item in voices_response.json()
+            ]
+            generations = [
+                GenerationProfileDescriptor.model_validate(item)
+                for item in generations_response.json()
+            ]
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise VoiceClientError("Voice Service profile response is malformed") from exc
+        voice = next((item for item in voices if item.name == voice_profile), None)
+        generation = next(
+            (item for item in generations if item.name == generation_profile),
+            None,
+        )
+        if voice is None or generation is None:
+            raise VoiceClientError("configured voice or generation profile is unavailable")
+        return VoiceProfileProvenance(voice, generation)
+
+    async def _request_with_retry(
+        self,
+        method: str,
+        path: str,
+        *,
+        timeout: float,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        last_error: VoiceClientTransientError | None = None
+        for attempt in range(self.settings.voice_http_max_retries + 1):
             try:
-                return await coro_func(*args, **kwargs)
+                response = await self._client_required().request(
+                    method,
+                    path,
+                    timeout=httpx.Timeout(timeout),
+                    **kwargs,
+                )
+                self._raise_for_status(response)
+                return response
+            except (httpx.TimeoutException, httpx.NetworkError) as exc:
+                last_error = VoiceClientTransientError("Voice Service network request failed")
+                last_error.__cause__ = exc
             except VoiceClientTransientError as exc:
-                ultima_excecao = exc
-                if tentativa < self._max_retries:
-                    backoff = self._backoff_base_seconds * (2 ** tentativa)
-                    await asyncio.sleep(backoff)
-                    continue
-                raise
-            except VoiceClientError:
-                # Erro permanente - não retenta
-                raise
-        raise ultima_excecao
+                last_error = exc
+            if attempt < self.settings.voice_http_max_retries:
+                await asyncio.sleep(self.settings.voice_http_backoff_seconds * (2**attempt))
+        assert last_error is not None
+        raise last_error
 
-    async def _iniciar_narracao_interno(self, texto: str, run_name: str | None, qualidade: str | None) -> str:
-        payload = {
-            "texto": texto,
-            "run_name": run_name or settings.voice_run_name,
-            "qualidade": qualidade or settings.voice_qualidade_padrao,
-        }
+    def _client_required(self) -> httpx.AsyncClient:
+        if self._client is None:
+            raise RuntimeError("VoiceClient must be used as an async context manager")
+        return self._client
+
+    @staticmethod
+    def _raise_for_status(response: httpx.Response) -> None:
+        status = response.status_code
+        if 200 <= status < 300:
+            return
+        if status == 404:
+            raise VoiceJobNotFoundError("remote narration job was not found")
+        if status in {400, 409, 422}:
+            raise VoiceClientError(f"Voice Service rejected the request with HTTP {status}")
+        if status == 429 or status >= 500:
+            raise VoiceClientTransientError(f"Voice Service returned HTTP {status}")
+        raise VoiceClientError(f"unexpected Voice Service response HTTP {status}")
+
+    @staticmethod
+    def _parse_job(response: httpx.Response) -> VoiceNarrationJob:
         try:
-            async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
-                resp = await client.post("/narrar", json=payload)
-                if resp.status_code == 400:
-                    raise VoiceClientError(f"Requisição rejeitada pelo voice-workshop: {resp.json().get('detail')}")
-                if resp.status_code >= 500:
-                    raise VoiceClientTransientError(f"Erro interno no voice-workshop: {resp.status_code}")
-                resp.raise_for_status()
-                return resp.json()["job_id"]
-        except httpx.TimeoutException as exc:
-            raise VoiceClientTransientError(f"Timeout ao conectar com voice-workshop: {exc}") from exc
-        except httpx.NetworkError as exc:
-            raise VoiceClientTransientError(f"Erro de rede ao conectar com voice-workshop: {exc}") from exc
-
-    async def iniciar_narracao(self, texto: str, run_name: str | None = None, qualidade: str | None = None) -> str:
-        return await self._retry_com_backoff(self._iniciar_narracao_interno, texto, run_name, qualidade)
-
-    async def _aguardar_conclusao_interno(self, job_id: str) -> dict:
-        """Faz polling até status=concluido ou status=erro, respeitando o timeout configurado."""
-        elapsed = 0
-        try:
-            async with httpx.AsyncClient(base_url=self._base_url, timeout=30) as client:
-                while elapsed < settings.voice_job_timeout_seconds:
-                    resp = await client.get(f"/jobs/{job_id}")
-                    if resp.status_code >= 500:
-                        raise VoiceClientTransientError(f"Erro interno no voice-workshop ao consultar job: {resp.status_code}")
-                    if resp.status_code == 404:
-                        raise VoiceClientError(f"Job {job_id} não encontrado no voice-workshop")
-                    resp.raise_for_status()
-                    dados = resp.json()
-                    if dados["status"] == "concluido":
-                        return dados
-                    if dados["status"] == "erro":
-                        raise VoiceClientError(dados.get("erro") or "Job de narração falhou sem detalhe")
-                    await asyncio.sleep(settings.voice_poll_interval_seconds)
-                    elapsed += settings.voice_poll_interval_seconds
-        except httpx.TimeoutException as exc:
-            raise VoiceClientTransientError(f"Timeout ao consultar job no voice-workshop: {exc}") from exc
-        except httpx.NetworkError as exc:
-            raise VoiceClientTransientError(f"Erro de rede ao consultar job no voice-workshop: {exc}") from exc
-        raise VoiceClientTimeoutError(f"Job {job_id} excedeu timeout de {settings.voice_job_timeout_seconds}s")
-
-    async def aguardar_conclusao(self, job_id: str) -> dict:
-        return await self._retry_com_backoff(self._aguardar_conclusao_interno, job_id)
-
-    async def _baixar_audio_interno(self, job_id: str) -> bytes:
-        try:
-            async with httpx.AsyncClient(base_url=self._base_url, timeout=60) as client:
-                resp = await client.get(f"/jobs/{job_id}/audio")
-                if resp.status_code >= 500:
-                    raise VoiceClientTransientError(f"Erro interno no voice-workshop ao baixar áudio: {resp.status_code}")
-                if resp.status_code == 404:
-                    raise VoiceClientError(f"Áudio do job {job_id} não encontrado")
-                resp.raise_for_status()
-                return resp.content
-        except httpx.TimeoutException as exc:
-            raise VoiceClientTransientError(f"Timeout ao baixar áudio do voice-workshop: {exc}") from exc
-        except httpx.NetworkError as exc:
-            raise VoiceClientTransientError(f"Erro de rede ao baixar áudio do voice-workshop: {exc}") from exc
-
-    async def baixar_audio(self, job_id: str) -> bytes:
-        return await self._retry_com_backoff(self._baixar_audio_interno, job_id)
-
-    async def consultar_job(self, job_id: str) -> dict:
-        """Consulta o status de um job no voice-workshop sem baixar o áudio."""
-        try:
-            async with httpx.AsyncClient(base_url=self._base_url, timeout=10) as client:
-                resp = await client.get(f"/jobs/{job_id}")
-                if resp.status_code == 404:
-                    return {"status": "nao_encontrado"}
-                if resp.status_code >= 500:
-                    raise VoiceClientTransientError(f"Erro interno no voice-workshop ao consultar job: {resp.status_code}")
-                resp.raise_for_status()
-                return resp.json()
-        except httpx.TimeoutException as exc:
-            raise VoiceClientTransientError(f"Timeout ao consultar job no voice-workshop: {exc}") from exc
-        except httpx.NetworkError as exc:
-            raise VoiceClientTransientError(f"Erro de rede ao consultar job no voice-workshop: {exc}") from exc
-
-
-voice_client = VoiceClient()
+            return VoiceNarrationJob.model_validate(response.json())
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise VoiceClientError("Voice Service narration response is malformed") from exc

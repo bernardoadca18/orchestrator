@@ -1,199 +1,82 @@
-# Contrato de Handoff para Produção Visual
+# Production package handoff
 
-Este documento define o contrato de saída do orchestrator para o serviço de produção visual.
-Quando o serviço visual existir, ele consumirá o endpoint consolidado `/workflow/{id}/pacote-producao`
-em vez de bater em múltiplos endpoints.
+`GET /workflow/{workflow_id}/pacote-producao` is available only after `audio_concluido`. It returns
+portable IDs, URLs and metadata—not host filesystem paths or audio bytes.
 
-## Endpoint Consolidado
+The package includes:
 
-```
-GET /workflow/{workflow_id}/pacote-producao
-```
+- workflow, Ideas Hub idea/script IDs and production profile;
+- immutable canonical script blocks;
+- every Ideas Hub `visual_queries` item, including provenance and preferred gameplay timestamps;
+- source block URLs plus checksum, format, resolved seed, voice/generation profile and deterministic
+  final-narration offsets;
+- final narration URL, SHA-256, size, duration, 48 kHz mono format and mastering metrics;
+- Faster-Whisper text/word timestamps, provider/model/language and the final audio SHA-256 it
+  describes.
 
-Retorna todo o contexto necessário para o serviço visual iniciar a produção do vídeo.
-
-## Payload de Resposta
+Example fragment:
 
 ```json
 {
-  "workflow_id": "550e8400-e29b-41d4-a716-446655440000",
-  "ideia_id": "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
-  "roteiro_id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
-
-  "status": "audio_concluido",
-  "duracao_audio_segundos": 125.4,
-
-  "perfil_producao": "youtube_shorts_v1",
-
   "roteiro": {
-    "titulo": "5 Dicas de Produtividade",
-    "duracao_total_segundos": 120,
-    "blocos": [
-      {
-        "ordem": 0,
-        "tipo": "intro",
-        "conteudo": "Olá! Hoje vamos ver 5 dicas..."
-      },
-      {
-        "ordem": 1,
-        "tipo": "desenvolvimento",
-        "conteudo": "A primeira dica é..."
-      },
-      {
-        "ordem": 2,
-        "tipo": "conclusao",
-        "conteudo": "E assim concluímos..."
-      }
-    ]
+    "blocos": [{
+      "ordem": 0,
+      "tipo": "intro",
+      "conteudo": "Geralt aprende o primeiro sinal.",
+      "visual_queries": [{
+        "id": "f40bb007-b32f-4dd8-9dd5-516568a49284",
+        "order": 1,
+        "intent": "gameplay_event",
+        "query": "Geralt learns Aard",
+        "narration_excerpt": "aprende o primeiro sinal",
+        "importance": "high",
+        "source_note_id": null,
+        "preferred_session_id": null,
+        "preferred_start_seconds": 120.0,
+        "preferred_end_seconds": 145.0,
+        "desired_duration_seconds": 12.0,
+        "notes": null
+      }]
+    }]
   },
-
   "audio": {
-    "url": "/workflow/550e8400-e29b-41d4-a716-446655440000/audio",
-    "arquivo_path": "/data/audio/550e8400-e29b-41d4-a716-446655440000/audio_final.wav",
-    "duracao_segundos": 125.4,
-    "blocos": [
-      {
-        "id": "bloco-uuid-1",
-        "ordem": 0,
-        "tipo": "intro",
-        "audio_url": "/workflow/550e8400.../blocos/bloco-uuid-1/audio",
-        "duracao_segundos": 15.2
-      }
-    ]
+    "url": "/workflow/<id>/audio",
+    "duracao_segundos": 42.5,
+    "sha256": "...",
+    "sample_rate": 48000,
+    "channels": 1,
+    "byte_size": 4080044,
+    "mastering_config": {"version": "transparent_gain_v1"},
+    "mastering_metrics": {"status": "pass"},
+    "blocos": [{
+      "narration_start_seconds": 0.0,
+      "narration_end_seconds": 18.24,
+      "resolved_seed": 123456789
+    }]
   },
-
   "transcricao": {
-    "texto_completo": "Olá! Hoje vamos ver 5 dicas de produtividade...",
-    "palavras_timestamps": [
-      {
-        "palavra": "Olá",
-        "inicio": 0.0,
-        "fim": 0.5
-      },
-      {
-        "palavra": "Hoje",
-        "inicio": 0.6,
-        "fim": 1.0
-      }
-    ]
-  },
-
-  "metadata": {
-    "criado_em": "2024-01-15T10:30:00Z",
-    "atualizado_em": "2024-01-15T10:35:00Z",
-    "tentativas": 0
+    "audio_sha256": "...",
+    "provider": "faster-whisper",
+    "model": "small",
+    "language": "pt",
+    "palavras_timestamps": []
   }
 }
 ```
 
-## Campos do Payload
+## Time semantics
 
-### Identificadores
+Do not conflate these domains:
 
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `workflow_id` | UUID | ID único do workflow no orchestrator |
-| `ideia_id` | UUID | ID da ideia no ideas-hub (rastreabilidade) |
-| `roteiro_id` | UUID | ID do roteiro no ideas-hub |
+1. `conteudo` is canonical editorial script text.
+2. `AudioBloco.synthesis_text` is a pronunciation-adjusted derivative (not copied into this compact
+   package today).
+3. `preferred_start_seconds`/`preferred_end_seconds` are gameplay/source-media time.
+4. `narration_start_seconds`/`narration_end_seconds` are deterministic block offsets in the final
+   narration WAV.
 
-### Status
+There are no VisualQuery-to-narration bindings yet. Stage 13 will produce Narration Timeline / Voice
+Alignment using the final audio identity, exact block ranges, canonical/synthesis text and word
+timestamps. Consumers must not fabricate narration timestamps from gameplay preferences.
 
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `status` | string | Status atual: `audio_concluido` quando pronto para produção visual |
-| `duracao_audio_segundos` | float | Duração total do áudio final em segundos |
-
-### Perfil de Produção
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `perfil_producao` | string \| null | Perfil de produção definido no ideas-hub (ex: "youtube_shorts_v1", "podcast_v1") |
-
-### Roteiro
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `roteiro.titulo` | string | Título do vídeo |
-| `roteiro.duracao_total_segundos` | int | Duração estimada original |
-| `roteiro.blocos` | array | Lista de blocos narrativos |
-| `blocos[].ordem` | int | Ordem sequencial (0-based) |
-| `blocos[].tipo` | string | Tipo do bloco: `intro`, `desenvolvimento`, `conclusao`, etc. |
-| `blocos[].conteudo` | string | Texto narrado no bloco |
-
-### Áudio
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `audio.url` | string | URL relativa para baixar o áudio final completo |
-| `audio.arquivo_path` | string | Caminho absoluto do arquivo no servidor (uso interno) |
-| `audio.duracao_segundos` | float | Duração real do áudio |
-| `audio.blocos` | array | Lista de áudios por bloco (para edição granular) |
-| `blocos[].audio_url` | string | URL relativa para baixar áudio do bloco |
-| `blocos[].duracao_segundos` | float | Duração do bloco |
-
-### Transcrição
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `transcricao.texto_completo` | string | Texto completo transcrito |
-| `transcricao.palavras_timestamps` | array | Timestamps por palavra (para sincronização visual) |
-| `palavras_timestamps[].palavra` | string | Palavra transcrita |
-| `palavras_timestamps[].inicio` | float | Tempo de início em segundos |
-| `palavras_timestamps[].fim` | float | Tempo de fim em segundos |
-
-### Metadata
-
-| Campo | Tipo | Descrição |
-|-------|------|-----------|
-| `metadata.criado_em` | datetime | Timestamp de criação do workflow |
-| `metadata.atualizado_em` | datetime | Timestamp da última atualização |
-| `metadata.tentativas` | int | Número de retentativas (0 se sucesso na primeira) |
-
-## Status HTTP
-
-| Código | Condição |
-|--------|----------|
-| 200 | Workflow concluído, pacote disponível |
-| 404 | Workflow não encontrado |
-| 400 | Workflow ainda não concluído (status diferente de `audio_concluido`) |
-
-## Exemplo de Uso pelo Serviço Visual
-
-```python
-# Python
-import httpx
-
-async def obter_pacote_producao(workflow_id: str) -> dict:
-    async with httpx.AsyncClient(base_url="http://orchestrator:8011") as client:
-        response = await client.get(f"/workflow/{workflow_id}/pacote-producao")
-        response.raise_for_status()
-        return response.json()
-
-# Uso
-pacote = await obter_pacote_producao("550e8400-e29b-41d4-a716-446655440000")
-
-# Baixar áudio final
-audio_url = f"http://orchestrator:8011{pacote['audio']['url']}"
-
-# Sincronizar legendas com timestamps
-for palavra in pacote['transcricao']['palavras_timestamps']:
-    print(f"{palavra['palavra']}: {palavra['inicio']:.2f}s - {palavra['fim']:.2f}s")
-```
-
-## Notas de Implementação
-
-1. **Consolidação**: O endpoint agrega dados de múltiplas tabelas (workflow, blocos, transcrição) em uma única resposta.
-
-2. **URLs relativas**: URLs de áudio são relativas à base do orchestrator para flexibilidade de deployment.
-
-3. **Timestamps de palavras**: Permitem sincronização frame-a-frame para legendas, highlights e cortes.
-
-4. **Perfil de produção**: Indica template/configuração visual a ser aplicado (definido no ideas-hub).
-
-5. **Idempotência**: Múltiplas chamadas ao endpoint retornam o mesmo resultado enquanto o workflow não for alterado.
-
-## Versionamento
-
-Este contrato pode evoluir. Mudanças breaking serão sinalizadas por versionamento de endpoint:
-- `/workflow/{id}/pacote-producao` (atual)
-- `/workflow/{id}/pacote-producao/v2` (futuro, se necessário)
+Old scripts without `visual_queries` serialize `visual_queries: []`.

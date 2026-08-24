@@ -29,7 +29,7 @@ async def health():
 
 @router.get("/health/dependencias", response_model=DependenciasHealth)
 async def health_dependencias():
-    """Healthcheck profundo checando ideas-hub, voice-workshop, Redis e Postgres."""
+    """Healthcheck profundo checando Ideas Hub, Voice Service, Redis e Postgres."""
     deps: dict[str, DependenciaStatus] = {}
     all_healthy = True
 
@@ -44,7 +44,7 @@ async def health_dependencias():
         deps["postgres"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["postgres"] = DependenciaStatus(status="error", error=str(exc))
+        deps["postgres"] = DependenciaStatus(status="error", error=type(exc).__name__)
 
     # Redis
     try:
@@ -56,7 +56,7 @@ async def health_dependencias():
         deps["redis"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["redis"] = DependenciaStatus(status="error", error=str(exc))
+        deps["redis"] = DependenciaStatus(status="error", error=type(exc).__name__)
 
     # Ideas Hub
     try:
@@ -68,19 +68,19 @@ async def health_dependencias():
         deps["ideas_hub"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["ideas_hub"] = DependenciaStatus(status="error", error=str(exc))
+        deps["ideas_hub"] = DependenciaStatus(status="error", error=type(exc).__name__)
 
-    # Voice Workshop
+    # Canonical Qwen Voice Service readiness
     try:
         start = time.monotonic()
         async with httpx.AsyncClient(base_url=settings.voice_api_url, timeout=5.0) as client:
-            resp = await client.get("/health")
+            resp = await client.get("/health/ready")
             resp.raise_for_status()
         latency = (time.monotonic() - start) * 1000
-        deps["voice_workshop"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["voice_service"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["voice_workshop"] = DependenciaStatus(status="error", error=str(exc))
+        deps["voice_service"] = DependenciaStatus(status="error", error=type(exc).__name__)
 
     return DependenciasHealth(
         status="ok" if all_healthy else "degraded",
