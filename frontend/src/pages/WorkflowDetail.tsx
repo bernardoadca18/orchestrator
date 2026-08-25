@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, Workflow, WorkflowRender } from "../api/client";
+import { api, ProductionQAReport, Workflow, WorkflowRender } from "../api/client";
 
 export default function WorkflowDetail() {
   const { id } = useParams<{ id: string }>();
@@ -8,6 +8,8 @@ export default function WorkflowDetail() {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [erro, setErro] = useState<string | null>(null);
   const [render, setRender] = useState<WorkflowRender | null>(null);
+  const [qa, setQa] = useState<ProductionQAReport | null>(null);
+  const [qaExecutando, setQaExecutando] = useState(false);
 
   async function carregar() {
     if (!id) return;
@@ -16,6 +18,8 @@ export default function WorkflowDetail() {
       setWorkflow(wf);
       const currentRender = await api.obterRender(id).catch(() => null);
       setRender(currentRender);
+      const currentQA = await api.obterQAReport(id).catch(() => null);
+      setQa(currentQA);
       setErro(null);
     } catch (e) {
       setErro((e as Error).message);
@@ -30,6 +34,20 @@ export default function WorkflowDetail() {
 
   if (erro) return <div style={{ color: "crimson", padding: "2rem" }}>Erro: {erro}</div>;
   if (!workflow) return <div style={{ padding: "2rem" }}>Carregando...</div>;
+
+  async function executarQA(mode: "standard" | "deep", force: boolean) {
+    if (!id) return;
+    setQaExecutando(true);
+    try {
+      const result = await api.executarQA(id, mode, force);
+      setQa(result.report);
+      setErro(null);
+    } catch (e) {
+      setErro((e as Error).message);
+    } finally {
+      setQaExecutando(false);
+    }
+  }
 
   const statusColors: Record<string, string> = {
     agendada: "#6c757d",
@@ -72,6 +90,49 @@ export default function WorkflowDetail() {
             {render.status === "completed" && (
               <a href={api.urlVideo(workflow.id)} download>Baixar vídeo final</a>
             )}
+          </div>
+        )}
+
+        {workflow.production_status === "completed" && (
+          <div style={{ marginTop: "1rem", borderTop: "1px solid #ddd", paddingTop: "1rem" }}>
+            <h3>QA de produção</h3>
+            <p><strong>Status:</strong> {qa?.status || "Ainda não executado"}</p>
+            <p>
+              <strong>Release:</strong>{" "}
+              {!qa
+                ? "Não avaliado"
+                : qa.publication_ready
+                  ? qa.status === "passed_with_warnings"
+                    ? "Pronto para publicação — com avisos"
+                    : "Pronto para publicação"
+                  : qa.status === "blocked"
+                    ? "QA bloqueado"
+                    : "Não aprovado pelo QA"}
+            </p>
+            {qa && (
+              <p>
+                <strong>Checks:</strong> {qa.passed_count} aprovados, {qa.warning_count} avisos,
+                {" "}{qa.failed_count} falhas, {qa.blocked_count} bloqueados
+              </p>
+            )}
+            {qa && qa.checks.some((item) => item.result === "warning" || item.result === "failed" || item.result === "blocked") && (
+              <details>
+                <summary>Ver avisos e falhas</summary>
+                <ul>
+                  {qa.checks
+                    .filter((item) => ["warning", "failed", "blocked"].includes(item.result))
+                    .map((item) => <li key={item.code}><code>{item.code}</code>: {item.message}</li>)}
+                </ul>
+              </details>
+            )}
+            <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
+              <button disabled={qaExecutando} onClick={() => executarQA("standard", Boolean(qa))}>
+                {qa ? "Reexecutar QA" : "Executar QA"}
+              </button>
+              <button disabled={qaExecutando} onClick={() => executarQA("deep", true)}>
+                Executar QA profundo
+              </button>
+            </div>
           </div>
         )}
 

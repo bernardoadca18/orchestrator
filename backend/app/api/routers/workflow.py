@@ -4,7 +4,7 @@ enfileirar geração de áudio, acompanhar progresso e baixar o resultado.
 """
 
 import uuid
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
@@ -20,6 +20,7 @@ from app.clients.video_composer_client import (
 from app.core.database import get_db
 from app.models.workflow import (
     NarrationAlignment,
+    ProductionQAReport,
     ProductionTimeline,
     VisualPlan,
     WorkflowExecucao,
@@ -35,6 +36,9 @@ from app.schemas.workflow import (
     NarrationTrackOut,
     PacoteProducaoOut,
     PrimaryVisualTrackOut,
+    ProductionQACheckOut,
+    ProductionQAEnsureOut,
+    ProductionQAReportOut,
     ProductionTimelineEnsureOut,
     ProductionTimelineOut,
     ProductionTimelineTracksOut,
@@ -60,6 +64,11 @@ from app.services.narration_alignment_service import (
     NarrationAlignmentService,
 )
 from app.services.production_orchestration_service import ProductionOrchestrationService
+from app.services.production_qa_service import (
+    ProductionQANotFoundError,
+    ProductionQAPreconditionError,
+    ProductionQAService,
+)
 from app.services.production_timeline_service import (
     ProductionTimelineNotFoundError,
     ProductionTimelineService,
@@ -122,6 +131,40 @@ def _render_response(render: WorkflowRender) -> WorkflowRenderOut:
         created_at=render.created_at,
         updated_at=render.updated_at,
         video_url=f"/workflow/{render.workflow_execucao_id}/video" if output is not None else None,
+    )
+
+
+def _qa_response(report: ProductionQAReport) -> ProductionQAReportOut:
+    return ProductionQAReportOut(
+        id=report.id,
+        workflow_id=report.workflow_execucao_id,
+        workflow_render_id=report.workflow_render_id,
+        production_timeline_id=report.production_timeline_id,
+        visual_plan_id=report.visual_plan_id,
+        narration_alignment_id=report.narration_alignment_id,
+        final_audio_sha256=report.final_audio_sha256,
+        render_output_sha256=report.render_output_sha256,
+        qa_mode=report.qa_mode,
+        policy_name=report.policy_name,
+        policy_version=report.policy_version,
+        policy_identity=report.policy_identity,
+        strategy_version=report.strategy_version,
+        request_fingerprint=report.request_fingerprint,
+        status=report.status,
+        publication_ready=report.publication_ready,
+        check_count=report.check_count,
+        passed_count=report.passed_count,
+        warning_count=report.warning_count,
+        failed_count=report.failed_count,
+        blocked_count=report.blocked_count,
+        checks=[ProductionQACheckOut.model_validate(item) for item in report.checks],
+        metrics=report.metrics,
+        error_category=report.error_category,
+        error_message=report.error_message,
+        created_at=report.created_at,
+        started_at=report.started_at,
+        completed_at=report.completed_at,
+        updated_at=report.updated_at,
     )
 
 
@@ -646,6 +689,41 @@ async def obter_render(workflow_id: uuid.UUID, session: Annotated[AsyncSession, 
     return _render_response(render)
 
 
+@router.get("/{workflow_id}/qa-report", response_model=ProductionQAReportOut)
+async def obter_qa_report(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    mode: Literal["standard", "deep"] = "standard",
+):
+    """Read the exact current QA projection; never executes checks or production stages."""
+    try:
+        report = await ProductionQAService(session).current(workflow_id, mode)
+    except ProductionQANotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ProductionQAPreconditionError as exc:
+        raise HTTPException(404, "Relatório QA compatível ainda não disponível") from exc
+    if report is None:
+        raise HTTPException(404, "Relatório QA compatível ainda não disponível")
+    return _qa_response(report)
+
+
+@router.post("/{workflow_id}/qa-report", response_model=ProductionQAEnsureOut)
+async def executar_qa_report(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    mode: Literal["standard", "deep"] = "standard",
+    force: bool = False,
+):
+    """Execute/reuse QA only; upstream production artifacts remain immutable."""
+    try:
+        result = await ProductionQAService(session).ensure(workflow_id, mode=mode, force=force)
+    except ProductionQANotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except ProductionQAPreconditionError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return ProductionQAEnsureOut(created=result.created, report=_qa_response(result.report))
+
+
 @router.get("/{workflow_id}/video")
 async def baixar_video_final(
     workflow_id: uuid.UUID,
@@ -851,6 +929,11 @@ async def obter_pacote_producao(
     )
     render_data = await ProductionOrchestrationService(session).current_render(workflow_id)
     render = _render_response(render_data) if render_data else None
+    try:
+        qa_report_data = await ProductionQAService(session).current(workflow_id, "standard")
+    except ProductionQAPreconditionError:
+        qa_report_data = None
+    qa_report = _qa_response(qa_report_data) if qa_report_data else None
 
     # Montar metadata
     metadata = MetadataPacoteOut(
@@ -873,5 +956,6 @@ async def obter_pacote_producao(
         visual_plan=visual_plan,
         production_timeline=production_timeline,
         render=render,
+        qa_report=qa_report,
         metadata=metadata,
     )

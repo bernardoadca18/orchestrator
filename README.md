@@ -185,6 +185,43 @@ Endpoints:
 Final audio remains available whenever its persisted artifact identity exists, regardless of a
 downstream block, failure or cancellation.
 
+## Stage 18 Automated Production QA
+
+Stage 18 is a deterministic release gate over the frozen production chain. It persists a
+fingerprinted `ProductionQAReport`; it never regenerates voice, runs Whisper or Media Search,
+rebuilds alignment/planning/timeline, creates a render, remasters audio or repairs an upstream
+artifact. `production_status=completed` means an MP4 exists. `publication_ready=true` means the
+current compatible **standard** QA report passed (warnings are release-safe in v1). These states are
+deliberately independent.
+
+The automatic `standard` mode runs after Stage 17 completes and on worker recovery when a completed
+workflow has no compatible report or left one `pending`/`running`. It validates artifact identities, final narration format and
+persisted mastering measurements, transcription/alignment/visual-query requirements, a gap-free
+full-coverage timeline, current render/profile/duration metadata and Composer delivery. Delivery is
+bounded to `Range: bytes=0-0`; standard QA never downloads the whole MP4. Temporary Composer
+outages yield `blocked`, use bounded Celery retries and never demote the production.
+
+The manual `deep` mode adds a streamed full-content SHA-256 and independent `ffprobe`. It writes to
+a generated temporary MP4, never buffers the full video in RAM, enforces
+`PRODUCTION_QA_DEEP_MAX_VIDEO_BYTES`, and removes the file in `finally`. Deep reports have a
+separate fingerprint and do not replace the standard release gate.
+
+Policies are versioned. `game_analysis` resolves to `game_analysis_qa_v1`, requiring the complete
+transcription/alignment/visual chain and all required VisualQueries. Null, unknown and the current
+faceless Ideas Hub profiles resolve to `generic_v1`, which checks technical integrity without
+guessing game/editorial rules. The Composer profile contract is read from
+`GET /v1/render-profiles`; current `youtube_1080p30_v1` means 1920×1080 at 30 fps with H.264/AAC and
+48 kHz audio.
+
+Endpoints:
+
+- `GET /workflow/{id}/qa-report?mode=standard|deep` is side-effect free;
+- `POST /workflow/{id}/qa-report?mode=standard|deep&force=false` runs/reuses QA only;
+- `GET /workflow/{id}/pacote-producao` includes the compatible standard `qa_report` separately.
+
+`force=true` reruns only QA checks over the same upstream identities. A changed audio, alignment,
+plan, timeline, render, policy, strategy or mode creates another report identity.
+
 ## Final identity and transcription
 
 Workflow state exposes duration, SHA-256, byte size, 48 kHz sample rate, mono channels, mastering
@@ -208,6 +245,7 @@ Copy `.env.example`. Important settings include:
   fallback and deterministic gap-fill/coalescing policy.
 - `VIDEO_COMPOSER_API_URL`, bounded HTTP retry/backoff, one-shot poll interval, overall render
   timeout and the `youtube_1080p30_v1` final profile.
+- QA strategy version, bounded Celery dependency retries and the 10 GiB default deep-stream guard.
 
 No raw Qwen sampling controls are part of this service's production configuration.
 
@@ -260,6 +298,14 @@ cd backend
 It resumes the production if allowed, observes the durable workflow, downloads the final stream
 without buffering it in memory, and reports `STAGE17_ORCHESTRATION_RENDER_SMOKE`.
 
+Stage 18 standard/deep smoke uses an existing completed workflow and reports exact counters:
+
+```bash
+cd backend
+.venv/bin/python scripts/smoke_stage18_qa.py --workflow-id <uuid>
+.venv/bin/python scripts/smoke_stage18_qa.py --workflow-id <uuid> --mode deep --force
+```
+
 ## Production handoff
 
 `GET /workflow/{id}/pacote-producao` returns script blocks, structured `visual_queries`, logical
@@ -269,7 +315,8 @@ derived section containing gameplay source windows and alternatives; the origina
 not rewritten. `production_timeline` remains a separate derived section containing the narration
 track, exact gameplay trims, primary-track placements, explicit gaps and renderer-facing metrics.
 `render` is a separate top-level section containing only the current Composer mirror and validated
-output metadata; it is never embedded into the timeline.
+output metadata; it is never embedded into the timeline. `qa_report` is another separate section
+and exposes checks/metrics but no MP4 bytes, host paths, stack traces or temporary deep-QA path.
 Older scripts without `visual_queries` remain valid and return an empty list. See
 `backend/docs/HANDOFF_VISUAL_PRODUCTION.md`.
 
@@ -283,5 +330,13 @@ supports one narration track and one primary gameplay track. Stage 16 owns sourc
 frame quantization, Remotion and output validation; Stage 17 does not copy the MP4. Remote
 cancellation is unavailable, so local cancellation merely prevents stale polling from promoting a
 later result. The observed local Media Indexer dataset still lacks a genuinely usable completed
-searchable gameplay chain, so full real gameplay visual-quality validation remains external
-validation debt. Stage 18 Automated QA / Generalization is deliberately not implemented.
+searchable gameplay chain, so full real gameplay editorial-quality validation remains external
+validation debt. Automated QA proves technical/artifact consistency and structural coverage, not
+that selected footage is editorially excellent. No automatic publishing or repair workflow exists.
+The current frontend dependency audit still reports 3 moderate and 1 high advisory; the available
+automated fixes require breaking Vite/React Router upgrades, so that inherited debt was documented
+rather than changed inside the frozen production stage. The Celery container also currently runs as
+root and emits Celery's security warning; hardening its runtime UID requires a separate volume/
+permissions review.
+See `backend/docs/NEOVIDS_PRODUCTION_ARCHITECTURE.md`, `backend/docs/ROADMAP_STATUS.md` and
+`backend/docs/MANUAL_QUALITY_CHECKLIST.md`.

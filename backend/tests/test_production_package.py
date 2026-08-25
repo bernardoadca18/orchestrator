@@ -421,6 +421,43 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
     )
     production_orchestration_service = MagicMock()
     production_orchestration_service.current_render = AsyncMock(return_value=render)
+    qa_report = (
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            workflow_execucao_id=workflow_id,
+            workflow_render_id=render.id,
+            production_timeline_id=production_timeline.id,
+            visual_plan_id=visual_plan.id,
+            narration_alignment_id=alignment.id,
+            final_audio_sha256="f" * 64,
+            render_output_sha256="4" * 64,
+            qa_mode="standard",
+            policy_name="game_analysis_qa_v1",
+            policy_version="1",
+            policy_identity="5" * 64,
+            strategy_version="production_qa_v1",
+            request_fingerprint="6" * 64,
+            status="passed",
+            publication_ready=True,
+            check_count=1,
+            passed_count=1,
+            warning_count=0,
+            failed_count=0,
+            blocked_count=0,
+            checks=[],
+            metrics={},
+            error_category=None,
+            error_message=None,
+            created_at=workflow.criado_em,
+            started_at=workflow.criado_em,
+            completed_at=workflow.atualizado_em,
+            updated_at=workflow.atualizado_em,
+        )
+        if with_timeline and with_visual_plan and with_alignment
+        else None
+    )
+    production_qa_service = MagicMock()
+    production_qa_service.current = AsyncMock(return_value=qa_report)
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         patch(
@@ -438,6 +475,10 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         patch(
             "app.api.routers.workflow.ProductionOrchestrationService",
             return_value=production_orchestration_service,
+        ),
+        patch(
+            "app.api.routers.workflow.ProductionQAService",
+            return_value=production_qa_service,
         ),
     ):
         package = await obter_pacote_producao(workflow_id, MagicMock())
@@ -467,6 +508,11 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         assert queries[0].preferred_start_seconds == 12.5
     else:
         assert package.visual_plan is None
+    if qa_report:
+        assert package.qa_report is not None
+        assert package.qa_report.publication_ready is True
+    else:
+        assert package.qa_report is None
     if with_timeline:
         assert package.production_timeline is not None
         assert package.render is not None

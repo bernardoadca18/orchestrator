@@ -202,3 +202,31 @@ async def test_video_stream_forwards_range_without_buffering() -> None:
         assert response.status_code == 206
         assert b"".join([part async for part in response.aiter_bytes()]) == b"1234"
         await response.aclose()
+
+
+@pytest.mark.asyncio
+async def test_render_profiles_contract_is_typed() -> None:
+    payload = {
+        "items": [
+            {
+                "name": "youtube_1080p30_v1",
+                "version": "render_profile_v1",
+                "identity": "a" * 64,
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "container": "mp4",
+                "video_codec": "h264",
+                "audio_codec": "aac",
+                "audio_sample_rate": 48000,
+                "fit_mode": "contain",
+                "final_gap_policy": "reject",
+                "preview_gap_policy": "diagnostic_black",
+            }
+        ]
+    }
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json=payload))
+    async with VideoComposerClient(_settings(), transport=transport) as client:
+        profiles = await client.get_render_profiles()
+    assert profiles[0].width == 1920
+    assert profiles[0].audio_sample_rate == 48_000

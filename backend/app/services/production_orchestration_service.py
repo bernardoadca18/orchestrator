@@ -38,6 +38,7 @@ GAP_MESSAGE = "Final Video Composer profile requires a gap-free ProductionTimeli
 class OrchestrationResult:
     terminal: bool
     poll_render_id: uuid.UUID | None = None
+    qa_workflow_id: uuid.UUID | None = None
 
 
 class ProductionOrchestrationService:
@@ -360,7 +361,7 @@ class ProductionOrchestrationService:
         await self.workflows.atualizar_producao(
             workflow.id, status="completed", phase="completed", complete=True
         )
-        return OrchestrationResult(terminal=True)
+        return OrchestrationResult(terminal=True, qa_workflow_id=workflow.id)
 
     @staticmethod
     def _remote_identity_matches(render: WorkflowRender, remote: ComposerRender) -> bool:

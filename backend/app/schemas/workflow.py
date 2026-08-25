@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -528,6 +529,53 @@ class WorkflowRenderOut(BaseModel):
     video_url: str | None
 
 
+class ProductionQACheckOut(BaseModel):
+    code: str
+    category: str
+    result: str
+    message: str
+    expected: Any | None = None
+    actual: Any | None = None
+    details: dict | None = None
+
+
+class ProductionQAReportOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    workflow_render_id: uuid.UUID
+    production_timeline_id: uuid.UUID
+    visual_plan_id: uuid.UUID | None
+    narration_alignment_id: uuid.UUID | None
+    final_audio_sha256: str
+    render_output_sha256: str
+    qa_mode: str
+    policy_name: str
+    policy_version: str
+    policy_identity: str
+    strategy_version: str
+    request_fingerprint: str
+    status: str
+    publication_ready: bool
+    check_count: int
+    passed_count: int
+    warning_count: int
+    failed_count: int
+    blocked_count: int
+    checks: list[ProductionQACheckOut] = Field(default_factory=list)
+    metrics: dict | None
+    error_category: str | None
+    error_message: str | None
+    created_at: dt.datetime
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    updated_at: dt.datetime
+
+
+class ProductionQAEnsureOut(BaseModel):
+    created: bool
+    report: ProductionQAReportOut
+
+
 class PacoteProducaoOut(BaseModel):
     """
     Payload consolidado para handoff ao serviço de produção visual.
@@ -552,4 +600,5 @@ class PacoteProducaoOut(BaseModel):
     visual_plan: VisualPlanOut | None = None
     production_timeline: ProductionTimelineOut | None = None
     render: WorkflowRenderOut | None = None
+    qa_report: ProductionQAReportOut | None = None
     metadata: MetadataPacoteOut

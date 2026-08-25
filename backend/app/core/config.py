@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     video_composer_render_timeout_seconds: float = 3600.0
     video_composer_render_profile: str = "youtube_1080p30_v1"
 
+    production_qa_strategy_version: str = "production_qa_v1"
+    production_qa_deep_max_video_bytes: int = 10 * 1024 * 1024 * 1024
+    production_qa_task_max_retries: int = 2
+    production_qa_task_retry_seconds: float = 5.0
+
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
     pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
@@ -142,6 +147,7 @@ class Settings(BaseSettings):
         "video_composer_http_backoff_seconds",
         "video_composer_poll_interval_seconds",
         "video_composer_render_timeout_seconds",
+        "production_qa_task_retry_seconds",
     )
     @classmethod
     def validate_positive_seconds(cls, value: float) -> float:
@@ -172,11 +178,19 @@ class Settings(BaseSettings):
         "visual_director_max_alternatives",
         "media_indexer_http_max_retries",
         "video_composer_http_max_retries",
+        "production_qa_task_max_retries",
     )
     @classmethod
     def validate_non_negative(cls, value: int) -> int:
         if value < 0:
             raise ValueError("retry/alternative limits must be non-negative")
+        return value
+
+    @field_validator("production_qa_deep_max_video_bytes")
+    @classmethod
+    def validate_qa_deep_size(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("production QA deep size limit must be positive")
         return value
 
     @field_validator("visual_director_min_semantic_score")

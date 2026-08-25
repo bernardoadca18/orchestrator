@@ -121,6 +121,14 @@ class WorkflowRepository:
         )
         return (await self.session.execute(statement)).scalars().all()
 
+    async def completed_productions(self) -> Sequence[WorkflowExecucao]:
+        statement = (
+            select(WorkflowExecucao)
+            .where(WorkflowExecucao.production_status == "completed")
+            .order_by(WorkflowExecucao.criado_em)
+        )
+        return (await self.session.execute(statement)).scalars().all()
+
     # --- AudioBloco ----------------------------------------------------------
 
     async def ensure_bloco(

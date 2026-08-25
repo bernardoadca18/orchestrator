@@ -110,6 +110,53 @@ export interface WorkflowRender {
   video_url: string | null;
 }
 
+export interface ProductionQACheck {
+  code: string;
+  category: string;
+  result: "passed" | "warning" | "failed" | "blocked" | "skipped";
+  message: string;
+  expected: unknown | null;
+  actual: unknown | null;
+  details: Record<string, unknown> | null;
+}
+
+export interface ProductionQAReport {
+  id: string;
+  workflow_id: string;
+  workflow_render_id: string;
+  production_timeline_id: string;
+  visual_plan_id: string | null;
+  narration_alignment_id: string | null;
+  final_audio_sha256: string;
+  render_output_sha256: string;
+  qa_mode: "standard" | "deep";
+  policy_name: string;
+  policy_version: string;
+  policy_identity: string;
+  strategy_version: string;
+  request_fingerprint: string;
+  status: string;
+  publication_ready: boolean;
+  check_count: number;
+  passed_count: number;
+  warning_count: number;
+  failed_count: number;
+  blocked_count: number;
+  checks: ProductionQACheck[];
+  metrics: Record<string, unknown> | null;
+  error_category: string | null;
+  error_message: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+}
+
+export interface ProductionQAEnsure {
+  created: boolean;
+  report: ProductionQAReport;
+}
+
 export interface DashboardStats {
   fila_tamanho: number;
   workflows_ativos: number;
@@ -132,6 +179,17 @@ export const api = {
   cancelarWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/cancelar`, { method: "PATCH" }),
   retomarProducao: (id: string) => request<Workflow>(`/workflow/${id}/resume-production`, { method: "POST" }),
   obterRender: (id: string) => request<WorkflowRender>(`/workflow/${id}/render`),
+  obterQAReport: (id: string, mode: "standard" | "deep" = "standard") =>
+    request<ProductionQAReport>(`/workflow/${id}/qa-report?mode=${mode}`),
+  executarQA: (
+    id: string,
+    mode: "standard" | "deep" = "standard",
+    force = false,
+  ) =>
+    request<ProductionQAEnsure>(
+      `/workflow/${id}/qa-report?mode=${mode}&force=${force}`,
+      { method: "POST" },
+    ),
   obterDashboardStats: () => request<DashboardStats>("/dashboard/stats"),
   urlAudio: (id: string) => `${BASE_URL}/workflow/${id}/audio`,
   urlAudioBloco: (workflowId: string, blocoId: string) => `${BASE_URL}/workflow/${workflowId}/blocos/${blocoId}/audio`,

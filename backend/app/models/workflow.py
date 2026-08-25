@@ -21,6 +21,7 @@ import uuid
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
@@ -114,6 +115,9 @@ class WorkflowExecucao(Base):
         back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
     )
     renders: Mapped[list["WorkflowRender"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
+    )
+    qa_reports: Mapped[list["ProductionQAReport"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
     )
 
@@ -723,6 +727,89 @@ class WorkflowRender(Base):
     )
 
     workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="renders")
+    production_timeline: Mapped["ProductionTimeline"] = relationship()
+
+
+class ProductionQAReport(Base):
+    """Versioned Stage 18 release-gate evidence over immutable production artifacts."""
+
+    __tablename__ = "production_qa_reports"
+    __table_args__ = (
+        UniqueConstraint("request_fingerprint", name="uq_production_qa_request_fingerprint"),
+        CheckConstraint("qa_mode IN ('standard', 'deep')", name="ck_production_qa_mode"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'passed', 'passed_with_warnings', "
+            "'failed', 'blocked')",
+            name="ck_production_qa_status",
+        ),
+        CheckConstraint(
+            "check_count >= 0 AND passed_count >= 0 AND warning_count >= 0 AND "
+            "failed_count >= 0 AND blocked_count >= 0",
+            name="ck_production_qa_counts",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_render_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_renders.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    production_timeline_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("production_timelines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    visual_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("visual_plans.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    narration_alignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("narration_alignments.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    final_audio_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    render_output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    qa_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    policy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    policy_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    publication_ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    check_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    passed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    warning_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    blocked_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    checks: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="qa_reports")
+    workflow_render: Mapped["WorkflowRender"] = relationship()
     production_timeline: Mapped["ProductionTimeline"] = relationship()
 
 

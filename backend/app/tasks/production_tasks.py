@@ -46,6 +46,10 @@ async def _process(workflow_id: str) -> None:
             args=[workflow_id, str(result.poll_render_id)],
             countdown=settings.video_composer_poll_interval_seconds,
         )
+    if result.qa_workflow_id is not None:
+        from app.tasks.qa_tasks import executar_qa_producao
+
+        executar_qa_producao.delay(str(result.qa_workflow_id))
 
 
 async def _poll(workflow_id: str, render_id: str) -> None:
@@ -58,6 +62,10 @@ async def _poll(workflow_id: str, render_id: str) -> None:
             args=[workflow_id, str(result.poll_render_id)],
             countdown=settings.video_composer_poll_interval_seconds,
         )
+    if result.qa_workflow_id is not None:
+        from app.tasks.qa_tasks import executar_qa_producao
+
+        executar_qa_producao.delay(str(result.qa_workflow_id))
 
 
 async def recover_productions() -> None:

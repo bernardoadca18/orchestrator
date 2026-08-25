@@ -95,6 +95,30 @@ class ComposerRenderCreateResponse(ComposerRenderJob):
     created: bool
 
 
+class ComposerRenderProfile(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    version: str
+    identity: str = Field(pattern=r"^[a-f0-9]{64}$")
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    fps: float = Field(gt=0)
+    container: str
+    video_codec: str
+    audio_codec: str
+    audio_sample_rate: int = Field(gt=0)
+    fit_mode: str
+    final_gap_policy: str
+    preview_gap_policy: str
+
+
+class ComposerRenderProfiles(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    items: list[ComposerRenderProfile]
+
+
 # Internal compatibility alias keeps repository/service annotations concise.
 ComposerRender = ComposerRenderJob
 
@@ -153,6 +177,15 @@ class VideoComposerClient:
     async def get_render(self, render_id: str) -> ComposerRenderJob:
         response = await self._request("GET", f"/v1/renders/{render_id}", allow_retry=True)
         return self._parse_render(response)
+
+    async def get_render_profiles(self) -> list[ComposerRenderProfile]:
+        response = await self._request("GET", "/v1/render-profiles", allow_retry=True)
+        try:
+            return ComposerRenderProfiles.model_validate(response.json()).items
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise VideoComposerError(
+                "Video Composer render profiles response is malformed"
+            ) from exc
 
     async def health_ready(self) -> bool:
         response = await self._request("GET", "/health/ready", allow_retry=True)
