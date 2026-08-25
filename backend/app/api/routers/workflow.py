@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
 from app.core.database import get_db
-from app.models.workflow import NarrationAlignment, VisualPlan, WorkflowExecucao
+from app.models.workflow import (
+    NarrationAlignment,
+    ProductionTimeline,
+    VisualPlan,
+    WorkflowExecucao,
+)
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
@@ -20,8 +25,17 @@ from app.schemas.workflow import (
     NarrationBlockAlignmentOut,
     NarrationTimelineAudioOut,
     NarrationTimelineOut,
+    NarrationTrackOut,
     PacoteProducaoOut,
+    PrimaryVisualTrackOut,
+    ProductionTimelineEnsureOut,
+    ProductionTimelineOut,
+    ProductionTimelineTracksOut,
     RoteiroDisponivelOut,
+    TimelineGapOut,
+    TimelinePlacementOut,
+    TimelineQueryOutcomeOut,
+    TimelineSourceOut,
     VisualDecisionOut,
     VisualPlanEnsureOut,
     VisualPlanOut,
@@ -34,6 +48,10 @@ from app.schemas.workflow import (
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
+)
+from app.services.production_timeline_service import (
+    ProductionTimelineNotFoundError,
+    ProductionTimelineService,
 )
 from app.services.visual_director_service import (
     VisualDirectorInputError,
@@ -170,6 +188,109 @@ def _visual_plan_response(plan: VisualPlan) -> VisualPlanOut:
             )
             for item in plan.decisions
         ],
+    )
+
+
+def _production_timeline_response(timeline: ProductionTimeline) -> ProductionTimelineOut:
+    narration = None
+    if timeline.final_audio_sha256 and timeline.duration_seconds > 0:
+        narration = NarrationTrackOut(
+            timeline_start_seconds=0.0,
+            timeline_end_seconds=timeline.duration_seconds,
+            source_start_seconds=0.0,
+            source_end_seconds=timeline.duration_seconds,
+            audio_url=f"/workflow/{timeline.workflow_execucao_id}/audio",
+            audio_sha256=timeline.final_audio_sha256,
+            sample_rate=timeline.narration_sample_rate,
+            channels=timeline.narration_channels,
+            byte_size=timeline.narration_byte_size,
+        )
+    outcomes = (
+        timeline.diagnostics.get("query_placement_outcomes", []) if timeline.diagnostics else []
+    )
+    return ProductionTimelineOut(
+        id=timeline.id,
+        workflow_id=timeline.workflow_execucao_id,
+        narration_alignment_id=timeline.narration_alignment_id,
+        visual_plan_id=timeline.visual_plan_id,
+        schema_version=timeline.schema_version,
+        strategy_version=timeline.strategy_version,
+        validator_version=timeline.validator_version,
+        request_fingerprint=timeline.request_fingerprint,
+        fingerprint=timeline.fingerprint,
+        status=timeline.status,
+        duration_seconds=timeline.duration_seconds,
+        policy=timeline.policy,
+        tracks=ProductionTimelineTracksOut(
+            narration=narration,
+            primary_visual=PrimaryVisualTrackOut(
+                placements=[
+                    TimelinePlacementOut(
+                        id=item.id,
+                        order=item.order,
+                        visual_decision_id=item.visual_decision_id,
+                        visual_decision_ids=[
+                            uuid.UUID(value) for value in item.visual_decision_ids
+                        ],
+                        visual_query_ids=[uuid.UUID(value) for value in item.visual_query_ids],
+                        timeline_start_seconds=item.timeline_start_seconds,
+                        timeline_end_seconds=item.timeline_end_seconds,
+                        source=TimelineSourceOut(
+                            project_id=item.source_project_id,
+                            session_id=item.source_session_id,
+                            media_id=item.source_media_id,
+                            candidate_start_seconds=item.candidate_start_seconds,
+                            candidate_end_seconds=item.candidate_end_seconds,
+                            source_start_seconds=item.source_start_seconds,
+                            source_end_seconds=item.source_end_seconds,
+                            provenance=item.source_provenance,
+                        ),
+                        playback_rate=item.playback_rate,
+                        transition=item.transition,
+                        strategy=item.strategy,
+                        importance=item.importance,
+                        diagnostics=item.diagnostics,
+                    )
+                    for item in timeline.placements
+                ]
+            ),
+        ),
+        gaps=[
+            TimelineGapOut(
+                id=item.id,
+                order=item.order,
+                timeline_start_seconds=item.timeline_start_seconds,
+                timeline_end_seconds=item.timeline_end_seconds,
+                reason=item.reason,
+                severity=item.severity,
+                related_visual_query_ids=[
+                    uuid.UUID(value) for value in item.related_visual_query_ids
+                ],
+                diagnostics=item.diagnostics,
+            )
+            for item in timeline.gaps
+        ],
+        query_placement_outcomes=[
+            TimelineQueryOutcomeOut.model_validate(item) for item in outcomes
+        ],
+        visual_coverage_seconds=timeline.visual_coverage_seconds,
+        visual_gap_seconds=timeline.visual_gap_seconds,
+        visual_coverage_ratio=timeline.visual_coverage_ratio,
+        placement_count=timeline.placement_count,
+        gap_count=timeline.gap_count,
+        cut_count=timeline.cut_count,
+        unplaced_query_count=timeline.unplaced_query_count,
+        required_gap_seconds=timeline.required_gap_seconds,
+        preferred_gap_seconds=timeline.preferred_gap_seconds,
+        optional_gap_seconds=timeline.optional_gap_seconds,
+        background_gap_seconds=timeline.background_gap_seconds,
+        average_shot_duration_seconds=timeline.average_shot_duration_seconds,
+        metrics=timeline.metrics,
+        diagnostics=timeline.diagnostics,
+        error_message=timeline.error_message,
+        started_at=timeline.started_at,
+        completed_at=timeline.completed_at,
+        created_at=timeline.criado_em,
     )
 
 
@@ -384,6 +505,39 @@ async def construir_visual_plan(
     return VisualPlanEnsureOut(created=created, visual_plan=_visual_plan_response(plan))
 
 
+@router.get("/{workflow_id}/production-timeline", response_model=ProductionTimelineOut)
+async def obter_production_timeline(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    """Return the current compatible edit plan without rebuilding upstream artifacts."""
+    try:
+        timeline = await ProductionTimelineService(session).current(workflow_id)
+    except ProductionTimelineNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if timeline is None:
+        raise HTTPException(404, "Production Timeline compatível ainda não disponível")
+    return _production_timeline_response(timeline)
+
+
+@router.post("/{workflow_id}/production-timeline", response_model=ProductionTimelineEnsureOut)
+async def construir_production_timeline(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+):
+    """Plan metadata only; never calls voice, ASR, Media Search or a renderer."""
+    try:
+        timeline, created = await ProductionTimelineService(session).ensure(
+            workflow_id, force=force
+        )
+    except ProductionTimelineNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return ProductionTimelineEnsureOut(
+        created=created,
+        production_timeline=_production_timeline_response(timeline),
+    )
+
+
 @router.get("/{workflow_id}/blocos/{bloco_id}/audio")
 async def baixar_audio_bloco(
     workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
@@ -525,6 +679,12 @@ async def obter_pacote_producao(
     )
     visual_plan_data = await VisualDirectorService(session).current(workflow_id)
     visual_plan = _visual_plan_response(visual_plan_data) if visual_plan_data else None
+    production_timeline_data = await ProductionTimelineService(session).current(workflow_id)
+    production_timeline = (
+        _production_timeline_response(production_timeline_data)
+        if production_timeline_data
+        else None
+    )
 
     # Montar metadata
     metadata = MetadataPacoteOut(
@@ -545,5 +705,6 @@ async def obter_pacote_producao(
         transcricao=transcricao,
         narration_alignment=narration_alignment,
         visual_plan=visual_plan,
+        production_timeline=production_timeline,
         metadata=metadata,
     )

@@ -89,13 +89,19 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("with_queries", "with_alignment", "with_visual_plan"),
-    [(True, True, True), (True, True, False), (True, False, False), (False, False, False)],
+    ("with_queries", "with_alignment", "with_visual_plan", "with_timeline"),
+    [
+        (True, True, True, True),
+        (True, True, False, False),
+        (True, False, False, False),
+        (False, False, False, False),
+    ],
 )
 async def test_production_package_contains_audio_identity_and_backward_compatible_queries(
     with_queries: bool,
     with_alignment: bool,
     with_visual_plan: bool,
+    with_timeline: bool,
 ) -> None:
     workflow_id = uuid.uuid4()
     query = _visual_query()
@@ -289,6 +295,92 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         )
     visual_director_service = MagicMock()
     visual_director_service.current = AsyncMock(return_value=visual_plan)
+    production_timeline = None
+    if with_timeline:
+        production_timeline = SimpleNamespace(
+            id=uuid.uuid4(),
+            workflow_execucao_id=workflow_id,
+            narration_alignment_id=alignment.id,
+            visual_plan_id=visual_plan.id,
+            final_audio_sha256=workflow.audio_final_sha256,
+            narration_sample_rate=48_000,
+            narration_channels=1,
+            narration_byte_size=200,
+            schema_version="production_timeline_schema_v1",
+            strategy_version="production_timeline_v1",
+            validator_version="production_timeline_validator_v1",
+            policy={"default_transition": "cut"},
+            request_fingerprint="3" * 64,
+            fingerprint="4" * 64,
+            status="completed_with_gaps",
+            duration_seconds=1.25,
+            visual_coverage_seconds=0.6,
+            visual_gap_seconds=0.65,
+            visual_coverage_ratio=0.48,
+            placement_count=1,
+            gap_count=2,
+            cut_count=0,
+            unplaced_query_count=0,
+            required_gap_seconds=0,
+            preferred_gap_seconds=0,
+            optional_gap_seconds=0,
+            background_gap_seconds=0.65,
+            average_shot_duration_seconds=0.6,
+            metrics={"planning_time_ms": 0.5},
+            diagnostics={"query_placement_outcomes": []},
+            error_message=None,
+            started_at=None,
+            completed_at=None,
+            criado_em="2026-01-01T00:00:03Z",
+            placements=[
+                SimpleNamespace(
+                    id=uuid.uuid4(),
+                    order=0,
+                    visual_decision_id=visual_plan.decisions[0].id,
+                    visual_decision_ids=[str(visual_plan.decisions[0].id)],
+                    visual_query_ids=[query["id"]],
+                    source_project_id=uuid.uuid4(),
+                    source_session_id=uuid.UUID(query["preferred_session_id"]),
+                    source_media_id=uuid.uuid4(),
+                    timeline_start_seconds=0.2,
+                    timeline_end_seconds=0.8,
+                    candidate_start_seconds=12.5,
+                    candidate_end_seconds=20.0,
+                    source_start_seconds=12.5,
+                    source_end_seconds=13.1,
+                    playback_rate=1.0,
+                    transition="cut",
+                    strategy="preferred_start_trim",
+                    importance="required",
+                    source_provenance={"source": "production_script"},
+                    diagnostics=None,
+                )
+            ],
+            gaps=[
+                SimpleNamespace(
+                    id=uuid.uuid4(),
+                    order=0,
+                    timeline_start_seconds=0.0,
+                    timeline_end_seconds=0.2,
+                    reason="no_visual_query",
+                    severity="background",
+                    related_visual_query_ids=[],
+                    diagnostics=None,
+                ),
+                SimpleNamespace(
+                    id=uuid.uuid4(),
+                    order=1,
+                    timeline_start_seconds=0.8,
+                    timeline_end_seconds=1.25,
+                    reason="no_visual_query",
+                    severity="background",
+                    related_visual_query_ids=[],
+                    diagnostics=None,
+                ),
+            ],
+        )
+    production_timeline_service = MagicMock()
+    production_timeline_service.current = AsyncMock(return_value=production_timeline)
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         patch(
@@ -298,6 +390,10 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         patch(
             "app.api.routers.workflow.VisualDirectorService",
             return_value=visual_director_service,
+        ),
+        patch(
+            "app.api.routers.workflow.ProductionTimelineService",
+            return_value=production_timeline_service,
         ),
     ):
         package = await obter_pacote_producao(workflow_id, MagicMock())
@@ -327,6 +423,13 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         assert queries[0].preferred_start_seconds == 12.5
     else:
         assert package.visual_plan is None
+    if with_timeline:
+        assert package.production_timeline is not None
+        placement = package.production_timeline.tracks.primary_visual.placements[0]
+        assert placement.timeline_start_seconds == 0.2
+        assert placement.source.source_start_seconds == 12.5
+    else:
+        assert package.production_timeline is None
     serialized = package.model_dump(mode="json")
     assert "/private/final.wav" not in str(serialized)
     assert "/private/raw.wav" not in str(serialized)

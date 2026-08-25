@@ -73,6 +73,14 @@ class Settings(BaseSettings):
     visual_director_search_concurrency: int = 4
     visual_director_min_semantic_score: float = 0.25
 
+    production_timeline_strategy_version: str = "production_timeline_v1"
+    production_timeline_schema_version: str = "production_timeline_schema_v1"
+    production_timeline_validator_version: str = "production_timeline_validator_v1"
+    production_timeline_min_visual_seconds: float = 0.5
+    production_timeline_max_sources_per_query: int = 2
+    production_timeline_gap_fill_enabled: bool = True
+    production_timeline_coalesce_contiguous: bool = True
+
     # --- API -----------------------------------------------------------------
     api_port: int = 8001
     cors_origins: str = "http://localhost:5174"
@@ -131,11 +139,19 @@ class Settings(BaseSettings):
         "visual_director_max_queries",
         "visual_director_search_top_k",
         "visual_director_search_concurrency",
+        "production_timeline_max_sources_per_query",
     )
     @classmethod
     def validate_visual_director_positive(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("Visual Director limits must be positive")
+        return value
+
+    @field_validator("production_timeline_min_visual_seconds")
+    @classmethod
+    def validate_timeline_minimum_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("production timeline minimum duration must be positive")
         return value
 
     @field_validator("visual_director_max_alternatives", "media_indexer_http_max_retries")

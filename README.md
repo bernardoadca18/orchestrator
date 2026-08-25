@@ -110,6 +110,37 @@ fingerprint contains script/query identity, Stage 13 alignment, media scope, pol
 resolved TemporalIndex/search provenance. Since Media Indexer has no cheap "latest index identity"
 read contract, discovering a newly-created index requires an explicit force rebuild.
 
+## Stage 15 Production Timeline
+
+Stage 15 is a synchronous, local metadata planner inside the Orchestrator. It combines the exact
+final-narration identity, the current completed NarrationAlignment and the current completed or
+gapped VisualPlan into a renderer-neutral `ProductionTimeline`. It performs no Media Search, voice,
+ASR, FFmpeg, file materialization or rendering.
+
+`production_timeline_v1` uses final narration time as final video time. Resolved VisualDecisions are
+placed on a single non-overlapping primary visual track. Exact-fit windows are retained; longer
+Media Search windows use an available semantic-cluster anchor or deterministic center trim; trusted
+preferred provenance uses a documented start-biased trim. Short windows can consume at most one
+Stage 14 alternative. Playback rate is always `1.0`, transitions are always `cut`, and no hidden
+loop, freeze-frame or speed manipulation exists.
+
+Conflicts use `required > preferred > optional`, then script order. Lower-priority requirements
+remain explicitly partial/unplaced. Uncovered intervals may extend adjacent footage only within the
+known Stage 14 candidate window; every remaining interval is a typed gap. Continuous adjacent
+placements are coalesced only for the same source identity and continuous source time, preserving
+all contributing VisualQuery and VisualDecision IDs.
+
+Endpoints:
+
+- `GET /workflow/{id}/production-timeline` is a side-effect-free compatible read;
+- `POST /workflow/{id}/production-timeline` creates/reuses the timeline;
+- `POST ...?force=true` recomputes only timeline metadata from frozen upstream artifacts.
+
+The independent validator checks narration identity, range containment, timeline ordering, absence
+of primary-track overlap, playback-rate/source-duration identity, explicit gap complement and exact
+coverage metrics before a timeline can complete. Calculations use integer microseconds internally;
+the API exposes seconds with `[start,end)` semantics.
+
 ## Final identity and transcription
 
 Workflow state exposes duration, SHA-256, byte size, 48 kHz sample rate, mono channels, mastering
@@ -129,6 +160,8 @@ Copy `.env.example`. Important settings include:
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE`.
 - alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.
 - `MEDIA_INDEXER_API_URL`, timeout/retry settings and the bounded Visual Director search policy.
+- Production Timeline strategy/schema versions, 0.5 s minimum visual duration, bounded source
+  fallback and deterministic gap-fill/coalescing policy.
 
 No raw Qwen sampling controls are part of this service's production configuration.
 
@@ -174,7 +207,8 @@ Voice Service's `/health/ready` endpoint.
 audio URLs, block/final objective metadata, mastering provenance, hash-bound transcription and a
 separate compatible `narration_alignment` section. When available, `visual_plan` is another separate
 derived section containing gameplay source windows and alternatives; the original VisualQueries are
-not rewritten.
+not rewritten. `production_timeline` remains a separate derived section containing the narration
+track, exact gameplay trims, primary-track placements, explicit gaps and renderer-facing metrics.
 Older scripts without `visual_queries` remain valid and return an empty list. See
 `backend/docs/HANDOFF_VISUAL_PRODUCTION.md`.
 
@@ -183,6 +217,9 @@ Older scripts without `visual_queries` remain valid and return an empty list. Se
 This stage is single-workflow-worker oriented. The Voice Service independently owns its bounded
 single-GPU queue. Alignment uses deterministic text/ASR evidence, not a forced-alignment model; very
 large blocks are rejected by configured token/cell guards. The Visual Director supports gameplay
-sources only and depends on existing searchable Media Indexer indexes. Production Timeline, source
-materialization, composition, Remotion and final rendering remain intentionally absent for Stage
-15+.
+sources only and depends on existing searchable Media Indexer indexes. The Production Timeline
+supports one narration track and one primary gameplay track; FPS/render profile, source
+materialization, composition, Remotion and final rendering remain intentionally deferred to Stage
+16. The current local Media Indexer snapshot still has no completed TemporalIndex among its 104
+failed sessions, so real gameplay-selection and resulting edit-quality inspection remain explicit
+external validation debt before the complete visual production pipeline can be frozen.

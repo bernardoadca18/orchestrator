@@ -357,6 +357,122 @@ class VisualPlanEnsureOut(BaseModel):
     visual_plan: VisualPlanOut
 
 
+class NarrationTrackOut(BaseModel):
+    kind: str = "narration"
+    timeline_start_seconds: float = Field(ge=0)
+    timeline_end_seconds: float = Field(gt=0)
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(gt=0)
+    audio_url: str
+    audio_sha256: str
+    sample_rate: int | None
+    channels: int | None
+    byte_size: int | None
+
+
+class TimelineSourceOut(BaseModel):
+    source_type: str = "gameplay"
+    project_id: uuid.UUID
+    session_id: uuid.UUID
+    media_id: uuid.UUID
+    candidate_start_seconds: float = Field(ge=0)
+    candidate_end_seconds: float = Field(gt=0)
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(gt=0)
+    provenance: dict = Field(default_factory=dict)
+
+
+class TimelinePlacementOut(BaseModel):
+    id: uuid.UUID
+    order: int = Field(ge=0)
+    visual_decision_id: uuid.UUID | None
+    visual_decision_ids: list[uuid.UUID] = Field(default_factory=list)
+    visual_query_ids: list[uuid.UUID] = Field(default_factory=list)
+    timeline_start_seconds: float = Field(ge=0)
+    timeline_end_seconds: float = Field(gt=0)
+    source: TimelineSourceOut
+    playback_rate: float
+    transition: str
+    strategy: str
+    importance: str
+    diagnostics: dict | None
+
+
+class TimelineGapOut(BaseModel):
+    id: uuid.UUID
+    order: int = Field(ge=0)
+    timeline_start_seconds: float = Field(ge=0)
+    timeline_end_seconds: float = Field(gt=0)
+    reason: str
+    severity: str
+    related_visual_query_ids: list[uuid.UUID] = Field(default_factory=list)
+    diagnostics: dict | None
+
+
+class TimelineQueryOutcomeOut(BaseModel):
+    visual_decision_id: uuid.UUID
+    visual_query_id: uuid.UUID
+    importance: str
+    requested_start_seconds: float | None
+    requested_end_seconds: float | None
+    requested_duration_seconds: float = Field(ge=0)
+    placed_duration_seconds: float = Field(ge=0)
+    coverage_ratio: float = Field(ge=0, le=1)
+    status: str
+    reason: str | None
+
+
+class PrimaryVisualTrackOut(BaseModel):
+    kind: str = "primary_visual"
+    placements: list[TimelinePlacementOut] = Field(default_factory=list)
+
+
+class ProductionTimelineTracksOut(BaseModel):
+    narration: NarrationTrackOut | None
+    primary_visual: PrimaryVisualTrackOut
+
+
+class ProductionTimelineOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    narration_alignment_id: uuid.UUID | None
+    visual_plan_id: uuid.UUID | None
+    schema_version: str
+    strategy_version: str
+    validator_version: str
+    request_fingerprint: str
+    fingerprint: str
+    status: str
+    duration_seconds: float = Field(ge=0)
+    policy: dict
+    tracks: ProductionTimelineTracksOut
+    gaps: list[TimelineGapOut] = Field(default_factory=list)
+    query_placement_outcomes: list[TimelineQueryOutcomeOut] = Field(default_factory=list)
+    visual_coverage_seconds: float = Field(ge=0)
+    visual_gap_seconds: float = Field(ge=0)
+    visual_coverage_ratio: float = Field(ge=0, le=1)
+    placement_count: int = Field(ge=0)
+    gap_count: int = Field(ge=0)
+    cut_count: int = Field(ge=0)
+    unplaced_query_count: int = Field(ge=0)
+    required_gap_seconds: float = Field(ge=0)
+    preferred_gap_seconds: float = Field(ge=0)
+    optional_gap_seconds: float = Field(ge=0)
+    background_gap_seconds: float = Field(ge=0)
+    average_shot_duration_seconds: float | None
+    metrics: dict | None
+    diagnostics: dict | None
+    error_message: str | None
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class ProductionTimelineEnsureOut(BaseModel):
+    created: bool
+    production_timeline: ProductionTimelineOut
+
+
 class PacoteProducaoOut(BaseModel):
     """
     Payload consolidado para handoff ao serviço de produção visual.
@@ -379,4 +495,5 @@ class PacoteProducaoOut(BaseModel):
     transcricao: TranscricaoPacoteOut | None = None
     narration_alignment: NarrationTimelineOut | None = None
     visual_plan: VisualPlanOut | None = None
+    production_timeline: ProductionTimelineOut | None = None
     metadata: MetadataPacoteOut

@@ -16,6 +16,8 @@ The package includes:
 - a separate, versioned Narration Timeline with block quality metrics and VisualQuery bindings.
 - the explicit Media Indexer project/session scope preserved by Ideas Hub;
 - a separate, versioned Visual Plan with one source-resolution decision per VisualQuery.
+- a separate, validated Production Timeline with exact final-time placements, gameplay trims and
+  explicit visual gaps.
 
 Example fragment:
 
@@ -109,6 +111,39 @@ Example fragment:
       },
       "alternatives": []
     }]
+  },
+  "production_timeline": {
+    "schema_version": "production_timeline_schema_v1",
+    "strategy_version": "production_timeline_v1",
+    "duration_seconds": 42.5,
+    "status": "completed_with_gaps",
+    "tracks": {
+      "narration": {
+        "timeline_start_seconds": 0.0,
+        "timeline_end_seconds": 42.5,
+        "source_start_seconds": 0.0,
+        "source_end_seconds": 42.5,
+        "audio_url": "/workflow/<id>/audio",
+        "audio_sha256": "..."
+      },
+      "primary_visual": {
+        "placements": [{
+          "timeline_start_seconds": 4.12,
+          "timeline_end_seconds": 7.86,
+          "source": {
+            "session_id": "7d22bcd5-f4c4-4010-b23f-740dfca4421a",
+            "media_id": "675aec7b-e922-4232-9b62-367c9b8cc438",
+            "candidate_start_seconds": 120.0,
+            "candidate_end_seconds": 145.0,
+            "source_start_seconds": 120.0,
+            "source_end_seconds": 123.74
+          },
+          "playback_rate": 1.0,
+          "transition": "cut"
+        }]
+      }
+    },
+    "gaps": []
   }
 }
 ```
@@ -125,7 +160,10 @@ Do not conflate these domains:
    final narration WAV.
 5. Binding narration timestamps are derived from actual aligned Whisper words inside that block.
 6. Visual Plan source timestamps are still gameplay/source-media time.
-7. Final edit placement time does not exist until Stage 15.
+7. Production Timeline `timeline_start_seconds`/`timeline_end_seconds` are final-video time, which
+   equals final-narration time in v1.
+8. A placement's nested `source_start_seconds`/`source_end_seconds` is the exact gameplay trim and
+   remains contained by `candidate_start_seconds`/`candidate_end_seconds` from Stage 14.
 
 Gameplay timestamps remain inside the immutable script `VisualQuery`; narration timestamps remain
 inside the derived alignment section. A binding never overwrites the source query. `unresolved`,
@@ -153,5 +191,6 @@ other remains usable. `completed_with_gaps` distinguishes required and optional 
 Media Indexer failure is recorded as a technical source failure, while an empty successful search is
 `unresolved`.
 
-The Visual Plan deliberately contains no `timeline_start`, tracks, trims, transitions, layout,
-Remotion component or rendering instruction.
+The Visual Plan deliberately contains no `timeline_start`, tracks or exact trims. Those edit
+decisions exist only in the separate Production Timeline. See `HANDOFF_VIDEO_COMPOSER.md` for the
+renderer-neutral Stage 16 contract.

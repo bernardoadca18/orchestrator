@@ -97,6 +97,9 @@ class WorkflowExecucao(Base):
     visual_plans: Mapped[list["VisualPlan"]] = relationship(
         back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
     )
+    production_timelines: Mapped[list["ProductionTimeline"]] = relationship(
+        back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
+    )
 
 
 class AudioBloco(Base):
@@ -517,3 +520,208 @@ class VisualDecision(Base):
     )
 
     visual_plan: Mapped["VisualPlan"] = relationship(back_populates="decisions")
+
+
+class ProductionTimeline(Base):
+    """Versioned Stage 15 edit-decision artifact; contains no rendered media."""
+
+    __tablename__ = "production_timelines"
+    __table_args__ = (
+        UniqueConstraint("request_fingerprint", name="uq_production_timeline_request_fingerprint"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', "
+            "'completed_with_gaps', 'blocked', 'failed')",
+            name="ck_production_timeline_status",
+        ),
+        CheckConstraint(
+            "duration_seconds >= 0 AND visual_coverage_seconds >= 0 AND "
+            "visual_gap_seconds >= 0 AND visual_coverage_ratio >= 0 AND "
+            "visual_coverage_ratio <= 1",
+            name="ck_production_timeline_coverage",
+        ),
+        CheckConstraint(
+            "placement_count >= 0 AND gap_count >= 0 AND cut_count >= 0 AND "
+            "unplaced_query_count >= 0 AND required_gap_seconds >= 0 AND "
+            "preferred_gap_seconds >= 0 AND optional_gap_seconds >= 0 AND "
+            "background_gap_seconds >= 0",
+            name="ck_production_timeline_counts",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    narration_alignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("narration_alignments.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    visual_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("visual_plans.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    final_audio_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    narration_sample_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    narration_channels: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    narration_byte_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    script_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    validator_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    duration_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    visual_coverage_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    visual_gap_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    visual_coverage_ratio: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    placement_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    gap_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cut_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unplaced_query_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    required_gap_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    preferred_gap_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    optional_gap_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    background_gap_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    average_shot_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    atualizado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="production_timelines")
+    placements: Mapped[list["TimelinePlacement"]] = relationship(
+        back_populates="timeline",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="TimelinePlacement.order",
+    )
+    gaps: Mapped[list["TimelineGap"]] = relationship(
+        back_populates="timeline",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="TimelineGap.order",
+    )
+
+
+class TimelinePlacement(Base):
+    """Exact mapping from final-video time to one allowed Stage 14 source window."""
+
+    __tablename__ = "timeline_placements"
+    __table_args__ = (
+        UniqueConstraint("production_timeline_id", "order", name="uq_timeline_placement_order"),
+        CheckConstraint(
+            "timeline_start_seconds >= 0 AND timeline_end_seconds > timeline_start_seconds",
+            name="ck_timeline_placement_timeline_range",
+        ),
+        CheckConstraint(
+            "candidate_start_seconds >= 0 AND "
+            "candidate_end_seconds > candidate_start_seconds AND "
+            "source_start_seconds >= candidate_start_seconds AND "
+            "source_end_seconds <= candidate_end_seconds AND "
+            "source_end_seconds > source_start_seconds",
+            name="ck_timeline_placement_source_range",
+        ),
+        CheckConstraint("playback_rate = 1.0", name="ck_timeline_placement_playback_rate"),
+        CheckConstraint("transition = 'cut'", name="ck_timeline_placement_transition"),
+        CheckConstraint("source_type = 'gameplay'", name="ck_timeline_placement_source_type"),
+        CheckConstraint(
+            "importance IN ('required', 'preferred', 'optional')",
+            name="ck_timeline_placement_importance",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    production_timeline_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("production_timelines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    order: Mapped[int] = mapped_column(Integer, nullable=False)
+    visual_decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("visual_decisions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    visual_query_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    visual_decision_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="gameplay")
+    source_project_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    source_session_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    source_media_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    timeline_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    timeline_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    candidate_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    candidate_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    source_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    source_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    playback_rate: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    transition: Mapped[str] = mapped_column(String(24), nullable=False, default="cut")
+    strategy: Mapped[str] = mapped_column(String(40), nullable=False)
+    importance: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_provenance: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    timeline: Mapped["ProductionTimeline"] = relationship(back_populates="placements")
+
+
+class TimelineGap(Base):
+    """Explicit uncovered interval on the primary visual track."""
+
+    __tablename__ = "timeline_gaps"
+    __table_args__ = (
+        UniqueConstraint("production_timeline_id", "order", name="uq_timeline_gap_order"),
+        CheckConstraint(
+            "timeline_start_seconds >= 0 AND timeline_end_seconds > timeline_start_seconds",
+            name="ck_timeline_gap_range",
+        ),
+        CheckConstraint(
+            "severity IN ('required', 'preferred', 'optional', 'background')",
+            name="ck_timeline_gap_severity",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    production_timeline_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("production_timelines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    order: Mapped[int] = mapped_column(Integer, nullable=False)
+    timeline_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    timeline_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    reason: Mapped[str] = mapped_column(String(48), nullable=False)
+    severity: Mapped[str] = mapped_column(String(24), nullable=False)
+    related_visual_query_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    timeline: Mapped["ProductionTimeline"] = relationship(back_populates="gaps")
