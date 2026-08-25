@@ -35,6 +35,10 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
     structure = {
         "titulo": "Witcher",
         "duracao_total_segundos": 60,
+        "media_context": {
+            "media_project_id": str(uuid.uuid4()),
+            "media_session_ids": [query["preferred_session_id"]],
+        },
         "blocos": [{"tipo": "intro", "conteudo": "Texto", "visual_queries": [query]}],
     }
     workflow = SimpleNamespace(
@@ -85,14 +89,17 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("with_queries", "with_alignment"), [(True, True), (True, False), (False, False)]
+    ("with_queries", "with_alignment", "with_visual_plan"),
+    [(True, True, True), (True, True, False), (True, False, False), (False, False, False)],
 )
 async def test_production_package_contains_audio_identity_and_backward_compatible_queries(
     with_queries: bool,
     with_alignment: bool,
+    with_visual_plan: bool,
 ) -> None:
     workflow_id = uuid.uuid4()
     query = _visual_query()
+    media_project_id = uuid.uuid4()
     script_block = {"tipo": "intro", "conteudo": "Texto canônico"}
     if with_queries:
         script_block["visual_queries"] = [query]
@@ -122,6 +129,10 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         roteiro_snapshot={
             "titulo": "Title",
             "duracao_total_segundos": 60,
+            "media_context": {
+                "media_project_id": str(media_project_id),
+                "media_session_ids": [query["preferred_session_id"]],
+            },
             "blocos": [script_block],
         },
         blocos=[block],
@@ -205,11 +216,88 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         )
     alignment_service = MagicMock()
     alignment_service.current = AsyncMock(return_value=alignment)
+    visual_plan = None
+    if with_visual_plan:
+        source = {
+            "format_version": "visual_source_v1",
+            "source_type": "gameplay",
+            "project_id": str(uuid.uuid4()),
+            "session_id": query["preferred_session_id"],
+            "media_id": str(uuid.uuid4()),
+            "source_start_seconds": 12.5,
+            "source_end_seconds": 20.0,
+            "source_duration_seconds": 7.5,
+            "semantic_score": None,
+            "selection_score": 1.0,
+            "rank": None,
+            "session_label": "001",
+            "media_filename": "001.mp4",
+            "matched_note_ids": [],
+            "provenance": {"source": "production_script"},
+        }
+        visual_plan = SimpleNamespace(
+            id=uuid.uuid4(),
+            workflow_execucao_id=workflow_id,
+            narration_alignment_id=alignment.id,
+            strategy_version="visual_director_v1",
+            request_fingerprint="e" * 64,
+            fingerprint="f" * 64,
+            status="completed",
+            media_scope=None,
+            media_index_provenance={"temporal_index_ids": []},
+            total_queries=1,
+            resolved_queries=1,
+            unresolved_queries=0,
+            failed_queries=0,
+            required_gaps=0,
+            optional_gaps=0,
+            direct_provenance_count=1,
+            media_search_count=0,
+            reused_source_count=0,
+            metrics={"processing_seconds": 0.001},
+            diagnostics=None,
+            error_message=None,
+            started_at=None,
+            completed_at=None,
+            criado_em="2026-01-01T00:00:02Z",
+            decisions=[
+                SimpleNamespace(
+                    id=uuid.uuid4(),
+                    visual_query_id=uuid.UUID(query["id"]),
+                    audio_bloco_id=block.id,
+                    block_order=0,
+                    query_order=1,
+                    query=query["query"],
+                    intent=query["intent"],
+                    importance=query["importance"],
+                    source_note_id=uuid.UUID(query["source_note_id"]),
+                    desired_duration_seconds=7.5,
+                    narration_binding_status="resolved",
+                    narration_start_seconds=0.2,
+                    narration_end_seconds=0.8,
+                    target_narration_duration_seconds=0.6,
+                    source_resolution_status="resolved",
+                    selection_strategy="preferred_provenance",
+                    selected_source=source,
+                    alternatives=[],
+                    selection_score=1.0,
+                    score_components={"trusted_preferred_provenance": 1.0},
+                    reason=None,
+                    diagnostics=None,
+                )
+            ],
+        )
+    visual_director_service = MagicMock()
+    visual_director_service.current = AsyncMock(return_value=visual_plan)
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         patch(
             "app.api.routers.workflow.NarrationAlignmentService",
             return_value=alignment_service,
+        ),
+        patch(
+            "app.api.routers.workflow.VisualDirectorService",
+            return_value=visual_director_service,
         ),
     ):
         package = await obter_pacote_producao(workflow_id, MagicMock())
@@ -218,6 +306,8 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
     assert package.transcricao is not None
     assert package.transcricao.audio_sha256 == package.audio.sha256
     queries = package.roteiro.blocos[0].visual_queries
+    assert package.roteiro.media_context is not None
+    assert package.roteiro.media_context.media_project_id == media_project_id
     assert len(queries) == int(with_queries)
     if queries:
         assert queries[0].preferred_start_seconds == 12.5
@@ -229,6 +319,14 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         assert queries[0].preferred_start_seconds == 12.5
     else:
         assert package.narration_alignment is None
+    if with_visual_plan:
+        assert package.visual_plan is not None
+        decision = package.visual_plan.decisions[0]
+        assert decision.narration_start_seconds == 0.2
+        assert decision.selected_source.source_start_seconds == 12.5
+        assert queries[0].preferred_start_seconds == 12.5
+    else:
+        assert package.visual_plan is None
     serialized = package.model_dump(mode="json")
     assert "/private/final.wav" not in str(serialized)
     assert "/private/raw.wav" not in str(serialized)

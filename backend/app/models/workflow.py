@@ -94,6 +94,9 @@ class WorkflowExecucao(Base):
     narration_alignments: Mapped[list["NarrationAlignment"]] = relationship(
         back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
     )
+    visual_plans: Mapped[list["VisualPlan"]] = relationship(
+        back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
+    )
 
 
 class AudioBloco(Base):
@@ -370,3 +373,147 @@ class VisualQueryNarrationBinding(Base):
     )
 
     alignment: Mapped["NarrationAlignment"] = relationship(back_populates="visual_query_bindings")
+
+
+class VisualPlan(Base):
+    """Versioned Stage 14 source-selection artifact; never a final edit timeline."""
+
+    __tablename__ = "visual_plans"
+    __table_args__ = (
+        UniqueConstraint("request_fingerprint", name="uq_visual_plan_request_fingerprint"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', "
+            "'completed_with_gaps', 'blocked', 'failed')",
+            name="ck_visual_plan_status",
+        ),
+        CheckConstraint(
+            "total_queries >= 0 AND resolved_queries >= 0 AND unresolved_queries >= 0 "
+            "AND failed_queries >= 0 AND required_gaps >= 0 AND optional_gaps >= 0 "
+            "AND direct_provenance_count >= 0 AND media_search_count >= 0 "
+            "AND reused_source_count >= 0",
+            name="ck_visual_plan_counts",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    narration_alignment_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("narration_alignments.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    script_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_scope: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    media_scope_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    media_index_provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    total_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resolved_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    required_gaps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    optional_gaps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    direct_provenance_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    media_search_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reused_source_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    atualizado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="visual_plans")
+    decisions: Mapped[list["VisualDecision"]] = relationship(
+        back_populates="visual_plan",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="VisualDecision.block_order, VisualDecision.query_order",
+    )
+
+
+class VisualDecision(Base):
+    """One immutable VisualQuery interpreted as a source-media decision."""
+
+    __tablename__ = "visual_decisions"
+    __table_args__ = (
+        UniqueConstraint("visual_plan_id", "visual_query_id", name="uq_plan_visual_query"),
+        UniqueConstraint(
+            "visual_plan_id", "block_order", "query_order", name="uq_plan_decision_order"
+        ),
+        CheckConstraint(
+            "narration_binding_status IN "
+            "('resolved', 'unresolved', 'ambiguous', 'not_applicable')",
+            name="ck_visual_decision_binding_status",
+        ),
+        CheckConstraint(
+            "source_resolution_status IN "
+            "('resolved', 'unresolved', 'partial', 'unsupported', 'not_required', 'failed')",
+            name="ck_visual_decision_source_status",
+        ),
+        CheckConstraint(
+            "(narration_start_seconds IS NULL AND narration_end_seconds IS NULL) OR "
+            "(narration_start_seconds >= 0 AND narration_end_seconds >= narration_start_seconds)",
+            name="ck_visual_decision_narration_range",
+        ),
+        CheckConstraint(
+            "selection_score IS NULL OR (selection_score >= 0 AND selection_score <= 1)",
+            name="ck_visual_decision_score",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    visual_plan_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("visual_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    visual_query_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    audio_bloco_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("audio_blocos.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    block_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    query_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    query: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str] = mapped_column(String(32), nullable=False)
+    importance: Mapped[str] = mapped_column(String(24), nullable=False)
+    source_note_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    desired_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    narration_binding_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    narration_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    narration_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_narration_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_resolution_status: Mapped[str] = mapped_column(String(24), nullable=False)
+    selection_strategy: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    selected_source: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    alternatives: Mapped[list[dict]] = mapped_column(JSONB, nullable=False, default=list)
+    selection_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    score_components: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    visual_plan: Mapped["VisualPlan"] = relationship(back_populates="decisions")

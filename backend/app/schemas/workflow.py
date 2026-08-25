@@ -1,5 +1,7 @@
 """Schemas Pydantic — contratos de entrada/saída da API."""
 
+from __future__ import annotations
+
 import datetime as dt
 import uuid
 
@@ -188,6 +190,14 @@ class RoteiroPacoteOut(BaseModel):
     titulo: str
     duracao_total_segundos: int
     blocos: list[BlocoRoteiroPacote] = Field(default_factory=list)
+    media_context: MediaScopeOut | None = None
+
+
+class MediaScopeOut(BaseModel):
+    """Minimal immutable Media Indexer scope preserved by Ideas Hub."""
+
+    media_project_id: uuid.UUID | None = None
+    media_session_ids: list[uuid.UUID] | None = None
 
 
 class MetadataPacoteOut(BaseModel):
@@ -266,6 +276,87 @@ class NarrationAlignmentEnsureOut(BaseModel):
     timeline: NarrationTimelineOut
 
 
+class VisualSourceSelectionOut(BaseModel):
+    format_version: str = "visual_source_v1"
+    source_type: str = "gameplay"
+    project_id: uuid.UUID
+    session_id: uuid.UUID
+    media_id: uuid.UUID
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(gt=0)
+    source_duration_seconds: float = Field(gt=0)
+    semantic_score: float | None = Field(default=None, ge=0, le=1)
+    selection_score: float = Field(ge=0, le=1)
+    rank: int | None = Field(default=None, ge=1)
+    session_label: str
+    media_filename: str
+    temporal_index_id: uuid.UUID | None = None
+    retrieval_candidate_id: uuid.UUID | None = None
+    transcript_preview: str | None = None
+    matched_note_ids: list[uuid.UUID] = Field(default_factory=list)
+    media_search_strategy: str | None = None
+    duration_fit_ratio: float | None = Field(default=None, ge=0, le=1)
+    provenance: dict = Field(default_factory=dict)
+
+
+class VisualDecisionOut(BaseModel):
+    id: uuid.UUID
+    visual_query_id: uuid.UUID
+    audio_block_id: uuid.UUID | None
+    block_order: int
+    query_order: int
+    query: str
+    intent: str
+    importance: str
+    source_note_id: uuid.UUID | None
+    desired_duration_seconds: float | None
+    narration_binding_status: str
+    narration_start_seconds: float | None
+    narration_end_seconds: float | None
+    target_narration_duration_seconds: float | None
+    source_resolution_status: str
+    selection_strategy: str | None
+    selected_source: VisualSourceSelectionOut | None
+    alternatives: list[VisualSourceSelectionOut] = Field(default_factory=list)
+    selection_score: float | None
+    score_components: dict | None
+    reason: str | None
+    diagnostics: dict | None
+
+
+class VisualPlanOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    narration_alignment_id: uuid.UUID | None
+    strategy_version: str
+    request_fingerprint: str
+    fingerprint: str
+    status: str
+    media_scope: MediaScopeOut | None
+    media_index_provenance: dict | None
+    total_queries: int
+    resolved_queries: int
+    unresolved_queries: int
+    failed_queries: int
+    required_gaps: int
+    optional_gaps: int
+    direct_provenance_count: int
+    media_search_count: int
+    reused_source_count: int
+    metrics: dict | None
+    diagnostics: dict | None
+    error_message: str | None
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    created_at: dt.datetime
+    decisions: list[VisualDecisionOut] = Field(default_factory=list)
+
+
+class VisualPlanEnsureOut(BaseModel):
+    created: bool
+    visual_plan: VisualPlanOut
+
+
 class PacoteProducaoOut(BaseModel):
     """
     Payload consolidado para handoff ao serviço de produção visual.
@@ -287,4 +378,5 @@ class PacoteProducaoOut(BaseModel):
     audio: AudioPacoteOut
     transcricao: TranscricaoPacoteOut | None = None
     narration_alignment: NarrationTimelineOut | None = None
+    visual_plan: VisualPlanOut | None = None
     metadata: MetadataPacoteOut

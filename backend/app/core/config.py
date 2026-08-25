@@ -30,6 +30,11 @@ class Settings(BaseSettings):
     voice_http_max_retries: int = 2
     voice_http_backoff_seconds: float = 1.0
 
+    media_indexer_api_url: str = "http://localhost:8012"
+    media_indexer_api_timeout_seconds: float = 30.0
+    media_indexer_http_max_retries: int = 2
+    media_indexer_http_backoff_seconds: float = 0.25
+
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
     pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
@@ -61,6 +66,13 @@ class Settings(BaseSettings):
     narration_alignment_max_tokens: int = 2_500
     narration_alignment_max_cells: int = 2_000_000
 
+    visual_director_strategy_version: str = "visual_director_v1"
+    visual_director_max_queries: int = 100
+    visual_director_search_top_k: int = 5
+    visual_director_max_alternatives: int = 2
+    visual_director_search_concurrency: int = 4
+    visual_director_min_semantic_score: float = 0.25
+
     # --- API -----------------------------------------------------------------
     api_port: int = 8001
     cors_origins: str = "http://localhost:5174"
@@ -68,7 +80,7 @@ class Settings(BaseSettings):
     # --- Logging --------------------------------------------------------------
     json_logging: bool = True
 
-    @field_validator("voice_api_url", "ideas_hub_api_url")
+    @field_validator("voice_api_url", "ideas_hub_api_url", "media_indexer_api_url")
     @classmethod
     def strip_service_url(cls, value: str) -> str:
         return value.rstrip("/")
@@ -103,6 +115,41 @@ class Settings(BaseSettings):
     def validate_alignment_guard(cls, value: int) -> int:
         if value <= 0:
             raise ValueError("narration alignment guards must be positive")
+        return value
+
+    @field_validator(
+        "media_indexer_api_timeout_seconds",
+        "media_indexer_http_backoff_seconds",
+    )
+    @classmethod
+    def validate_positive_seconds(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("Media Indexer timeouts/backoff must be positive")
+        return value
+
+    @field_validator(
+        "visual_director_max_queries",
+        "visual_director_search_top_k",
+        "visual_director_search_concurrency",
+    )
+    @classmethod
+    def validate_visual_director_positive(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("Visual Director limits must be positive")
+        return value
+
+    @field_validator("visual_director_max_alternatives", "media_indexer_http_max_retries")
+    @classmethod
+    def validate_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("retry/alternative limits must be non-negative")
+        return value
+
+    @field_validator("visual_director_min_semantic_score")
+    @classmethod
+    def validate_visual_director_score(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("Visual Director score threshold must be between 0 and 1")
         return value
 
 

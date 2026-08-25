@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
 from app.core.database import get_db
-from app.models.workflow import NarrationAlignment, WorkflowExecucao
+from app.models.workflow import NarrationAlignment, VisualPlan, WorkflowExecucao
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
@@ -22,7 +22,11 @@ from app.schemas.workflow import (
     NarrationTimelineOut,
     PacoteProducaoOut,
     RoteiroDisponivelOut,
+    VisualDecisionOut,
+    VisualPlanEnsureOut,
+    VisualPlanOut,
     VisualQueryNarrationBindingOut,
+    VisualSourceSelectionOut,
     WorkflowCreateIn,
     WorkflowDetailOut,
     WorkflowOut,
@@ -30,6 +34,11 @@ from app.schemas.workflow import (
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
+)
+from app.services.visual_director_service import (
+    VisualDirectorInputError,
+    VisualDirectorNotFoundError,
+    VisualDirectorService,
 )
 from app.tasks.audio_tasks import gerar_audio_workflow
 
@@ -99,6 +108,67 @@ def _timeline_response(
                 reason=binding.reason,
             )
             for binding in alignment.visual_query_bindings
+        ],
+    )
+
+
+def _visual_plan_response(plan: VisualPlan) -> VisualPlanOut:
+    return VisualPlanOut(
+        id=plan.id,
+        workflow_id=plan.workflow_execucao_id,
+        narration_alignment_id=plan.narration_alignment_id,
+        strategy_version=plan.strategy_version,
+        request_fingerprint=plan.request_fingerprint,
+        fingerprint=plan.fingerprint,
+        status=plan.status,
+        media_scope=plan.media_scope,
+        media_index_provenance=plan.media_index_provenance,
+        total_queries=plan.total_queries,
+        resolved_queries=plan.resolved_queries,
+        unresolved_queries=plan.unresolved_queries,
+        failed_queries=plan.failed_queries,
+        required_gaps=plan.required_gaps,
+        optional_gaps=plan.optional_gaps,
+        direct_provenance_count=plan.direct_provenance_count,
+        media_search_count=plan.media_search_count,
+        reused_source_count=plan.reused_source_count,
+        metrics=plan.metrics,
+        diagnostics=plan.diagnostics,
+        error_message=plan.error_message,
+        started_at=plan.started_at,
+        completed_at=plan.completed_at,
+        created_at=plan.criado_em,
+        decisions=[
+            VisualDecisionOut(
+                id=item.id,
+                visual_query_id=item.visual_query_id,
+                audio_block_id=item.audio_bloco_id,
+                block_order=item.block_order,
+                query_order=item.query_order,
+                query=item.query,
+                intent=item.intent,
+                importance=item.importance,
+                source_note_id=item.source_note_id,
+                desired_duration_seconds=item.desired_duration_seconds,
+                narration_binding_status=item.narration_binding_status,
+                narration_start_seconds=item.narration_start_seconds,
+                narration_end_seconds=item.narration_end_seconds,
+                target_narration_duration_seconds=item.target_narration_duration_seconds,
+                source_resolution_status=item.source_resolution_status,
+                selection_strategy=item.selection_strategy,
+                selected_source=VisualSourceSelectionOut.model_validate(item.selected_source)
+                if item.selected_source
+                else None,
+                alternatives=[
+                    VisualSourceSelectionOut.model_validate(candidate)
+                    for candidate in item.alternatives
+                ],
+                selection_score=item.selection_score,
+                score_components=item.score_components,
+                reason=item.reason,
+                diagnostics=item.diagnostics,
+            )
+            for item in plan.decisions
         ],
     )
 
@@ -284,6 +354,36 @@ async def reconstruir_narration_alignment(
     )
 
 
+@router.get("/{workflow_id}/visual-plan", response_model=VisualPlanOut)
+async def obter_visual_plan(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    """Return the compatible persisted plan without triggering Media Search."""
+    try:
+        plan = await VisualDirectorService(session).current(workflow_id)
+    except VisualDirectorNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if plan is None:
+        raise HTTPException(404, "Visual Plan compatível ainda não disponível")
+    return _visual_plan_response(plan)
+
+
+@router.post("/{workflow_id}/visual-plan", response_model=VisualPlanEnsureOut)
+async def construir_visual_plan(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+):
+    """Resolve source windows only; never invokes voice, ASR or media preprocessing."""
+    try:
+        plan, created = await VisualDirectorService(session).ensure(workflow_id, force=force)
+    except VisualDirectorNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except VisualDirectorInputError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return VisualPlanEnsureOut(created=created, visual_plan=_visual_plan_response(plan))
+
+
 @router.get("/{workflow_id}/blocos/{bloco_id}/audio")
 async def baixar_audio_bloco(
     workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
@@ -323,6 +423,7 @@ async def obter_pacote_producao(
         AudioPacoteOut,
         BlocoAudioPacoteOut,
         BlocoRoteiroPacote,
+        MediaScopeOut,
         MetadataPacoteOut,
         PacoteProducaoOut,
         PalavraTimestampPacote,
@@ -357,6 +458,9 @@ async def obter_pacote_producao(
         titulo=wf.roteiro_snapshot.get("titulo", ""),
         duracao_total_segundos=wf.roteiro_snapshot.get("duracao_total_segundos", 0),
         blocos=blocos_roteiro,
+        media_context=MediaScopeOut.model_validate(wf.roteiro_snapshot["media_context"])
+        if wf.roteiro_snapshot.get("media_context")
+        else None,
     )
 
     # Montar seção de áudio
@@ -419,6 +523,8 @@ async def obter_pacote_producao(
     narration_alignment = (
         _timeline_response(wf, alignment_data) if alignment_data is not None else None
     )
+    visual_plan_data = await VisualDirectorService(session).current(workflow_id)
+    visual_plan = _visual_plan_response(visual_plan_data) if visual_plan_data else None
 
     # Montar metadata
     metadata = MetadataPacoteOut(
@@ -438,5 +544,6 @@ async def obter_pacote_producao(
         audio=audio,
         transcricao=transcricao,
         narration_alignment=narration_alignment,
+        visual_plan=visual_plan,
         metadata=metadata,
     )

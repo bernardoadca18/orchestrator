@@ -34,6 +34,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       IDEAS_HUB_API_URL: ${IDEAS_HUB_API_URL_DOCKER:-http://host.docker.internal:8000}
       VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
+      MEDIA_INDEXER_API_URL: ${MEDIA_INDEXER_API_URL_DOCKER:-http://host.docker.internal:8012}
     ports:
       - "8011:8000"
     depends_on:
@@ -55,6 +56,7 @@ services:
       REDIS_URL: redis://redis:6379/0
       IDEAS_HUB_API_URL: ${IDEAS_HUB_API_URL_DOCKER:-http://host.docker.internal:8000}
       VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
+      MEDIA_INDEXER_API_URL: ${MEDIA_INDEXER_API_URL_DOCKER:-http://host.docker.internal:8012}
     command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --concurrency=1 -l info
     depends_on:
       db:

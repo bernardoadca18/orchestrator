@@ -76,6 +76,40 @@ Alignment runs automatically after a current transcription is available. Missing
 transcription yields `blocked`; algorithm/input failure yields `failed`. Neither state invalidates a
 healthy `audio_concluido` workflow.
 
+## Stage 14 Visual Director
+
+Stage 14 is a synchronous, independently rebuildable production-domain service inside the
+Orchestrator. It consumes immutable `VisualQuery` records, the compatible completed Stage 13
+alignment and Media Indexer's public HTTP API. It selects logical gameplay source windows and does
+not download media, run FFmpeg, trigger indexing or create final edit placement.
+
+Selection is deterministic and versioned as `visual_director_v1`:
+
+1. validate trusted `preferred_session_id` and gameplay range through `GET /sessions/{id}`;
+2. select valid trusted provenance directly, with zero Media Search calls;
+3. otherwise call `POST /media-search/sessions/{id}` or
+   `POST /media-search/projects/{id}` using the explicit script media scope;
+4. normalize and deduplicate overlapping candidates;
+5. apply semantic relevance, weak preferred-session/source-note/duration bonuses and a modest
+   overlap-reuse penalty;
+6. persist the selected source and at most two compact alternatives.
+
+The default semantic threshold is the Media Search contract's cosine-like `0.25`. A weak result is
+left `unresolved`; provider outage becomes `failed`, never "no results". Required and optional gaps
+remain explicit in `VisualPlan.status=completed_with_gaps` without invalidating script, audio or
+narration alignment.
+
+Endpoints:
+
+- `GET /workflow/{id}/visual-plan` reads the current compatible artifact without hidden search;
+- `POST /workflow/{id}/visual-plan` creates/reuses it;
+- `POST ...?force=true` re-runs only source resolution and may call Media Search again.
+
+Searches use a request-scoped duplicate-query cache and bounded concurrency. The persisted
+fingerprint contains script/query identity, Stage 13 alignment, media scope, policy version and the
+resolved TemporalIndex/search provenance. Since Media Indexer has no cheap "latest index identity"
+read contract, discovering a newly-created index requires an explicit force rebuild.
+
 ## Final identity and transcription
 
 Workflow state exposes duration, SHA-256, byte size, 48 kHz sample rate, mono channels, mastering
@@ -94,6 +128,7 @@ Copy `.env.example`. Important settings include:
 - LUFS/True Peak policy and duration tolerance;
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE`.
 - alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.
+- `MEDIA_INDEXER_API_URL`, timeout/retry settings and the bounded Visual Director search policy.
 
 No raw Qwen sampling controls are part of this service's production configuration.
 
@@ -114,6 +149,8 @@ Persistent narration files live under `data/audio`; the worker's Hugging Face/Wh
 under `cache/huggingface`; PostgreSQL and Redis use Compose volumes.
 The separately deployed Ideas Hub is resolved through `IDEAS_HUB_API_URL_DOCKER` (default host port
 8000).
+The separately deployed Media Indexer is resolved through `MEDIA_INDEXER_API_URL_DOCKER` (default
+host port 8012).
 
 Useful checks:
 
@@ -135,7 +172,9 @@ Voice Service's `/health/ready` endpoint.
 
 `GET /workflow/{id}/pacote-producao` returns script blocks, structured `visual_queries`, logical
 audio URLs, block/final objective metadata, mastering provenance, hash-bound transcription and a
-separate compatible `narration_alignment` section.
+separate compatible `narration_alignment` section. When available, `visual_plan` is another separate
+derived section containing gameplay source windows and alternatives; the original VisualQueries are
+not rewritten.
 Older scripts without `visual_queries` remain valid and return an empty list. See
 `backend/docs/HANDOFF_VISUAL_PRODUCTION.md`.
 
@@ -143,5 +182,7 @@ Older scripts without `visual_queries` remain valid and return an empty list. Se
 
 This stage is single-workflow-worker oriented. The Voice Service independently owns its bounded
 single-GPU queue. Alignment uses deterministic text/ASR evidence, not a forced-alignment model; very
-large blocks are rejected by configured token/cell guards. Media Search, Visual Director,
-Production Timeline and final rendering remain intentionally absent for Stage 14+.
+large blocks are rejected by configured token/cell guards. The Visual Director supports gameplay
+sources only and depends on existing searchable Media Indexer indexes. Production Timeline, source
+materialization, composition, Remotion and final rendering remain intentionally absent for Stage
+15+.
