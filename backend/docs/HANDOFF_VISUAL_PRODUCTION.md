@@ -13,6 +13,7 @@ The package includes:
 - final narration URL, SHA-256, size, duration, 48 kHz mono format and mastering metrics;
 - Faster-Whisper text/word timestamps, provider/model/language and the final audio SHA-256 it
   describes.
+- a separate, versioned Narration Timeline with block quality metrics and VisualQuery bindings.
 
 Example fragment:
 
@@ -60,6 +61,25 @@ Example fragment:
     "model": "small",
     "language": "pt",
     "palavras_timestamps": []
+  },
+  "narration_alignment": {
+    "status": "completed",
+    "strategy_version": "narration_alignment_v1",
+    "audio": {"sha256": "...", "duration_seconds": 42.5},
+    "blocks": [{
+      "block_order": 0,
+      "narration_start_seconds": 0.0,
+      "narration_end_seconds": 18.24,
+      "overall_coverage": 0.94
+    }],
+    "visual_query_bindings": [{
+      "visual_query_id": "f40bb007-b32f-4dd8-9dd5-516568a49284",
+      "status": "resolved",
+      "narration_start_seconds": 4.12,
+      "narration_end_seconds": 7.86,
+      "excerpt_match_score": 1.0,
+      "speech_alignment_coverage": 0.9
+    }]
   }
 }
 ```
@@ -72,11 +92,16 @@ Do not conflate these domains:
 2. `AudioBloco.synthesis_text` is a pronunciation-adjusted derivative (not copied into this compact
    package today).
 3. `preferred_start_seconds`/`preferred_end_seconds` are gameplay/source-media time.
-4. `narration_start_seconds`/`narration_end_seconds` are deterministic block offsets in the final
-   narration WAV.
+4. Block `narration_start_seconds`/`narration_end_seconds` are deterministic assembly offsets in the
+   final narration WAV.
+5. Binding narration timestamps are derived from actual aligned Whisper words inside that block.
 
-There are no VisualQuery-to-narration bindings yet. Stage 13 will produce Narration Timeline / Voice
-Alignment using the final audio identity, exact block ranges, canonical/synthesis text and word
-timestamps. Consumers must not fabricate narration timestamps from gameplay preferences.
+Gameplay timestamps remain inside the immutable script `VisualQuery`; narration timestamps remain
+inside the derived alignment section. A binding never overwrites the source query. `unresolved`,
+`ambiguous` and `not_applicable` are valid outcomes and contain no fabricated time range.
+
+The alignment chain is canonical excerpt span → synthesis token mapping → current Faster-Whisper
+word mapping → final narration time. It is valid only for the reported final audio SHA and strategy
+fingerprint. Alignment failure does not invalidate the final narration.
 
 Old scripts without `visual_queries` serialize `visual_queries: []`.

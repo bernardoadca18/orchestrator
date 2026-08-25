@@ -12,18 +12,95 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
 from app.core.database import get_db
+from app.models.workflow import NarrationAlignment, WorkflowExecucao
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
+    NarrationAlignmentEnsureOut,
+    NarrationBlockAlignmentOut,
+    NarrationTimelineAudioOut,
+    NarrationTimelineOut,
     PacoteProducaoOut,
     RoteiroDisponivelOut,
+    VisualQueryNarrationBindingOut,
     WorkflowCreateIn,
     WorkflowDetailOut,
     WorkflowOut,
 )
+from app.services.narration_alignment_service import (
+    NarrationAlignmentNotFoundError,
+    NarrationAlignmentService,
+)
 from app.tasks.audio_tasks import gerar_audio_workflow
 
 router = APIRouter()
+
+
+def _timeline_response(
+    workflow: WorkflowExecucao, alignment: NarrationAlignment
+) -> NarrationTimelineOut:
+    return NarrationTimelineOut(
+        workflow_id=workflow.id,
+        narration_alignment_id=alignment.id,
+        transcription_id=alignment.transcription_id,
+        strategy_version=alignment.strategy_version,
+        fingerprint=alignment.fingerprint,
+        status=alignment.status,
+        audio=NarrationTimelineAudioOut(
+            sha256=workflow.audio_final_sha256,
+            duration_seconds=workflow.duracao_audio_segundos,
+            sample_rate=workflow.audio_final_sample_rate,
+            channels=workflow.audio_final_channels,
+        ),
+        block_count=alignment.block_count,
+        resolved_visual_queries=alignment.resolved_visual_queries,
+        unresolved_visual_queries=alignment.unresolved_visual_queries,
+        ambiguous_visual_queries=alignment.ambiguous_visual_queries,
+        not_applicable_visual_queries=alignment.not_applicable_visual_queries,
+        metrics=alignment.metrics,
+        error_message=alignment.error_message,
+        started_at=alignment.started_at,
+        completed_at=alignment.completed_at,
+        created_at=alignment.criado_em,
+        blocks=[
+            NarrationBlockAlignmentOut(
+                id=block.id,
+                audio_block_id=block.audio_bloco_id,
+                block_order=block.block_order,
+                status=block.status,
+                narration_start_seconds=block.narration_start_seconds,
+                narration_end_seconds=block.narration_end_seconds,
+                canonical_token_count=block.canonical_token_count,
+                synthesis_token_count=block.synthesis_token_count,
+                asr_word_count=block.asr_word_count,
+                canonical_synthesis_coverage=block.canonical_synthesis_coverage,
+                synthesis_asr_coverage=block.synthesis_asr_coverage,
+                overall_coverage=block.overall_coverage,
+                diagnostics=block.diagnostics,
+            )
+            for block in alignment.block_alignments
+        ],
+        visual_query_bindings=[
+            VisualQueryNarrationBindingOut(
+                id=binding.id,
+                visual_query_id=binding.visual_query_id,
+                audio_block_id=binding.audio_bloco_id,
+                block_order=binding.block_order,
+                query_order=binding.query_order,
+                status=binding.status,
+                narration_start_seconds=binding.narration_start_seconds,
+                narration_end_seconds=binding.narration_end_seconds,
+                excerpt_match_method=binding.excerpt_match_method,
+                excerpt_match_score=binding.excerpt_match_score,
+                speech_alignment_coverage=binding.speech_alignment_coverage,
+                binding_confidence=binding.binding_confidence,
+                canonical_start_char=binding.canonical_start_char,
+                canonical_end_char=binding.canonical_end_char,
+                reason=binding.reason,
+            )
+            for binding in alignment.visual_query_bindings
+        ],
+    )
 
 
 @router.get("/roteiros-disponiveis", response_model=list[RoteiroDisponivelOut])
@@ -168,6 +245,45 @@ async def obter_transcricao(
     return transcricao
 
 
+@router.get("/{workflow_id}/narration-timeline", response_model=NarrationTimelineOut)
+async def obter_narration_timeline(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    """Return the alignment compatible with the current script/audio/transcription identity."""
+    repo = WorkflowRepository(session)
+    workflow = await repo.obter_por_id(workflow_id)
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    alignment = await NarrationAlignmentService(session).current(workflow_id)
+    if alignment is None:
+        raise HTTPException(404, "Narration Alignment compatível ainda não disponível")
+    return _timeline_response(workflow, alignment)
+
+
+@router.post(
+    "/{workflow_id}/narration-alignment",
+    response_model=NarrationAlignmentEnsureOut,
+)
+async def reconstruir_narration_alignment(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    force: bool = False,
+):
+    """Build only derived alignment records; never invokes voice, mastering or ASR."""
+    service = NarrationAlignmentService(session)
+    try:
+        alignment, created = await service.ensure(workflow_id, force=force)
+    except NarrationAlignmentNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    workflow = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if workflow is None:  # defensive after alignment transaction
+        raise HTTPException(404, "Workflow não encontrado")
+    return NarrationAlignmentEnsureOut(
+        created=created,
+        timeline=_timeline_response(workflow, alignment),
+    )
+
+
 @router.get("/{workflow_id}/blocos/{bloco_id}/audio")
 async def baixar_audio_bloco(
     workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
@@ -299,6 +415,11 @@ async def obter_pacote_producao(
             language=transcricao_data.language,
         )
 
+    alignment_data = await NarrationAlignmentService(session).current(workflow_id)
+    narration_alignment = (
+        _timeline_response(wf, alignment_data) if alignment_data is not None else None
+    )
+
     # Montar metadata
     metadata = MetadataPacoteOut(
         criado_em=wf.criado_em,
@@ -316,5 +437,6 @@ async def obter_pacote_producao(
         roteiro=roteiro,
         audio=audio,
         transcricao=transcricao,
+        narration_alignment=narration_alignment,
         metadata=metadata,
     )

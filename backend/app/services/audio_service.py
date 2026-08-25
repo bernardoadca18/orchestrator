@@ -25,6 +25,7 @@ from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.mastering import MasteringConfig, MasteringError, master_narration
+from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.production_audio import (
     ProductionAudioError,
     assemble_narration,
@@ -70,7 +71,10 @@ class AudioWorkflowService:
         voice_client_factory: Callable[[], VoiceClient] | None = None,
         preprocessor: PronunciationPreprocessor | None = None,
         transcription_provider: NarrationTranscriptionProvider | None = None,
+        alignment_service_factory: Callable[[AsyncSession], NarrationAlignmentService]
+        | None = None,
     ) -> None:
+        self.session = session
         self.repo = WorkflowRepository(session)
         self.config = config
         self.voice_client_factory = voice_client_factory or (lambda: VoiceClient(config))
@@ -78,6 +82,7 @@ class AudioWorkflowService:
             config.pronunciation_glossary_path
         )
         self.transcription_provider = transcription_provider
+        self.alignment_service_factory = alignment_service_factory or NarrationAlignmentService
 
     async def process(self, workflow_id: uuid.UUID) -> None:
         workflow = await self.repo.obter_por_id(workflow_id, com_blocos=True)
@@ -247,6 +252,13 @@ class AudioWorkflowService:
                 audio_phase="completed",
                 erro_mensagem=None,
             )
+            try:
+                await self.alignment_service_factory(self.session).ensure(workflow.id)
+            except Exception:
+                logger.exception(
+                    "automatic narration alignment failed without invalidating audio",
+                    extra={"workflow_id": str(workflow.id)},
+                )
         except VoiceClientCancelledError:
             logger.info(
                 "workflow cancelled during audio processing",

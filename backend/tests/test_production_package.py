@@ -84,9 +84,12 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("with_queries", [True, False])
+@pytest.mark.parametrize(
+    ("with_queries", "with_alignment"), [(True, True), (True, False), (False, False)]
+)
 async def test_production_package_contains_audio_identity_and_backward_compatible_queries(
     with_queries: bool,
+    with_alignment: bool,
 ) -> None:
     workflow_id = uuid.uuid4()
     query = _visual_query()
@@ -145,7 +148,70 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
     repository = MagicMock()
     repository.obter_por_id = AsyncMock(return_value=workflow)
     repository.obter_transcricao = AsyncMock(return_value=transcription)
-    with patch("app.api.routers.workflow.WorkflowRepository", return_value=repository):
+    alignment = None
+    if with_alignment:
+        alignment = SimpleNamespace(
+            id=uuid.uuid4(),
+            transcription_id=uuid.uuid4(),
+            strategy_version="narration_alignment_v1",
+            fingerprint="d" * 64,
+            status="completed",
+            block_count=1,
+            resolved_visual_queries=1,
+            unresolved_visual_queries=0,
+            ambiguous_visual_queries=0,
+            not_applicable_visual_queries=0,
+            metrics={"average_block_coverage": 1.0},
+            error_message=None,
+            started_at=None,
+            completed_at=None,
+            criado_em="2026-01-01T00:00:00Z",
+            block_alignments=[
+                SimpleNamespace(
+                    id=uuid.uuid4(),
+                    audio_bloco_id=block.id,
+                    block_order=0,
+                    status="aligned",
+                    narration_start_seconds=0.0,
+                    narration_end_seconds=1.25,
+                    canonical_token_count=2,
+                    synthesis_token_count=2,
+                    asr_word_count=2,
+                    canonical_synthesis_coverage=1.0,
+                    synthesis_asr_coverage=1.0,
+                    overall_coverage=1.0,
+                    diagnostics=None,
+                )
+            ],
+            visual_query_bindings=[
+                SimpleNamespace(
+                    id=uuid.uuid4(),
+                    visual_query_id=uuid.UUID(query["id"]),
+                    audio_bloco_id=block.id,
+                    block_order=0,
+                    query_order=1,
+                    status="resolved",
+                    narration_start_seconds=0.2,
+                    narration_end_seconds=0.8,
+                    excerpt_match_method="literal",
+                    excerpt_match_score=1.0,
+                    speech_alignment_coverage=1.0,
+                    binding_confidence=1.0,
+                    canonical_start_char=0,
+                    canonical_end_char=10,
+                    reason=None,
+                )
+            ],
+        )
+    alignment_service = MagicMock()
+    alignment_service.current = AsyncMock(return_value=alignment)
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch(
+            "app.api.routers.workflow.NarrationAlignmentService",
+            return_value=alignment_service,
+        ),
+    ):
         package = await obter_pacote_producao(workflow_id, MagicMock())
     assert package.audio.sample_rate == 48_000
     assert package.audio.sha256 == "f" * 64
@@ -156,6 +222,13 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
     if queries:
         assert queries[0].preferred_start_seconds == 12.5
         assert queries[0].narration_excerpt == "o primeiro sinal"
+    if with_alignment:
+        assert package.narration_alignment is not None
+        binding = package.narration_alignment.visual_query_bindings[0]
+        assert binding.narration_start_seconds == 0.2
+        assert queries[0].preferred_start_seconds == 12.5
+    else:
+        assert package.narration_alignment is None
     serialized = package.model_dump(mode="json")
     assert "/private/final.wav" not in str(serialized)
     assert "/private/raw.wav" not in str(serialized)

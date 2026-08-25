@@ -21,6 +21,7 @@ import uuid
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -89,6 +90,9 @@ class WorkflowExecucao(Base):
     )
     transcricao: Mapped["TranscricaoAudio | None"] = relationship(
         back_populates="workflow", uselist=False, cascade="all, delete-orphan"
+    )
+    narration_alignments: Mapped[list["NarrationAlignment"]] = relationship(
+        back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
     )
 
 
@@ -182,3 +186,187 @@ class TranscricaoAudio(Base):
     )
 
     workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="transcricao")
+
+
+class NarrationAlignment(Base):
+    """Versioned derived alignment for one immutable final narration identity."""
+
+    __tablename__ = "narration_alignments"
+    __table_args__ = (
+        UniqueConstraint("fingerprint", name="uq_narration_alignment_fingerprint"),
+        CheckConstraint(
+            "status IN ('pending', 'processing', 'completed', 'failed', 'blocked')",
+            name="ck_narration_alignment_status",
+        ),
+        CheckConstraint(
+            "block_count >= 0 AND resolved_visual_queries >= 0 AND "
+            "unresolved_visual_queries >= 0 AND ambiguous_visual_queries >= 0 AND "
+            "not_applicable_visual_queries >= 0",
+            name="ck_narration_alignment_counts",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    transcription_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("transcricoes_audio.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    final_audio_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    script_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    transcription_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    block_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resolved_visual_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unresolved_visual_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    ambiguous_visual_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    not_applicable_visual_queries: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    atualizado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="narration_alignments")
+    block_alignments: Mapped[list["NarrationBlockAlignment"]] = relationship(
+        back_populates="alignment",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="NarrationBlockAlignment.block_order",
+    )
+    visual_query_bindings: Mapped[list["VisualQueryNarrationBinding"]] = relationship(
+        back_populates="alignment",
+        cascade="save-update, merge",
+        passive_deletes="all",
+        order_by="VisualQueryNarrationBinding.block_order, "
+        "VisualQueryNarrationBinding.query_order",
+    )
+
+
+class NarrationBlockAlignment(Base):
+    """Compact quality metrics for one editorial block; no ASR word duplication."""
+
+    __tablename__ = "narration_block_alignments"
+    __table_args__ = (
+        UniqueConstraint("narration_alignment_id", "block_order", name="uq_block_alignment_order"),
+        CheckConstraint(
+            "narration_start_seconds >= 0 AND " "narration_end_seconds >= narration_start_seconds",
+            name="ck_block_alignment_range",
+        ),
+        CheckConstraint(
+            "canonical_synthesis_coverage >= 0 AND canonical_synthesis_coverage <= 1",
+            name="ck_block_canonical_synthesis_coverage",
+        ),
+        CheckConstraint(
+            "synthesis_asr_coverage >= 0 AND synthesis_asr_coverage <= 1",
+            name="ck_block_synthesis_asr_coverage",
+        ),
+        CheckConstraint(
+            "overall_coverage >= 0 AND overall_coverage <= 1",
+            name="ck_block_overall_coverage",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    narration_alignment_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("narration_alignments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    audio_bloco_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("audio_blocos.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    block_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    narration_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    narration_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
+    canonical_token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    synthesis_token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    asr_word_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    canonical_synthesis_coverage: Mapped[float] = mapped_column(Float, nullable=False)
+    synthesis_asr_coverage: Mapped[float] = mapped_column(Float, nullable=False)
+    overall_coverage: Mapped[float] = mapped_column(Float, nullable=False)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    alignment: Mapped["NarrationAlignment"] = relationship(back_populates="block_alignments")
+
+
+class VisualQueryNarrationBinding(Base):
+    """Derived narration-time binding; gameplay provenance remains in the script."""
+
+    __tablename__ = "visual_query_narration_bindings"
+    __table_args__ = (
+        UniqueConstraint(
+            "narration_alignment_id", "visual_query_id", name="uq_alignment_visual_query"
+        ),
+        CheckConstraint(
+            "status IN ('resolved', 'unresolved', 'ambiguous', 'not_applicable')",
+            name="ck_visual_query_binding_status",
+        ),
+        CheckConstraint(
+            "(narration_start_seconds IS NULL AND narration_end_seconds IS NULL) OR "
+            "(narration_start_seconds >= 0 AND narration_end_seconds >= narration_start_seconds)",
+            name="ck_visual_query_binding_range",
+        ),
+        CheckConstraint(
+            "excerpt_match_score BETWEEN 0 AND 1 AND "
+            "speech_alignment_coverage BETWEEN 0 AND 1 AND "
+            "binding_confidence BETWEEN 0 AND 1",
+            name="ck_visual_query_binding_scores",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    narration_alignment_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("narration_alignments.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    audio_bloco_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), ForeignKey("audio_blocos.id", ondelete="CASCADE"), nullable=False
+    )
+    visual_query_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    block_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    query_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    narration_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    narration_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    excerpt_match_method: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    excerpt_match_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    speech_alignment_coverage: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    binding_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    canonical_start_char: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    canonical_end_char: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    criado_em: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    alignment: Mapped["NarrationAlignment"] = relationship(back_populates="visual_query_bindings")

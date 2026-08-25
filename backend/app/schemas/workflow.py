@@ -163,7 +163,7 @@ class VisualQueryPacote(BaseModel):
     order: int
     intent: str
     query: str
-    narration_excerpt: str
+    narration_excerpt: str | None = None
     importance: str
     source_note_id: uuid.UUID | None = None
     preferred_session_id: uuid.UUID | None = None
@@ -198,6 +198,74 @@ class MetadataPacoteOut(BaseModel):
     tentativas: int
 
 
+class NarrationTimelineAudioOut(BaseModel):
+    sha256: str | None
+    duration_seconds: float | None
+    sample_rate: int | None
+    channels: int | None
+
+
+class NarrationBlockAlignmentOut(BaseModel):
+    id: uuid.UUID
+    audio_block_id: uuid.UUID
+    block_order: int
+    status: str
+    narration_start_seconds: float
+    narration_end_seconds: float
+    canonical_token_count: int
+    synthesis_token_count: int
+    asr_word_count: int
+    canonical_synthesis_coverage: float
+    synthesis_asr_coverage: float
+    overall_coverage: float
+    diagnostics: dict | None = None
+
+
+class VisualQueryNarrationBindingOut(BaseModel):
+    id: uuid.UUID
+    visual_query_id: uuid.UUID
+    audio_block_id: uuid.UUID
+    block_order: int
+    query_order: int
+    status: str
+    narration_start_seconds: float | None
+    narration_end_seconds: float | None
+    excerpt_match_method: str | None
+    excerpt_match_score: float
+    speech_alignment_coverage: float
+    binding_confidence: float
+    canonical_start_char: int | None
+    canonical_end_char: int | None
+    reason: str | None
+
+
+class NarrationTimelineOut(BaseModel):
+    workflow_id: uuid.UUID
+    narration_alignment_id: uuid.UUID
+    transcription_id: uuid.UUID | None
+    strategy_version: str
+    fingerprint: str
+    status: str
+    audio: NarrationTimelineAudioOut
+    block_count: int
+    resolved_visual_queries: int
+    unresolved_visual_queries: int
+    ambiguous_visual_queries: int
+    not_applicable_visual_queries: int
+    metrics: dict | None
+    error_message: str | None
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    created_at: dt.datetime
+    blocks: list[NarrationBlockAlignmentOut] = Field(default_factory=list)
+    visual_query_bindings: list[VisualQueryNarrationBindingOut] = Field(default_factory=list)
+
+
+class NarrationAlignmentEnsureOut(BaseModel):
+    created: bool
+    timeline: NarrationTimelineOut
+
+
 class PacoteProducaoOut(BaseModel):
     """
     Payload consolidado para handoff ao serviço de produção visual.
@@ -218,4 +286,5 @@ class PacoteProducaoOut(BaseModel):
     roteiro: RoteiroPacoteOut
     audio: AudioPacoteOut
     transcricao: TranscricaoPacoteOut | None = None
+    narration_alignment: NarrationTimelineOut | None = None
     metadata: MetadataPacoteOut

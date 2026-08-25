@@ -145,6 +145,14 @@ class FailingTranscriptionProvider:
         raise RuntimeError("transcription unavailable")
 
 
+class FakeAlignmentService:
+    def __init__(self) -> None:
+        self.calls: list[uuid.UUID] = []
+
+    async def ensure(self, workflow_id: uuid.UUID):
+        self.calls.append(workflow_id)
+
+
 def _job(job_id: str, seed: int) -> VoiceNarrationJob:
     return VoiceNarrationJob(
         id=job_id,
@@ -187,12 +195,14 @@ async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     repo = FakeRepository(workflow)
     voice = FakeVoiceClient(tone.read_bytes())
     transcription = FakeTranscriptionProvider()
+    alignment = FakeAlignmentService()
     service = AudioWorkflowService(
         object(),
         config=_config(tmp_path, glossary),
         voice_client_factory=lambda: voice,
         preprocessor=PronunciationPreprocessor.load(glossary),
         transcription_provider=transcription,
+        alignment_service_factory=lambda session: alignment,  # type: ignore[arg-type]
     )
     service.repo = repo
 
@@ -212,10 +222,12 @@ async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     assert workflow.audio_final_sha256 == final_metadata.sha256
     assert repo.transcription.audio_sha256 == final_metadata.sha256
     assert transcription.calls == 1
+    assert alignment.calls == [workflow.id]
 
     await service.process(workflow.id)
     assert len(voice.created) == 2
     assert transcription.calls == 1
+    assert alignment.calls == [workflow.id, workflow.id]
 
 
 @pytest.mark.asyncio

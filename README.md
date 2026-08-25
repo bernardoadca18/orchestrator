@@ -46,16 +46,35 @@ A completed block is reused only when its synthesis identity is current and the 
 with the persisted checksum, size, rate and channels. Thus a failure in block 8 does not replace
 valid takes 1–7. Missing local output is redownloaded from the same remote job when available.
 
-## Canonical text, synthesis text, and time
+## Stage 13 Narration Timeline / Voice Alignment
 
 - **Script text** is the immutable editorial `conteudo` from Ideas Hub.
 - **Synthesis text** is a derived pronunciation variant sent to Qwen. Configure global/project
   entries in `backend/config/pronunciation_glossary.yaml`.
 - **Gameplay time** belongs to a `VisualQuery` preferred source interval.
-- **Narration time** in this stage is only the exact assembled start/end of each audio block.
+- **Narration time** is a timestamp inside the final mastered narration WAV.
 
-Stage 13 will align canonical narration content and VisualQuery excerpts. No fuzzy/forced narration
-alignment is implemented here.
+Stage 13 first partitions Faster-Whisper words using the exact assembled block offsets. Within each
+block it performs deterministic sequence alignment from canonical tokens to pronunciation-adjusted
+synthesis tokens and then to ASR words. `VisualQuery.narration_excerpt` is searched only in its own
+canonical block: literal, normalized, accent-insensitive, then a bounded token-fuzzy fallback.
+Repeated or weak excerpts become `ambiguous` or `unresolved`; timestamps are never estimated from
+characters, reading speed or gameplay time.
+
+Persisted `NarrationAlignment`, compact per-block metrics and
+`VisualQueryNarrationBinding` records are versioned by `narration_alignment_v1`. The compatibility
+fingerprint includes final audio SHA, relevant script/excerpts, block synthesis identities and
+offsets, full transcription identity and strategy version. The same inputs reuse one run.
+
+Endpoints:
+
+- `GET /workflow/{id}/narration-timeline` returns the current compatible read model;
+- `POST /workflow/{id}/narration-alignment` builds/reuses it synchronously;
+- `POST ...?force=true` rebuilds only derived rows—never Qwen, mastering or ASR.
+
+Alignment runs automatically after a current transcription is available. Missing/stale
+transcription yields `blocked`; algorithm/input failure yields `failed`. Neither state invalidates a
+healthy `audio_concluido` workflow.
 
 ## Final identity and transcription
 
@@ -74,6 +93,7 @@ Copy `.env.example`. Important settings include:
 - `SILENCIO_ENTRE_BLOCOS_MS`, `AUDIO_FINAL_SAMPLE_RATE`;
 - LUFS/True Peak policy and duration tolerance;
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE`.
+- alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.
 
 No raw Qwen sampling controls are part of this service's production configuration.
 
@@ -114,12 +134,14 @@ Voice Service's `/health/ready` endpoint.
 ## Production handoff
 
 `GET /workflow/{id}/pacote-producao` returns script blocks, structured `visual_queries`, logical
-audio URLs, block/final objective metadata, mastering provenance and hash-bound transcription.
+audio URLs, block/final objective metadata, mastering provenance, hash-bound transcription and a
+separate compatible `narration_alignment` section.
 Older scripts without `visual_queries` remain valid and return an empty list. See
 `backend/docs/HANDOFF_VISUAL_PRODUCTION.md`.
 
 ## Limits
 
 This stage is single-workflow-worker oriented. The Voice Service independently owns its bounded
-single-GPU queue. Final video rendering, Media Search, Visual Director, Production Timeline and
-Stage 13 Narration Timeline/Voice Alignment are intentionally absent.
+single-GPU queue. Alignment uses deterministic text/ASR evidence, not a forced-alignment model; very
+large blocks are rejected by configured token/cell guards. Media Search, Visual Director,
+Production Timeline and final rendering remain intentionally absent for Stage 14+.

@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     transcription_compute_type: str = "int8"
     transcription_language: str | None = None
 
+    narration_alignment_strategy_version: str = "narration_alignment_v1"
+    narration_alignment_fuzzy_min_score: float = 0.72
+    narration_alignment_ambiguity_delta: float = 0.03
+    narration_alignment_min_speech_coverage: float = 0.60
+    narration_alignment_block_tolerance_seconds: float = 0.05
+    narration_alignment_timestamp_tolerance_seconds: float = 0.25
+    narration_alignment_max_tokens: int = 2_500
+    narration_alignment_max_cells: int = 2_000_000
+
     # --- API -----------------------------------------------------------------
     api_port: int = 8001
     cors_origins: str = "http://localhost:5174"
@@ -76,6 +85,24 @@ class Settings(BaseSettings):
     def validate_seed(cls, value: int) -> int:
         if value < 0 or value > 2**31 - 1:
             raise ValueError("voice_seed must be between 0 and 2147483647")
+        return value
+
+    @field_validator(
+        "narration_alignment_fuzzy_min_score",
+        "narration_alignment_ambiguity_delta",
+        "narration_alignment_min_speech_coverage",
+    )
+    @classmethod
+    def validate_alignment_ratio(cls, value: float) -> float:
+        if value < 0 or value > 1:
+            raise ValueError("narration alignment ratios must be between 0 and 1")
+        return value
+
+    @field_validator("narration_alignment_max_tokens", "narration_alignment_max_cells")
+    @classmethod
+    def validate_alignment_guard(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("narration alignment guards must be positive")
         return value
 
 
