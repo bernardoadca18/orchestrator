@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     media_indexer_http_max_retries: int = 2
     media_indexer_http_backoff_seconds: float = 0.25
 
+    video_composer_api_url: str = "http://localhost:8013"
+    video_composer_http_timeout_seconds: float = 15.0
+    video_composer_http_max_retries: int = 2
+    video_composer_http_backoff_seconds: float = 0.5
+    video_composer_poll_interval_seconds: float = 2.0
+    video_composer_render_timeout_seconds: float = 3600.0
+    video_composer_render_profile: str = "youtube_1080p30_v1"
+
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
     pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
@@ -88,7 +96,9 @@ class Settings(BaseSettings):
     # --- Logging --------------------------------------------------------------
     json_logging: bool = True
 
-    @field_validator("voice_api_url", "ideas_hub_api_url", "media_indexer_api_url")
+    @field_validator(
+        "voice_api_url", "ideas_hub_api_url", "media_indexer_api_url", "video_composer_api_url"
+    )
     @classmethod
     def strip_service_url(cls, value: str) -> str:
         return value.rstrip("/")
@@ -128,6 +138,10 @@ class Settings(BaseSettings):
     @field_validator(
         "media_indexer_api_timeout_seconds",
         "media_indexer_http_backoff_seconds",
+        "video_composer_http_timeout_seconds",
+        "video_composer_http_backoff_seconds",
+        "video_composer_poll_interval_seconds",
+        "video_composer_render_timeout_seconds",
     )
     @classmethod
     def validate_positive_seconds(cls, value: float) -> float:
@@ -154,7 +168,11 @@ class Settings(BaseSettings):
             raise ValueError("production timeline minimum duration must be positive")
         return value
 
-    @field_validator("visual_director_max_alternatives", "media_indexer_http_max_retries")
+    @field_validator(
+        "visual_director_max_alternatives",
+        "media_indexer_http_max_retries",
+        "video_composer_http_max_retries",
+    )
     @classmethod
     def validate_non_negative(cls, value: int) -> int:
         if value < 0:

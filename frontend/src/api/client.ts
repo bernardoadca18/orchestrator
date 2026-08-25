@@ -57,6 +57,12 @@ export interface Workflow {
   audio_final_byte_size: number | null;
   erro_mensagem: string | null;
   tentativas: number;
+  production_status: string | null;
+  production_phase: string | null;
+  production_error_category: string | null;
+  production_error_message: string | null;
+  production_started_at: string | null;
+  production_completed_at: string | null;
   criado_em: string;
   atualizado_em: string;
   blocos?: AudioBloco[];
@@ -65,6 +71,43 @@ export interface Workflow {
   blocos_pendentes?: number;
   blocos_gerando?: number;
   blocos_erro?: number;
+}
+
+export interface WorkflowRender {
+  id: string;
+  workflow_id: string;
+  production_timeline_id: string;
+  production_timeline_fingerprint: string;
+  composer_render_id: string | null;
+  render_profile: string;
+  mode: string;
+  status: string;
+  phase: string;
+  progress: number;
+  frames_rendered: number;
+  total_frames: number | null;
+  render_profile_identity: string | null;
+  render_fingerprint: string | null;
+  manifest_fingerprint: string | null;
+  output: {
+    sha256: string;
+    byte_size: number;
+    duration_seconds: number;
+    width: number;
+    height: number;
+    fps: number;
+    frame_count: number | null;
+    video_codec: string;
+    audio_codec: string;
+    audio_sample_rate: number;
+  } | null;
+  metrics: Record<string, unknown> | null;
+  error: { category: string; message: string } | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  video_url: string | null;
 }
 
 export interface DashboardStats {
@@ -87,7 +130,10 @@ export const api = {
     request<Workflow>("/workflow", { method: "POST", body: JSON.stringify({ roteiro_id }) }),
   repetirWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/retry`, { method: "PATCH" }),
   cancelarWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/cancelar`, { method: "PATCH" }),
+  retomarProducao: (id: string) => request<Workflow>(`/workflow/${id}/resume-production`, { method: "POST" }),
+  obterRender: (id: string) => request<WorkflowRender>(`/workflow/${id}/render`),
   obterDashboardStats: () => request<DashboardStats>("/dashboard/stats"),
   urlAudio: (id: string) => `${BASE_URL}/workflow/${id}/audio`,
   urlAudioBloco: (workflowId: string, blocoId: string) => `${BASE_URL}/workflow/${workflowId}/blocos/${blocoId}/audio`,
+  urlVideo: (id: string) => `${BASE_URL}/workflow/${id}/video`,
 };

@@ -62,13 +62,24 @@ class WorkflowOut(BaseModel):
     mastering_metrics: dict | None
     erro_mensagem: str | None
     tentativas: int
+    production_status: str | None = None
+    production_phase: str | None = None
+    production_error_category: str | None = None
+    production_error_message: str | None = None
+    production_started_at: dt.datetime | None = None
+    production_completed_at: dt.datetime | None = None
     criado_em: dt.datetime
     atualizado_em: dt.datetime
 
     @computed_field
     @property
     def audio_available(self) -> bool:
-        return bool(self.audio_final_path and self.status == "audio_concluido")
+        return bool(
+            self.audio_final_path
+            and self.audio_final_sha256
+            and self.audio_final_byte_size
+            and self.audio_final_byte_size > 0
+        )
 
 
 class WorkflowDetailOut(WorkflowOut):
@@ -473,6 +484,50 @@ class ProductionTimelineEnsureOut(BaseModel):
     production_timeline: ProductionTimelineOut
 
 
+class WorkflowRenderOutputOut(BaseModel):
+    sha256: str
+    byte_size: int = Field(gt=0)
+    duration_seconds: float = Field(gt=0)
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    fps: float = Field(gt=0)
+    frame_count: int | None = Field(default=None, gt=0)
+    video_codec: str
+    audio_codec: str
+    audio_sample_rate: int = Field(gt=0)
+
+
+class WorkflowRenderErrorOut(BaseModel):
+    category: str
+    message: str
+
+
+class WorkflowRenderOut(BaseModel):
+    id: uuid.UUID
+    workflow_id: uuid.UUID
+    production_timeline_id: uuid.UUID
+    production_timeline_fingerprint: str
+    composer_render_id: str | None
+    render_profile: str
+    mode: str
+    status: str
+    phase: str
+    progress: float = Field(ge=0, le=1)
+    frames_rendered: int = Field(ge=0)
+    total_frames: int | None = Field(default=None, gt=0)
+    render_profile_identity: str | None
+    render_fingerprint: str | None
+    manifest_fingerprint: str | None
+    output: WorkflowRenderOutputOut | None
+    metrics: dict | None
+    error: WorkflowRenderErrorOut | None
+    started_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+    video_url: str | None
+
+
 class PacoteProducaoOut(BaseModel):
     """
     Payload consolidado para handoff ao serviço de produção visual.
@@ -496,4 +551,5 @@ class PacoteProducaoOut(BaseModel):
     narration_alignment: NarrationTimelineOut | None = None
     visual_plan: VisualPlanOut | None = None
     production_timeline: ProductionTimelineOut | None = None
+    render: WorkflowRenderOut | None = None
     metadata: MetadataPacoteOut

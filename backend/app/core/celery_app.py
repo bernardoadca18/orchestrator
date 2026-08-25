@@ -15,11 +15,14 @@ celery_app = Celery(
     "orchestrator",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.audio_tasks"],
+    include=["app.tasks.audio_tasks", "app.tasks.production_tasks"],
 )
 
 celery_app.conf.update(
-    task_routes={"app.tasks.audio_tasks.*": {"queue": "audio_producao"}},
+    task_routes={
+        "app.tasks.audio_tasks.*": {"queue": "audio_producao"},
+        "app.tasks.production_tasks.*": {"queue": "audio_producao"},
+    },
     task_track_started=True,
     worker_prefetch_multiplier=1,
     task_acks_late=True,

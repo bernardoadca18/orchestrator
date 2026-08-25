@@ -76,7 +76,7 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         patch("app.api.routers.workflow.ideas_hub_client", hub),
-        patch("app.api.routers.workflow.gerar_audio_workflow") as task,
+        patch("app.api.routers.workflow.processar_producao_workflow") as task,
     ):
         await criar_workflow(WorkflowCreateIn(roteiro_id=script_id), MagicMock())
     assert repository.criar.await_args.kwargs["roteiro_snapshot"] == structure
@@ -381,6 +381,46 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         )
     production_timeline_service = MagicMock()
     production_timeline_service.current = AsyncMock(return_value=production_timeline)
+    render = (
+        SimpleNamespace(
+            id=uuid.uuid4(),
+            workflow_execucao_id=workflow_id,
+            production_timeline_id=production_timeline.id,
+            production_timeline_fingerprint=production_timeline.fingerprint,
+            composer_render_id=str(uuid.uuid4()),
+            render_profile="youtube_1080p30_v1",
+            mode="final",
+            status="completed",
+            phase="completed",
+            progress=1.0,
+            frames_rendered=38,
+            total_frames=38,
+            render_profile_identity="1" * 64,
+            render_fingerprint="2" * 64,
+            manifest_fingerprint="3" * 64,
+            output_sha256="4" * 64,
+            output_byte_size=100,
+            output_duration_seconds=1.25,
+            output_width=1920,
+            output_height=1080,
+            output_fps=30,
+            output_frame_count=38,
+            output_video_codec="h264",
+            output_audio_codec="aac",
+            output_audio_sample_rate=48000,
+            metrics={},
+            error_category=None,
+            error_message=None,
+            started_at=workflow.criado_em,
+            completed_at=workflow.atualizado_em,
+            created_at=workflow.criado_em,
+            updated_at=workflow.atualizado_em,
+        )
+        if with_timeline
+        else None
+    )
+    production_orchestration_service = MagicMock()
+    production_orchestration_service.current_render = AsyncMock(return_value=render)
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         patch(
@@ -394,6 +434,10 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         patch(
             "app.api.routers.workflow.ProductionTimelineService",
             return_value=production_timeline_service,
+        ),
+        patch(
+            "app.api.routers.workflow.ProductionOrchestrationService",
+            return_value=production_orchestration_service,
         ),
     ):
         package = await obter_pacote_producao(workflow_id, MagicMock())
@@ -425,11 +469,14 @@ async def test_production_package_contains_audio_identity_and_backward_compatibl
         assert package.visual_plan is None
     if with_timeline:
         assert package.production_timeline is not None
+        assert package.render is not None
+        assert package.render.video_url == f"/workflow/{workflow_id}/video"
         placement = package.production_timeline.tracks.primary_visual.placements[0]
         assert placement.timeline_start_seconds == 0.2
         assert placement.source.source_start_seconds == 12.5
     else:
         assert package.production_timeline is None
+        assert package.render is None
     serialized = package.model_dump(mode="json")
     assert "/private/final.wav" not in str(serialized)
     assert "/private/raw.wav" not in str(serialized)

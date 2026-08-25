@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import redis.asyncio as redis
 from fastapi import APIRouter
 from pydantic import BaseModel
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal
@@ -41,11 +41,19 @@ async def dashboard_stats():
         agora = datetime.now(UTC)
         ultimas_24h = agora - timedelta(hours=24)
 
-        # Workflows ativos (agendada ou gerando_audio)
+        # Stage 17 state is canonical; NULL rows retain the legacy interpretation.
         stmt_ativos = (
             select(func.count())
             .select_from(WorkflowExecucao)
-            .where(WorkflowExecucao.status.in_(["agendada", "gerando_audio"]))
+            .where(
+                or_(
+                    WorkflowExecucao.production_status.in_(["queued", "running"]),
+                    and_(
+                        WorkflowExecucao.production_status.is_(None),
+                        WorkflowExecucao.status.in_(["agendada", "gerando_audio"]),
+                    ),
+                )
+            )
         )
         workflows_ativos = (await session.execute(stmt_ativos)).scalar() or 0
 

@@ -5,6 +5,7 @@ import redis.asyncio as redis
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from app.clients.video_composer_client import VideoComposerClient
 from app.core.config import settings
 from app.core.database import engine
 
@@ -81,6 +82,18 @@ async def health_dependencias():
     except Exception as exc:
         all_healthy = False
         deps["voice_service"] = DependenciaStatus(status="error", error=type(exc).__name__)
+
+    # Frozen Stage 16 Video Composer readiness
+    try:
+        start = time.monotonic()
+        async with VideoComposerClient() as composer:
+            if not await composer.health_ready():
+                raise RuntimeError("not_ready")
+        latency = (time.monotonic() - start) * 1000
+        deps["video_composer"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+    except Exception as exc:
+        all_healthy = False
+        deps["video_composer"] = DependenciaStatus(status="error", error=type(exc).__name__)
 
     return DependenciasHealth(
         status="ok" if all_healthy else "degraded",

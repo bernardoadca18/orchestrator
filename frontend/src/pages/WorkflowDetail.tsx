@@ -1,18 +1,21 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, Workflow } from "../api/client";
+import { api, Workflow, WorkflowRender } from "../api/client";
 
 export default function WorkflowDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [erro, setErro] = useState<string | null>(null);
+  const [render, setRender] = useState<WorkflowRender | null>(null);
 
   async function carregar() {
     if (!id) return;
     try {
       const wf = await api.obterWorkflow(id);
       setWorkflow(wf);
+      const currentRender = await api.obterRender(id).catch(() => null);
+      setRender(currentRender);
       setErro(null);
     } catch (e) {
       setErro((e as Error).message);
@@ -49,11 +52,27 @@ export default function WorkflowDetail() {
         <p><strong>Perfil de Produção:</strong> {workflow.perfil_producao || "—"}</p>
         <p><strong>Tentativas:</strong> {workflow.tentativas}</p>
         <p><strong>Fase de áudio:</strong> {workflow.audio_phase}</p>
+        <p><strong>Produção:</strong> {workflow.production_status || "legado / inativa"}</p>
+        <p><strong>Fase de produção:</strong> {workflow.production_phase || "—"}</p>
         <p><strong>Duração Total:</strong> {workflow.duracao_audio_segundos ? `${workflow.duracao_audio_segundos.toFixed(1)}s` : "—"}</p>
         <p><strong>Formato final:</strong> {workflow.audio_final_sample_rate ? `${workflow.audio_final_sample_rate} Hz / ${workflow.audio_final_channels} canal` : "—"}</p>
 
         {workflow.erro_mensagem && (
           <p style={{ color: "crimson" }}><strong>Erro:</strong> {workflow.erro_mensagem}</p>
+        )}
+        {workflow.production_error_message && (
+          <p style={{ color: "crimson" }}><strong>Erro de produção:</strong> {workflow.production_error_category}: {workflow.production_error_message}</p>
+        )}
+
+        {render && (
+          <div style={{ marginTop: "1rem" }}>
+            <p><strong>Render:</strong> {render.status} / {render.phase} ({Math.round(render.progress * 100)}%)</p>
+            {render.total_frames && <p><strong>Frames:</strong> {render.frames_rendered}/{render.total_frames}</p>}
+            {render.error && <p style={{ color: "crimson" }}>{render.error.category}: {render.error.message}</p>}
+            {render.status === "completed" && (
+              <a href={api.urlVideo(workflow.id)} download>Baixar vídeo final</a>
+            )}
+          </div>
         )}
 
         {workflow.total_blocos !== undefined && (
@@ -83,7 +102,19 @@ export default function WorkflowDetail() {
             </button>
           )}
 
-          {(workflow.status === "agendada" || workflow.status === "gerando_audio") && (
+          {workflow.production_status === "failed" && workflow.status !== "erro" && (
+            <button onClick={() => api.repetirWorkflow(workflow.id).then(carregar)}>
+              Repetir fase de produção
+            </button>
+          )}
+
+          {(workflow.production_status === "blocked" || workflow.production_status === null) && (
+            <button onClick={() => api.retomarProducao(workflow.id).then(carregar)}>
+              Retomar produção
+            </button>
+          )}
+
+          {(workflow.production_status === "queued" || workflow.production_status === "running") && (
             <button onClick={() => api.cancelarWorkflow(workflow.id).then(carregar)}>
               Cancelar
             </button>

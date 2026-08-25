@@ -141,6 +141,50 @@ of primary-track overlap, playback-rate/source-duration identity, explicit gap c
 coverage metrics before a timeline can complete. Calculations use integer microseconds internally;
 the API exposes seconds with `[start,end)` semantics.
 
+## Stage 17 End-to-End Production Orchestration
+
+New workflows now enter a durable end-to-end state machine:
+
+```text
+audio -> narration_alignment -> visual_plan -> production_timeline -> render -> completed
+```
+
+`WorkflowExecucao.status` remains the historical audio lifecycle (`agendada`, `gerando_audio`,
+`audio_concluido`, `erro`, `cancelada`). `production_status` is the canonical Stage 17 lifecycle
+(`queued`, `running`, `blocked`, `failed`, `completed`, `cancelled`) and `production_phase` records
+the current boundary. Legacy rows keep both production fields `NULL` and do nothing until
+`POST /workflow/{id}/resume-production` explicitly adopts them.
+
+The single Celery worker advances frozen Stage 13–15 services with `force=False`. It reuses valid
+audio and compatible derived artifacts. A final timeline with any gap becomes `blocked` with a
+stable diagnostic; Stage 17 never falls back to preview or invents footage. `blocked` means valid
+operator input/artifacts are missing, while `failed` means the attempted operation failed.
+
+For a gap-free current timeline, the Orchestrator persists a `WorkflowRender` and deterministic
+`Idempotency-Key` before calling the separately deployed Video Composer. The request fingerprint
+binds workflow, timeline ID/fingerprint, render profile and `mode=final`. A lost POST response or a
+remote 404 is reconciled with the same key. Failed-render retry first GETs the known remote job and
+only submits again without the original key when that job is still failed.
+
+Composer polling uses one GET per Celery task. Each non-terminal result schedules a future task;
+workers never sleep or long-poll. Startup requeues only `queued`/`running` productions and routes a
+known render directly back to polling. Exhausted HTTP retries, including queue pressure (`429`),
+remain `running` and are rescheduled until the persisted render timeout; healthy upstream artifacts
+are not invalidated by a temporary Composer outage. Composer identity mismatch, timeout and stale
+current timeline protection prevent the wrong MP4 from completing a workflow.
+
+Endpoints:
+
+- `GET /workflow/{id}/render` returns the current semantic final render without side effects;
+- `GET /workflow/{id}/video` streams the Composer MP4 and forwards byte ranges;
+- `POST /workflow/{id}/resume-production` resumes blocked or explicitly adopts legacy work;
+- `PATCH /workflow/{id}/retry` selectively retries the failed phase;
+- `PATCH /workflow/{id}/cancelar` cancels local scheduling (remote Composer cancellation is not
+  available in the frozen Stage 16 contract).
+
+Final audio remains available whenever its persisted artifact identity exists, regardless of a
+downstream block, failure or cancellation.
+
 ## Final identity and transcription
 
 Workflow state exposes duration, SHA-256, byte size, 48 kHz sample rate, mono channels, mastering
@@ -162,6 +206,8 @@ Copy `.env.example`. Important settings include:
 - `MEDIA_INDEXER_API_URL`, timeout/retry settings and the bounded Visual Director search policy.
 - Production Timeline strategy/schema versions, 0.5 s minimum visual duration, bounded source
   fallback and deterministic gap-fill/coalescing policy.
+- `VIDEO_COMPOSER_API_URL`, bounded HTTP retry/backoff, one-shot poll interval, overall render
+  timeout and the `youtube_1080p30_v1` final profile.
 
 No raw Qwen sampling controls are part of this service's production configuration.
 
@@ -184,6 +230,8 @@ The separately deployed Ideas Hub is resolved through `IDEAS_HUB_API_URL_DOCKER`
 8000).
 The separately deployed Media Indexer is resolved through `MEDIA_INDEXER_API_URL_DOCKER` (default
 host port 8012).
+The separately deployed Video Composer is resolved through `VIDEO_COMPOSER_API_URL_DOCKER`
+(default host port 8013); it is intentionally not managed by this Compose project.
 
 Useful checks:
 
@@ -198,8 +246,19 @@ cd ..
 docker compose config
 ```
 
-`GET /health` is liveness. `GET /health/dependencias` verifies PostgreSQL, Redis, Ideas Hub and the
-Voice Service's `/health/ready` endpoint.
+`GET /health` is liveness. `GET /health/dependencias` independently verifies PostgreSQL, Redis,
+Ideas Hub, Voice Service and Video Composer readiness. Composer availability never changes
+liveness.
+
+For an already prepared, current, gap-free workflow, the opt-in real boundary smoke is:
+
+```bash
+cd backend
+.venv/bin/python scripts/smoke_stage17_orchestration.py --workflow-id <uuid>
+```
+
+It resumes the production if allowed, observes the durable workflow, downloads the final stream
+without buffering it in memory, and reports `STAGE17_ORCHESTRATION_RENDER_SMOKE`.
 
 ## Production handoff
 
@@ -209,17 +268,20 @@ separate compatible `narration_alignment` section. When available, `visual_plan`
 derived section containing gameplay source windows and alternatives; the original VisualQueries are
 not rewritten. `production_timeline` remains a separate derived section containing the narration
 track, exact gameplay trims, primary-track placements, explicit gaps and renderer-facing metrics.
+`render` is a separate top-level section containing only the current Composer mirror and validated
+output metadata; it is never embedded into the timeline.
 Older scripts without `visual_queries` remain valid and return an empty list. See
 `backend/docs/HANDOFF_VISUAL_PRODUCTION.md`.
 
 ## Limits
 
-This stage is single-workflow-worker oriented. The Voice Service independently owns its bounded
+This stage is single-worker/single-queue oriented. The Voice Service independently owns its bounded
 single-GPU queue. Alignment uses deterministic text/ASR evidence, not a forced-alignment model; very
 large blocks are rejected by configured token/cell guards. The Visual Director supports gameplay
 sources only and depends on existing searchable Media Indexer indexes. The Production Timeline
-supports one narration track and one primary gameplay track; FPS/render profile, source
-materialization, composition, Remotion and final rendering remain intentionally deferred to Stage
-16. The current local Media Indexer snapshot still has no completed TemporalIndex among its 104
-failed sessions, so real gameplay-selection and resulting edit-quality inspection remain explicit
-external validation debt before the complete visual production pipeline can be frozen.
+supports one narration track and one primary gameplay track. Stage 16 owns source materialization,
+frame quantization, Remotion and output validation; Stage 17 does not copy the MP4. Remote
+cancellation is unavailable, so local cancellation merely prevents stale polling from promoting a
+later result. The observed local Media Indexer dataset still lacks a genuinely usable completed
+searchable gameplay chain, so full real gameplay visual-quality validation remains external
+validation debt. Stage 18 Automated QA / Generalization is deliberately not implemented.

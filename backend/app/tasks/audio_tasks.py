@@ -85,7 +85,15 @@ async def reconciliar_blocos_orfaos() -> None:
         for workflow_id in workflow_ids:
             workflow = await repo.obter_por_id(workflow_id)
             if workflow is not None and workflow.status != "cancelada":
-                gerar_audio_workflow.delay(str(workflow_id))
+                if workflow.production_status is None:
+                    gerar_audio_workflow.delay(str(workflow_id))
+                else:
+                    # Stage 17's dedicated worker-ready recovery owns this row and
+                    # queues the production task once after orphan reconciliation.
+                    logger.info(
+                        "Stage 17 audio orphan left for production recovery",
+                        extra={"workflow_id": str(workflow_id)},
+                    )
 
 
 @worker_ready.connect

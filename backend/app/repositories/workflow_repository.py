@@ -1,9 +1,10 @@
 """Camada de acesso a dados para WorkflowExecucao e AudioBloco."""
 
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -26,6 +27,8 @@ class WorkflowRepository:
             roteiro_id=roteiro_id,
             roteiro_snapshot=roteiro_snapshot,
             perfil_producao=perfil_producao,
+            production_status="queued",
+            production_phase="audio",
         )
         self.session.add(wf)
         await self.session.commit()
@@ -35,7 +38,13 @@ class WorkflowRepository:
     async def obter_ativo_por_roteiro(self, roteiro_id: uuid.UUID) -> WorkflowExecucao | None:
         stmt = select(WorkflowExecucao).where(
             WorkflowExecucao.roteiro_id == roteiro_id,
-            WorkflowExecucao.status.in_(["agendada", "gerando_audio", "audio_concluido"]),
+            or_(
+                WorkflowExecucao.production_status.in_(["queued", "running", "blocked"]),
+                and_(
+                    WorkflowExecucao.production_status.is_(None),
+                    WorkflowExecucao.status.in_(["agendada", "gerando_audio", "audio_concluido"]),
+                ),
+            ),
         )
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
@@ -75,6 +84,42 @@ class WorkflowRepository:
         wf.status = "agendada"
         wf.erro_mensagem = None
         await self.session.commit()
+
+    async def atualizar_producao(
+        self,
+        workflow_id: uuid.UUID,
+        *,
+        status: str,
+        phase: str,
+        error_category: str | None = None,
+        error_message: str | None = None,
+        start: bool = False,
+        complete: bool = False,
+    ) -> WorkflowExecucao | None:
+        wf = await self.obter_por_id(workflow_id)
+        if wf is None:
+            return None
+        wf.production_status = status
+        wf.production_phase = phase
+        wf.production_error_category = error_category
+        wf.production_error_message = error_message
+        if start and wf.production_started_at is None:
+            wf.production_started_at = dt.datetime.now(dt.UTC)
+        if complete:
+            wf.production_completed_at = dt.datetime.now(dt.UTC)
+        elif status in {"queued", "running"}:
+            wf.production_completed_at = None
+        await self.session.commit()
+        await self.session.refresh(wf)
+        return wf
+
+    async def recoverable_productions(self) -> Sequence[WorkflowExecucao]:
+        statement = (
+            select(WorkflowExecucao)
+            .where(WorkflowExecucao.production_status.in_(["queued", "running"]))
+            .order_by(WorkflowExecucao.criado_em)
+        )
+        return (await self.session.execute(statement)).scalars().all()
 
     # --- AudioBloco ----------------------------------------------------------
 

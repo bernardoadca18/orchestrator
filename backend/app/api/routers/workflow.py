@@ -6,17 +6,24 @@ enfileirar geração de áudio, acompanhar progresso e baixar o resultado.
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
+from app.clients.video_composer_client import (
+    VideoComposerClient,
+    VideoComposerConflictError,
+    VideoComposerError,
+    VideoComposerNotFoundError,
+)
 from app.core.database import get_db
 from app.models.workflow import (
     NarrationAlignment,
     ProductionTimeline,
     VisualPlan,
     WorkflowExecucao,
+    WorkflowRender,
 )
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
@@ -44,11 +51,15 @@ from app.schemas.workflow import (
     WorkflowCreateIn,
     WorkflowDetailOut,
     WorkflowOut,
+    WorkflowRenderErrorOut,
+    WorkflowRenderOut,
+    WorkflowRenderOutputOut,
 )
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
 )
+from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_timeline_service import (
     ProductionTimelineNotFoundError,
     ProductionTimelineService,
@@ -59,8 +70,59 @@ from app.services.visual_director_service import (
     VisualDirectorService,
 )
 from app.tasks.audio_tasks import gerar_audio_workflow
+from app.tasks.production_tasks import processar_producao_workflow
 
 router = APIRouter()
+
+
+def _render_response(render: WorkflowRender) -> WorkflowRenderOut:
+    output = None
+    if render.status == "completed" and render.output_sha256:
+        output = WorkflowRenderOutputOut(
+            sha256=render.output_sha256,
+            byte_size=render.output_byte_size or 0,
+            duration_seconds=render.output_duration_seconds or 0,
+            width=render.output_width or 0,
+            height=render.output_height or 0,
+            fps=render.output_fps or 0,
+            frame_count=render.output_frame_count,
+            video_codec=render.output_video_codec or "",
+            audio_codec=render.output_audio_codec or "",
+            audio_sample_rate=render.output_audio_sample_rate or 0,
+        )
+    error = (
+        WorkflowRenderErrorOut(
+            category=render.error_category or "render_failed",
+            message=render.error_message or "Render failed",
+        )
+        if render.status == "failed"
+        else None
+    )
+    return WorkflowRenderOut(
+        id=render.id,
+        workflow_id=render.workflow_execucao_id,
+        production_timeline_id=render.production_timeline_id,
+        production_timeline_fingerprint=render.production_timeline_fingerprint,
+        composer_render_id=render.composer_render_id,
+        render_profile=render.render_profile,
+        mode=render.mode,
+        status=render.status,
+        phase=render.phase,
+        progress=render.progress,
+        frames_rendered=render.frames_rendered,
+        total_frames=render.total_frames,
+        render_profile_identity=render.render_profile_identity,
+        render_fingerprint=render.render_fingerprint,
+        manifest_fingerprint=render.manifest_fingerprint,
+        output=output,
+        metrics=render.metrics,
+        error=error,
+        started_at=render.started_at,
+        completed_at=render.completed_at,
+        created_at=render.created_at,
+        updated_at=render.updated_at,
+        video_url=f"/workflow/{render.workflow_execucao_id}/video" if output is not None else None,
+    )
 
 
 def _timeline_response(
@@ -337,7 +399,7 @@ async def criar_workflow(
             roteiro_snapshot=roteiro["estrutura"],
             perfil_producao=perfil_producao,
         )
-        gerar_audio_workflow.delay(str(wf.id))
+        processar_producao_workflow.delay(str(wf.id))
         return wf
     except IntegrityError as exc:
         if isinstance(exc.orig, UniqueViolation) and "uq_workflow_roteiro_ativo" in str(exc.orig):
@@ -376,14 +438,40 @@ async def repetir_workflow(
     wf = await repo.obter_por_id(workflow_id)
     if wf is None:
         raise HTTPException(404, "Workflow não encontrado")
-    if wf.status != "erro":
-        raise HTTPException(400, "Só é possível repetir workflows com status 'erro'")
-    if wf.tentativas >= wf.max_tentativas:
-        raise HTTPException(400, f"Limite de tentativas atingido ({wf.max_tentativas})")
-
-    await repo.incrementar_tentativa(wf.id)
-    gerar_audio_workflow.delay(str(wf.id))
+    if wf.production_status == "failed":
+        if wf.production_phase == "audio":
+            if wf.tentativas >= wf.max_tentativas:
+                raise HTTPException(400, f"Limite de tentativas atingido ({wf.max_tentativas})")
+            await repo.incrementar_tentativa(wf.id)
+            wf = await repo.obter_por_id(wf.id)
+            assert wf is not None
+        await ProductionOrchestrationService(session).explicit_retry(wf)
+        processar_producao_workflow.delay(str(wf.id))
+    elif wf.production_status is None and wf.status == "erro":
+        if wf.tentativas >= wf.max_tentativas:
+            raise HTTPException(400, f"Limite de tentativas atingido ({wf.max_tentativas})")
+        await repo.incrementar_tentativa(wf.id)
+        gerar_audio_workflow.delay(str(wf.id))
+    else:
+        raise HTTPException(400, "Só é possível repetir workflows com falha")
     return await repo.obter_por_id(wf.id)
+
+
+@router.post("/{workflow_id}/resume-production", response_model=WorkflowOut)
+async def retomar_producao(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id(workflow_id)
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if wf.production_status not in {None, "blocked"}:
+        raise HTTPException(409, "A produção não está bloqueada nem em modo legado")
+    await ProductionOrchestrationService(session).resume(wf)
+    processar_producao_workflow.delay(str(wf.id))
+    resumed = await repo.obter_por_id(wf.id)
+    assert resumed is not None
+    return resumed
 
 
 @router.patch("/{workflow_id}/cancelar", response_model=WorkflowOut)
@@ -405,6 +493,15 @@ async def cancelar_workflow(
         )
 
     await repo.atualizar_status(wf.id, "cancelada")
+    if wf.production_status is not None:
+        await repo.atualizar_producao(
+            wf.id,
+            status="cancelled",
+            phase=wf.production_phase or "audio",
+            error_category=None,
+            error_message=None,
+            complete=True,
+        )
     return await repo.obter_por_id(wf.id)
 
 
@@ -535,6 +632,73 @@ async def construir_production_timeline(
     return ProductionTimelineEnsureOut(
         created=created,
         production_timeline=_production_timeline_response(timeline),
+    )
+
+
+@router.get("/{workflow_id}/render", response_model=WorkflowRenderOut)
+async def obter_render(workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]):
+    workflow = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    render = await ProductionOrchestrationService(session).current_render(workflow_id)
+    if render is None:
+        raise HTTPException(404, "Render compatível ainda não disponível")
+    return _render_response(render)
+
+
+@router.get("/{workflow_id}/video")
+async def baixar_video_final(
+    workflow_id: uuid.UUID,
+    request: Request,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    workflow = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    render = await ProductionOrchestrationService(session).current_render(workflow_id)
+    if render is None or render.status != "completed" or render.composer_render_id is None:
+        raise HTTPException(404, "Vídeo final ainda não disponível")
+
+    composer = VideoComposerClient()
+    await composer.__aenter__()
+    try:
+        remote = await composer.open_video(
+            str(render.composer_render_id), range_header=request.headers.get("range")
+        )
+    except VideoComposerNotFoundError as exc:
+        await composer.aclose()
+        raise HTTPException(404, "Vídeo final não encontrado no Composer") from exc
+    except VideoComposerConflictError as exc:
+        await composer.aclose()
+        raise HTTPException(409, "Render remoto ainda não está concluído") from exc
+    except VideoComposerError as exc:
+        await composer.aclose()
+        raise HTTPException(502, "Video Composer indisponível") from exc
+
+    async def stream():
+        try:
+            async for chunk in remote.aiter_bytes():
+                yield chunk
+        finally:
+            await remote.aclose()
+            await composer.aclose()
+
+    safe_headers = {
+        name: value
+        for name, value in remote.headers.items()
+        if name.lower()
+        in {
+            "accept-ranges",
+            "content-length",
+            "content-range",
+            "content-disposition",
+        }
+    }
+    return StreamingResponse(
+        stream(),
+        status_code=remote.status_code,
+        media_type=remote.headers.get("content-type", "video/mp4"),
+        headers=safe_headers,
     )
 
 
@@ -685,6 +849,8 @@ async def obter_pacote_producao(
         if production_timeline_data
         else None
     )
+    render_data = await ProductionOrchestrationService(session).current_render(workflow_id)
+    render = _render_response(render_data) if render_data else None
 
     # Montar metadata
     metadata = MetadataPacoteOut(
@@ -706,5 +872,6 @@ async def obter_pacote_producao(
         narration_alignment=narration_alignment,
         visual_plan=visual_plan,
         production_timeline=production_timeline,
+        render=render,
         metadata=metadata,
     )

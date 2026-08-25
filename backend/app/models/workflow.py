@@ -43,6 +43,19 @@ class Base(DeclarativeBase):
 
 class WorkflowExecucao(Base):
     __tablename__ = "workflow_execucoes"
+    __table_args__ = (
+        CheckConstraint(
+            "production_status IS NULL OR production_status IN "
+            "('queued', 'running', 'blocked', 'failed', 'completed', 'cancelled')",
+            name="ck_workflow_production_status",
+        ),
+        CheckConstraint(
+            "production_phase IS NULL OR production_phase IN "
+            "('audio', 'narration_alignment', 'visual_plan', "
+            "'production_timeline', 'render', 'completed')",
+            name="ck_workflow_production_phase",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
@@ -99,6 +112,22 @@ class WorkflowExecucao(Base):
     )
     production_timelines: Mapped[list["ProductionTimeline"]] = relationship(
         back_populates="workflow", cascade="save-update, merge", passive_deletes="all"
+    )
+    renders: Mapped[list["WorkflowRender"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
+    )
+
+    # Stage 17 is deliberately orthogonal to the legacy audio status enum. Existing
+    # rows remain NULL and dormant until explicitly resumed.
+    production_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    production_phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    production_error_category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    production_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    production_started_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    production_completed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 
@@ -619,6 +648,82 @@ class ProductionTimeline(Base):
         passive_deletes="all",
         order_by="TimelineGap.order",
     )
+
+
+class WorkflowRender(Base):
+    """Durable local mirror of one semantically identified Composer render."""
+
+    __tablename__ = "workflow_renders"
+    __table_args__ = (
+        UniqueConstraint("request_fingerprint", name="uq_workflow_render_request_fingerprint"),
+        UniqueConstraint("idempotency_key", name="uq_workflow_render_idempotency_key"),
+        UniqueConstraint("composer_render_id", name="uq_workflow_render_composer_render_id"),
+        CheckConstraint("mode IN ('final', 'preview')", name="ck_workflow_render_mode"),
+        CheckConstraint(
+            "status IN ('pending', 'queued', 'preparing_assets', 'rendering', "
+            "'validating', 'completed', 'failed')",
+            name="ck_workflow_render_status",
+        ),
+        CheckConstraint("progress >= 0 AND progress <= 1", name="ck_workflow_render_progress"),
+        CheckConstraint(
+            "frames_rendered >= 0 AND (total_frames IS NULL OR total_frames > 0)",
+            name="ck_workflow_render_frames",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    production_timeline_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("production_timelines.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    production_timeline_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    render_profile: Mapped[str] = mapped_column(String(100), nullable=False)
+    mode: Mapped[str] = mapped_column(String(16), nullable=False, default="final")
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    composer_render_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    render_profile_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    render_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    manifest_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    phase: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    progress: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    frames_rendered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_frames: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    output_byte_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    output_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_fps: Mapped[float | None] = mapped_column(Float, nullable=True)
+    output_frame_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_video_codec: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    output_audio_codec: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    output_audio_sample_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    metrics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="renders")
+    production_timeline: Mapped["ProductionTimeline"] = relationship()
 
 
 class TimelinePlacement(Base):
