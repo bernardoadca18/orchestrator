@@ -1,8 +1,15 @@
+x-neovids-logging: &neovids-logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "3"
+
 services:
   db:
     image: pgvector/pgvector:pg16
     container_name: orchestrator-db
-    restart: unless-stopped
+    restart: "no"
+    logging: *neovids-logging
     environment:
       POSTGRES_USER: orchestrator
       POSTGRES_PASSWORD: orchestrator
@@ -20,14 +27,23 @@ services:
   redis:
     image: redis:7-alpine
     container_name: orchestrator-redis
-    restart: unless-stopped
+    restart: "no"
+    logging: *neovids-logging
     ports:
       - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
 
   api:
     build: ./backend
     container_name: orchestrator-api
-    restart: unless-stopped
+    restart: "no"
+    init: true
+    stop_grace_period: 1m
+    logging: *neovids-logging
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
@@ -46,11 +62,20 @@ services:
       - ./data/audio:/data/audio
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
 
   worker:
     build: ./backend
     container_name: orchestrator-worker
-    restart: unless-stopped
+    restart: "no"
+    init: true
+    stop_grace_period: 30m
+    logging: *neovids-logging
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
@@ -64,18 +89,31 @@ services:
       db:
         condition: service_healthy
       redis:
-        condition: service_started
+        condition: service_healthy
     volumes:
       - ./backend:/app
       - ./data/audio:/data/audio
       - ./cache/huggingface:/root/.cache/huggingface
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.core.celery_app.celery_app inspect ping --timeout 5 --destination celery@$$HOSTNAME | grep -q pong",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
 
   frontend:
     build: ./frontend
     container_name: orchestrator-frontend
-    restart: unless-stopped
+    restart: "no"
+    init: true
+    stop_grace_period: 30s
+    logging: *neovids-logging
     env_file: .env
     ports:
       - "5174:5174"
@@ -84,6 +122,18 @@ services:
     volumes:
       - ./frontend:/app
       - /app/node_modules
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:5174').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 20s
 
 volumes:
   orchestrator-db-data:

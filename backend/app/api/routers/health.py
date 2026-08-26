@@ -2,7 +2,7 @@ import time
 
 import httpx
 import redis.asyncio as redis
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 from pydantic import BaseModel
 
 from app.clients.video_composer_client import VideoComposerClient
@@ -24,13 +24,13 @@ class DependenciasHealth(BaseModel):
 
 
 @router.get("/health")
-async def health():
+@router.get("/health/live")
+async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/health/dependencias", response_model=DependenciasHealth)
-async def health_dependencias():
-    """Healthcheck profundo checando Ideas Hub, Voice Service, Redis e Postgres."""
+async def _check_dependencies() -> DependenciasHealth:
+    """Check the durable stores and runtime services required by production."""
     deps: dict[str, DependenciaStatus] = {}
     all_healthy = True
 
@@ -71,6 +71,21 @@ async def health_dependencias():
         all_healthy = False
         deps["ideas_hub"] = DependenciaStatus(status="error", error=type(exc).__name__)
 
+    # Media Indexer
+    try:
+        start = time.monotonic()
+        async with httpx.AsyncClient(
+            base_url=settings.media_indexer_api_url,
+            timeout=5.0,
+        ) as client:
+            resp = await client.get("/health/ready")
+            resp.raise_for_status()
+        latency = (time.monotonic() - start) * 1000
+        deps["media_indexer"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+    except Exception as exc:
+        all_healthy = False
+        deps["media_indexer"] = DependenciaStatus(status="error", error=type(exc).__name__)
+
     # Canonical Qwen Voice Service readiness
     try:
         start = time.monotonic()
@@ -99,3 +114,16 @@ async def health_dependencias():
         status="ok" if all_healthy else "degraded",
         dependencies=deps,
     )
+
+
+@router.get("/health/dependencias", response_model=DependenciasHealth)
+async def health_dependencias() -> DependenciasHealth:
+    return await _check_dependencies()
+
+
+@router.get("/health/ready", response_model=DependenciasHealth)
+async def health_ready(response: Response) -> DependenciasHealth:
+    result = await _check_dependencies()
+    if result.status != "ok":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return result
