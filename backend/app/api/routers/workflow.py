@@ -6,7 +6,7 @@ enfileirar geração de áudio, acompanhar progresso e baixar o resultado.
 import uuid
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,7 @@ from app.models.workflow import (
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
+    AudioActionIn,
     NarrationAlignmentEnsureOut,
     NarrationBlockAlignmentOut,
     NarrationTimelineAudioOut,
@@ -59,6 +60,7 @@ from app.schemas.workflow import (
     WorkflowRenderOut,
     WorkflowRenderOutputOut,
 )
+from app.services.audio_service import derive_manual_take_seed
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
@@ -473,12 +475,146 @@ async def obter_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSession
     return wf
 
 
+def _action_key(value: str | None) -> str:
+    if value is None or not value.strip() or len(value) > 200:
+        raise HTTPException(400, "Idempotency-Key é obrigatório para ações de narração")
+    return value.strip()
+
+
+@router.post("/{workflow_id}/audio/blocks/{ordem}/retry", response_model=WorkflowDetailOut)
+async def retry_audio_block(
+    workflow_id: uuid.UUID,
+    ordem: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    key = _action_key(idempotency_key)
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if wf.status == "cancelada" or wf.production_status == "cancelled":
+        raise HTTPException(409, "Workflow cancelado não aceita novas narrações")
+    block = next((item for item in wf.blocos if item.ordem == ordem), None)
+    if block is None:
+        raise HTTPException(404, "Bloco de áudio não encontrado")
+    failed_requested = next(
+        (
+            take
+            for take in block.takes
+            if take.id == block.requested_take_id and take.status == "failed"
+        ),
+        None,
+    )
+    if block.status != "erro" and failed_requested is None:
+        raise HTTPException(409, "Retry independente só é permitido para bloco com erro")
+    attempt_index = len(block.takes)
+    seed = derive_manual_take_seed(
+        block.id, block.synthesis_identity or "", attempt_index, "manual_retry"
+    )
+    try:
+        _, _, created = await repo.solicitar_take(
+            workflow_id=workflow_id,
+            ordem=ordem,
+            kind="manual_retry",
+            request_key=key,
+            idempotency_key=f"{key}:voice",
+            requested_seed=seed,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if created:
+        processar_producao_workflow.delay(str(workflow_id))
+    result = await repo.obter_por_id(workflow_id, com_blocos=True)
+    assert result is not None
+    return result
+
+
+@router.post("/{workflow_id}/audio/blocks/{ordem}/regenerate", response_model=WorkflowDetailOut)
+async def regenerate_audio_block(
+    workflow_id: uuid.UUID,
+    ordem: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    key = _action_key(idempotency_key)
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if wf.status == "cancelada" or wf.production_status == "cancelled":
+        raise HTTPException(409, "Workflow cancelado não aceita novas narrações")
+    block = next((item for item in wf.blocos if item.ordem == ordem), None)
+    if block is None:
+        raise HTTPException(404, "Bloco de áudio não encontrado")
+    seed = derive_manual_take_seed(
+        block.id, block.synthesis_identity or "", len(block.takes), "manual_regeneration"
+    )
+    try:
+        _, _, created = await repo.solicitar_take(
+            workflow_id=workflow_id,
+            ordem=ordem,
+            kind="manual_regeneration",
+            request_key=key,
+            idempotency_key=f"{key}:voice",
+            requested_seed=seed,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if created:
+        processar_producao_workflow.delay(str(workflow_id))
+    result = await repo.obter_por_id(workflow_id, com_blocos=True)
+    assert result is not None
+    return result
+
+
+@router.post("/{workflow_id}/audio/regenerate", response_model=WorkflowDetailOut)
+async def regenerate_full_audio(
+    workflow_id: uuid.UUID,
+    payload: AudioActionIn,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    if not payload.confirm:
+        raise HTTPException(400, "Regeneração completa exige confirm=true")
+    key = _action_key(idempotency_key)
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if wf.status == "cancelada" or wf.production_status == "cancelled":
+        raise HTTPException(409, "Workflow cancelado não aceita novas narrações")
+    if not wf.blocos:
+        raise HTTPException(409, "Workflow não possui blocos narrativos")
+    requested: dict[int, int | None] = {
+        block.ordem: derive_manual_take_seed(
+            block.id, block.synthesis_identity or "", len(block.takes), "manual_regeneration"
+        )
+        for block in wf.blocos
+    }
+    try:
+        requested_takes = await repo.solicitar_takes(
+            workflow_id=workflow_id,
+            kind="manual_regeneration",
+            request_key=key,
+            idempotency_key_prefix=f"{key}:voice",
+            requested_seed_by_order=requested,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if requested_takes:
+        processar_producao_workflow.delay(str(workflow_id))
+    result = await repo.obter_por_id(workflow_id, com_blocos=True)
+    assert result is not None
+    return result
+
+
 @router.patch("/{workflow_id}/retry", response_model=WorkflowOut)
 async def repetir_workflow(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
 ):
     repo = WorkflowRepository(session)
-    wf = await repo.obter_por_id(workflow_id)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
     if wf is None:
         raise HTTPException(404, "Workflow não encontrado")
     if wf.production_status == "failed":
@@ -486,8 +622,27 @@ async def repetir_workflow(
             if wf.tentativas >= wf.max_tentativas:
                 raise HTTPException(400, f"Limite de tentativas atingido ({wf.max_tentativas})")
             await repo.incrementar_tentativa(wf.id)
-            wf = await repo.obter_por_id(wf.id)
+            wf = await repo.obter_por_id(wf.id, com_blocos=True)
             assert wf is not None
+            failed_blocks = [block for block in wf.blocos if block.status == "erro"]
+            if failed_blocks:
+                for block in failed_blocks:
+                    key = f"workflow-retry:{wf.id}:{wf.tentativas}:{block.ordem}"
+                    seed = derive_manual_take_seed(
+                        block.id, block.synthesis_identity or "", len(block.takes), "manual_retry"
+                    )
+                    await repo.solicitar_take(
+                        workflow_id=wf.id,
+                        ordem=block.ordem,
+                        kind="manual_retry",
+                        request_key=key,
+                        idempotency_key=f"{key}:voice",
+                        requested_seed=seed,
+                    )
+                processar_producao_workflow.delay(str(wf.id))
+                result = await repo.obter_por_id(wf.id)
+                assert result is not None
+                return result
         await ProductionOrchestrationService(session).explicit_retry(wf)
         processar_producao_workflow.delay(str(wf.id))
     elif wf.production_status is None and wf.status == "erro":
@@ -865,6 +1020,8 @@ async def obter_pacote_producao(
             id=bloco.id,
             ordem=bloco.ordem,
             tipo=bloco.tipo,
+            texto=getattr(bloco, "texto", None),
+            normalized_text=getattr(bloco, "normalized_text", None),
             audio_url=f"/workflow/{workflow_id}/blocos/{bloco.id}/audio"
             if bloco.audio_path
             else None,
@@ -878,7 +1035,15 @@ async def obter_pacote_producao(
             voice_profile=bloco.voice_profile,
             generation_profile=bloco.generation_profile,
             resolved_seed=bloco.resolved_seed,
+            initial_resolved_seed=getattr(bloco, "initial_resolved_seed", None),
+            voice_chunking_identity=getattr(bloco, "voice_chunking_identity", None),
             generation_attempt=bloco.generation_attempt,
+            text_normalizer_version=getattr(bloco, "text_normalizer_version", None),
+            text_normalizer_identity=getattr(bloco, "text_normalizer_identity", None),
+            pronunciation_glossary_identity=getattr(bloco, "pronunciation_glossary_identity", None),
+            pronunciation_replacements=getattr(bloco, "pronunciation_replacements", None),
+            retry_seed_strategy=getattr(bloco, "retry_seed_strategy", None),
+            generation_attempt_history=getattr(bloco, "generation_attempt_history", None),
         )
         for bloco in (wf.blocos or [])
     ]

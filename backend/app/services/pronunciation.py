@@ -21,6 +21,7 @@ class PronunciationResult:
     canonical_text: str
     synthesis_text: str
     glossary_identity: str
+    applied_replacements: tuple[dict[str, Any], ...] = ()
 
 
 class PronunciationPreprocessor:
@@ -65,6 +66,7 @@ class PronunciationPreprocessor:
         )
         identity = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         result = canonical_text
+        applied: list[dict[str, Any]] = []
         for original in sorted(entries, key=lambda item: (-len(item), item.casefold())):
             replacement = entries[original]
             pattern = re.compile(
@@ -78,8 +80,10 @@ class PronunciationPreprocessor:
                     return replacement[:1].upper() + replacement[1:]
                 return replacement
 
-            result = pattern.sub(replace, result)
-        return PronunciationResult(canonical_text, result, identity)
+            result, count = pattern.subn(replace, result)
+            if count:
+                applied.append({"term": original, "replacement": replacement, "count": count})
+        return PronunciationResult(canonical_text, result, identity, tuple(applied))
 
     @staticmethod
     def _validate_entries(entries: dict[Any, Any]) -> dict[str, str]:

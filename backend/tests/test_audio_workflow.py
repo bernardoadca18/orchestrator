@@ -14,9 +14,10 @@ from app.clients.voice_client import (
     VoiceProfileProvenance,
 )
 from app.core.config import Settings
-from app.services.audio_service import AudioWorkflowService
+from app.services.audio_service import AudioWorkflowService, derive_quality_retry_seed
 from app.services.production_audio import inspect_wav
 from app.services.pronunciation import PronunciationPreprocessor
+from app.services.text_normalization import PortugueseTextNormalizer
 from app.services.transcription_service import (
     NarrationTranscription,
     NarrationWord,
@@ -48,7 +49,10 @@ class FakeRepository:
                 status="pendente",
                 job_id_voz=None,
                 resolved_seed=None,
+                initial_resolved_seed=None,
                 generation_attempt=0,
+                retry_seed_strategy=None,
+                generation_attempt_history=None,
                 audio_path=None,
                 audio_sha256=None,
                 audio_sample_rate=None,
@@ -61,7 +65,10 @@ class FakeRepository:
                 "status": "pendente",
                 "job_id_voz": None,
                 "resolved_seed": None,
+                "initial_resolved_seed": None,
                 "generation_attempt": 0,
+                "retry_seed_strategy": None,
+                "generation_attempt_history": None,
                 "audio_path": None,
                 "audio_sha256": None,
                 "audio_sample_rate": None,
@@ -95,6 +102,7 @@ class FakeVoiceClient:
         self.audio = audio
         self.created: list[dict] = []
         self.jobs: dict[str, VoiceNarrationJob] = {}
+        self.chunking_identity = "chunk-v1"
 
     async def __aenter__(self):
         return self
@@ -106,6 +114,7 @@ class FakeVoiceClient:
         return VoiceProfileProvenance(
             VoiceProfileDescriptor(name=voice, version="1", identity="v" * 64),
             GenerationProfileDescriptor(name=generation, version="1", identity="g" * 64),
+            chunking_identity=self.chunking_identity,
         )
 
     async def create_narration(self, **payload):
@@ -151,6 +160,11 @@ class FakeAlignmentService:
 
     async def ensure(self, workflow_id: uuid.UUID):
         self.calls.append(workflow_id)
+
+
+class FailingAlignmentService:
+    async def ensure(self, workflow_id: uuid.UUID):
+        raise RuntimeError("alignment unavailable")
 
 
 def _job(job_id: str, seed: int) -> VoiceNarrationJob:
@@ -212,6 +226,8 @@ async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     assert len(voice.created) == 2
     assert repo.blocks[0].texto == "Geralt usa Aard."
     assert repo.blocks[0].synthesis_text == "Geralt usa Árd."
+    assert repo.blocks[0].text_normalizer_version == "pt_br_text_normalizer_v1"
+    assert len(repo.blocks[0].text_normalizer_identity) == 64
     assert repo.blocks[0].resolved_seed == 1001
     assert repo.blocks[1].resolved_seed == 1002
     assert repo.blocks[0].narration_start_seconds == 0
@@ -266,7 +282,38 @@ async def test_changed_text_regenerates_only_stale_block(tmp_path: Path, write_t
     assert repo.blocks[1].synthesis_identity != second_identity
 
 
-@pytest.mark.parametrize("changed_input", ["voice", "generation", "glossary"])
+@pytest.mark.asyncio
+async def test_chunking_identity_change_does_not_reuse_local_wav(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = FakeRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    service = AudioWorkflowService(
+        object(), config=_config(tmp_path, glossary), voice_client_factory=lambda: voice
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    voice.chunking_identity = "chunk-v2"
+    workflow.status = "erro"
+    await service.process(workflow.id)
+    assert len(voice.created) == 2
+
+
+def _write_glossary(tmp_path: Path) -> Path:
+    path = tmp_path / "glossary.yaml"
+    path.write_text("version: '1'\nglobal: {}\nprojects: {}\n", encoding="utf-8")
+    return path
+
+
+@pytest.mark.parametrize("changed_input", ["voice", "generation", "glossary", "normalizer"])
 @pytest.mark.asyncio
 async def test_profile_or_glossary_change_invalidates_completed_block(
     changed_input: str, tmp_path: Path, write_tone
@@ -296,11 +343,13 @@ async def test_profile_or_glossary_change_invalidates_completed_block(
         config.voice_profile = "bernardo_v2"
     elif changed_input == "generation":
         config.voice_generation_profile = "narration_v2"
-    else:
+    elif changed_input == "glossary":
         glossary.write_text(
             "version: '2'\nglobal: {Texto: Téxto}\nprojects: {}\n", encoding="utf-8"
         )
         service.preprocessor = PronunciationPreprocessor.load(glossary)
+    else:
+        service.text_normalizer = PortugueseTextNormalizer(version="pt_br_text_normalizer_v2")
 
     await service.process(workflow.id)
     assert len(voice.created) == 2
@@ -338,7 +387,7 @@ async def test_missing_local_file_is_recovered_from_same_remote_job(
 
 
 @pytest.mark.asyncio
-async def test_failed_remote_job_gets_new_attempt_with_same_resolved_seed(
+async def test_quality_failed_remote_job_gets_new_traceable_seed(
     tmp_path: Path, write_tone
 ) -> None:
     tone = write_tone(tmp_path / "voice.wav", duration=1.0)
@@ -364,15 +413,110 @@ async def test_failed_remote_job_gets_new_attempt_with_same_resolved_seed(
     original_seed = block.resolved_seed
     Path(block.audio_path).unlink()
     voice.jobs[block.job_id_voz] = voice.jobs[block.job_id_voz].model_copy(
-        update={"status": "failed", "error_message": "provider failure"}
+        update={
+            "status": "failed",
+            "error_category": "chunk_quality_guard",
+            "error_message": "generated speech chunk failed quality validation",
+        }
     )
     workflow.status = "erro"
     await service.process(workflow.id)
     assert len(voice.created) == 2
-    assert voice.created[-1]["seed"] == original_seed
-    assert voice.created[-1]["idempotency_key"].endswith(":retry:1")
+    assert voice.created[-1]["seed"] != original_seed
+    assert voice.created[-1]["seed"] == derive_quality_retry_seed(original_seed, 1)
+    assert voice.created[-1]["idempotency_key"].endswith(":quality-retry:1")
     assert block.generation_attempt == 1
+    assert block.initial_resolved_seed == original_seed
+    assert block.retry_seed_strategy == "qwen-orchestrator-quality-retry-v1"
+    assert block.generation_attempt_history == [
+        {
+            "generation_attempt": 0,
+            "job_id": "job-1",
+            "seed": original_seed,
+            "error_category": "chunk_quality_guard",
+            "error_message": "generated speech chunk failed quality validation",
+        }
+    ]
     assert workflow.status == "audio_concluido"
+
+
+@pytest.mark.asyncio
+async def test_permanent_remote_failure_is_not_retried(tmp_path: Path, write_tone) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = tmp_path / "glossary.yaml"
+    glossary.write_text("version: '1'\nglobal: {}\nprojects: {}\n", encoding="utf-8")
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = FakeRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    service = AudioWorkflowService(
+        object(),
+        config=_config(tmp_path, glossary),
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    block = repo.blocks[0]
+    Path(block.audio_path).unlink()
+    voice.jobs[block.job_id_voz] = voice.jobs[block.job_id_voz].model_copy(
+        update={
+            "status": "failed",
+            "error_category": "profile_configuration",
+            "error_message": "profile unavailable",
+        }
+    )
+    workflow.status = "erro"
+    await service.process(workflow.id)
+    assert len(voice.created) == 1
+    assert block.generation_attempt == 0
+    assert block.generation_attempt_history is None
+    assert workflow.status == "erro"
+
+
+@pytest.mark.asyncio
+async def test_quality_retry_limit_is_enforced_and_diagnostics_preserved(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = tmp_path / "glossary.yaml"
+    glossary.write_text("version: '1'\nglobal: {}\nprojects: {}\n", encoding="utf-8")
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = FakeRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    config = _config(tmp_path, glossary)
+    config.voice_quality_max_retries = 0
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    block = repo.blocks[0]
+    Path(block.audio_path).unlink()
+    voice.jobs[block.job_id_voz] = voice.jobs[block.job_id_voz].model_copy(
+        update={
+            "status": "failed",
+            "error_category": "chunk_quality_guard",
+            "error_message": "bad duration",
+        }
+    )
+    workflow.status = "erro"
+    await service.process(workflow.id)
+    assert len(voice.created) == 1
+    assert block.generation_attempt_history[0]["error_category"] == "chunk_quality_guard"
+    assert workflow.status == "erro"
 
 
 @pytest.mark.asyncio
@@ -420,6 +564,37 @@ async def test_transcription_failure_does_not_invalidate_final_audio(
     await service.process(workflow.id)
 
     assert workflow.status == "audio_concluido"
-    assert workflow.audio_phase == "completed"
+    assert workflow.audio_phase == "quality_unvalidated"
     assert Path(workflow.audio_final_path).is_file()
     assert repo.transcription is None
+
+
+@pytest.mark.asyncio
+async def test_alignment_failure_preserves_audio_but_marks_quality_unvalidated(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = tmp_path / "glossary.yaml"
+    glossary.write_text("version: '1'\nglobal: {}\nprojects: {}\n", encoding="utf-8")
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = FakeRepository(workflow)
+    service = AudioWorkflowService(
+        object(),
+        config=_config(tmp_path, glossary),
+        voice_client_factory=lambda: FakeVoiceClient(tone.read_bytes()),
+        transcription_provider=FakeTranscriptionProvider(),
+        alignment_service_factory=lambda session: FailingAlignmentService(),  # type: ignore[arg-type]
+    )
+    service.repo = repo
+
+    await service.process(workflow.id)
+
+    assert workflow.status == "audio_concluido"
+    assert workflow.audio_phase == "quality_unvalidated"
+    assert Path(workflow.audio_final_path).is_file()
+    assert repo.transcription is not None

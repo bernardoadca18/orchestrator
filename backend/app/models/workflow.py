@@ -155,11 +155,15 @@ class AudioBloco(Base):
         String(50), nullable=False
     )  # introducao | desenvolvimento | conclusao | ...
     texto: Mapped[str] = mapped_column(Text, nullable=False)
+    normalized_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     synthesis_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     synthesis_text_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     synthesis_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
     pronunciation_glossary_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    pronunciation_replacements: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    text_normalizer_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    text_normalizer_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     job_id_voz: Mapped[str | None] = mapped_column(String(64), nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -167,8 +171,14 @@ class AudioBloco(Base):
     voice_profile_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
     generation_profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
     generation_profile_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    voice_chunking_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
     resolved_seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    initial_resolved_seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     generation_attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_seed_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation_attempt_history: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    current_take_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    requested_take_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     model_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     model_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(
@@ -196,6 +206,70 @@ class AudioBloco(Base):
     )
 
     workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="blocos")
+    takes: Mapped[list["AudioBlocoTake"]] = relationship(
+        back_populates="audio_bloco",
+        cascade="all, delete-orphan",
+        order_by="AudioBlocoTake.attempt_index",
+    )
+
+
+class AudioBlocoTake(Base):
+    """Durable semantic voice take; old takes are never overwritten."""
+
+    __tablename__ = "audio_bloco_takes"
+    __table_args__ = (
+        UniqueConstraint("audio_bloco_id", "attempt_index", name="uq_audio_bloco_take_attempt"),
+        UniqueConstraint("request_key", name="uq_audio_bloco_take_request_key"),
+        CheckConstraint(
+            "kind IN ('initial', 'quality_retry', 'manual_retry', 'manual_regeneration')",
+            name="ck_audio_bloco_take_kind",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'completed', 'failed', 'superseded')",
+            name="ck_audio_bloco_take_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    audio_bloco_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("audio_blocos.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    attempt_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), nullable=False, default="queued")
+    request_key: Mapped[str | None] = mapped_column(String(200), nullable=True, unique=True)
+    job_id_voz: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    requested_seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    resolved_seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    model_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    model_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    voice_profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    voice_profile_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation_profile: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    generation_profile_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    chunking_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    voice_chunking_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    synthesis_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    audio_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    audio_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    audio_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    audio_byte_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    audio_bloco: Mapped["AudioBloco"] = relationship(back_populates="takes")
 
 
 class TranscricaoAudio(Base):
@@ -292,8 +366,7 @@ class NarrationAlignment(Base):
         back_populates="alignment",
         cascade="save-update, merge",
         passive_deletes="all",
-        order_by="VisualQueryNarrationBinding.block_order, "
-        "VisualQueryNarrationBinding.query_order",
+        order_by="VisualQueryNarrationBinding.block_order, VisualQueryNarrationBinding.query_order",
     )
 
 
@@ -304,7 +377,7 @@ class NarrationBlockAlignment(Base):
     __table_args__ = (
         UniqueConstraint("narration_alignment_id", "block_order", name="uq_block_alignment_order"),
         CheckConstraint(
-            "narration_start_seconds >= 0 AND " "narration_end_seconds >= narration_start_seconds",
+            "narration_start_seconds >= 0 AND narration_end_seconds >= narration_start_seconds",
             name="ck_block_alignment_range",
         ),
         CheckConstraint(
@@ -494,8 +567,7 @@ class VisualDecision(Base):
             "visual_plan_id", "block_order", "query_order", name="uq_plan_decision_order"
         ),
         CheckConstraint(
-            "narration_binding_status IN "
-            "('resolved', 'unresolved', 'ambiguous', 'not_applicable')",
+            "narration_binding_status IN ('resolved', 'unresolved', 'ambiguous', 'not_applicable')",
             name="ck_visual_decision_binding_status",
         ),
         CheckConstraint(

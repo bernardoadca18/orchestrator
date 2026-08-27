@@ -316,6 +316,24 @@ async def test_gap_timeline_blocks_without_contacting_composer() -> None:
 
 
 @pytest.mark.asyncio
+async def test_invalid_narration_quality_blocks_before_visual_production() -> None:
+    workflow = _workflow(phase="narration_alignment", status="running")
+    original_audio_path = workflow.audio_final_path
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    service.alignments.item.status = "blocked"
+    service.alignments.item.error_message = "speech quality rejected"
+    result = await service.process(workflow.id)
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_error_category == "narration_alignment_blocked"
+    assert workflow.audio_final_path == original_audio_path
+    assert workflow.status == "audio_concluido"
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
 async def test_completed_remote_promotes_workflow() -> None:
     workflow = _workflow(phase="render", status="running")
     timeline = _timeline(workflow.id)

@@ -1,8 +1,12 @@
-version: "1"
+version: "2"
 global:
   Aard: "Árd"
   Kaer Morhen: "Kér Mórren"
   Scoia'tael: "Scóiatael"
   Yennefer: "Iênefer"
   Dijkstra: "Dáikstra"
+  Rockstar Games: "Rócstar Gueimes"
+  Red Dead Redemption: "Réd Déd Redémption"
+  GTA: "Gê Tê Á"
+  NPC: "Êne Pê Cê"
 projects: {}

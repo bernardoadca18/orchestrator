@@ -33,6 +33,11 @@ class VoiceJobNotFoundError(VoiceClientError):
 class VoiceJobFailedError(VoiceClientError):
     """The remote job reached its explicit failed state."""
 
+    def __init__(self, category: str, message: str):
+        super().__init__(f"{category}: {message}")
+        self.category = category
+        self.public_message = message
+
 
 class VoiceClientCancelledError(VoiceClientError):
     """The local workflow was cancelled while polling."""
@@ -78,6 +83,11 @@ class GenerationProfileDescriptor(BaseModel):
 class VoiceProfileProvenance:
     voice: VoiceProfileDescriptor
     generation: GenerationProfileDescriptor
+    # The service owns chunking; older Voice Service deployments do not expose it.
+    # Keeping a stable fallback preserves compatibility while a mismatch is never
+    # silently accepted when the canonical health endpoint is available.
+    chunking_identity: str = "legacy:unknown"
+    chunking_strategy_version: str = "legacy:unknown"
 
 
 class VoiceClient:
@@ -161,7 +171,7 @@ class VoiceClient:
             if job.status == "failed":
                 category = job.error_category or "provider_failure"
                 message = job.error_message or "remote narration failed"
-                raise VoiceJobFailedError(f"{category}: {message}")
+                raise VoiceJobFailedError(category, message)
             await asyncio.sleep(self.settings.voice_poll_interval_seconds)
         raise VoiceClientTimeoutError(
             f"narration job exceeded {self.settings.voice_job_timeout_seconds:g}s"
@@ -212,7 +222,28 @@ class VoiceClient:
         )
         if voice is None or generation is None:
             raise VoiceClientError("configured voice or generation profile is unavailable")
-        return VoiceProfileProvenance(voice, generation)
+        chunking_identity = "legacy:unknown"
+        chunking_strategy_version = "legacy:unknown"
+        try:
+            health_response = await self._request_with_retry(
+                "GET",
+                "/health/ready",
+                timeout=self.settings.voice_status_timeout_seconds,
+            )
+            health = health_response.json()
+            if isinstance(health, dict):
+                chunking_identity = str(health.get("chunking_identity") or chunking_identity)
+                chunking_strategy_version = str(
+                    health.get("chunking_strategy_version") or chunking_strategy_version
+                )
+        except (VoiceClientError, ValueError, TypeError):
+            pass
+        return VoiceProfileProvenance(
+            voice=voice,
+            generation=generation,
+            chunking_identity=chunking_identity,
+            chunking_strategy_version=chunking_strategy_version,
+        )
 
     async def _request_with_retry(
         self,

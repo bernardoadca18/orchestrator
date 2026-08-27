@@ -127,8 +127,9 @@ async def test_failed_and_timeout_are_distinct() -> None:
         )
 
     async with VoiceClient(_settings(), transport=httpx.MockTransport(failed)) as client:
-        with pytest.raises(VoiceJobFailedError, match="synthesis"):
+        with pytest.raises(VoiceJobFailedError, match="synthesis") as error:
             await client.wait_for_narration("job-1")
+        assert error.value.category == "synthesis"
 
     async def queued(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=_job("queued"))

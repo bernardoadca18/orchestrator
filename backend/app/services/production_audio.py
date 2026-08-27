@@ -20,6 +20,10 @@ class ProductionAudioError(RuntimeError):
     """Audio is invalid or cannot be published safely."""
 
 
+class BlockDurationQualityError(ProductionAudioError):
+    """A technically valid source WAV is grossly implausible for its text."""
+
+
 @dataclass(frozen=True)
 class AudioFileMetadata:
     duration_seconds: float
@@ -84,12 +88,31 @@ def publish_source_block(
     *,
     expected_sha256: str | None = None,
     expected_byte_size: int | None = None,
+    text_length_chars: int | None = None,
+    max_duration_seconds: float | None = None,
+    max_seconds_per_char: float | None = None,
+    duration_grace_seconds: float = 0.0,
 ) -> AudioFileMetadata:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp"
     try:
         temporary.write_bytes(audio_bytes)
         metadata = inspect_wav(temporary)
+        if (
+            text_length_chars is not None
+            and max_duration_seconds is not None
+            and max_seconds_per_char is not None
+        ):
+            relative_limit = duration_grace_seconds + (
+                max_seconds_per_char * max(text_length_chars, 1)
+            )
+            if (
+                metadata.duration_seconds > max_duration_seconds
+                or metadata.duration_seconds > relative_limit
+            ):
+                raise BlockDurationQualityError(
+                    "Voice Service audio duration is implausible for the synthesis text"
+                )
         if expected_sha256 and metadata.sha256 != expected_sha256:
             raise ProductionAudioError("Voice Service audio checksum mismatch")
         if expected_byte_size is not None and metadata.byte_size != expected_byte_size:

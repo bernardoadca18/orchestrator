@@ -7,6 +7,7 @@ import pytest
 import soundfile as sf
 
 from app.services.production_audio import (
+    BlockDurationQualityError,
     ProductionAudioError,
     assemble_narration,
     inspect_wav,
@@ -38,6 +39,21 @@ def test_corrupt_or_checksum_mismatched_source_is_never_published(
     source = write_tone(tmp_path / "valid.wav")
     with pytest.raises(ProductionAudioError, match="checksum"):
         publish_source_block(source.read_bytes(), destination, expected_sha256="0" * 64)
+    assert not destination.exists()
+
+
+def test_publish_rejects_grossly_implausible_block_duration(tmp_path: Path, write_tone) -> None:
+    source = write_tone(tmp_path / "runaway.wav", duration=20.0)
+    destination = tmp_path / "published.wav"
+    with pytest.raises(BlockDurationQualityError, match="implausible"):
+        publish_source_block(
+            source.read_bytes(),
+            destination,
+            text_length_chars=10,
+            max_duration_seconds=120,
+            max_seconds_per_char=0.5,
+            duration_grace_seconds=5,
+        )
     assert not destination.exists()
 
 

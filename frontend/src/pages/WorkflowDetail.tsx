@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { api, ProductionQAReport, Workflow, WorkflowRender } from "../api/client";
+import { shouldPollQA, shouldPollRender } from "./polling";
 
 export default function WorkflowDetail() {
   const { id } = useParams<{ id: string }>();
@@ -16,10 +17,16 @@ export default function WorkflowDetail() {
     try {
       const wf = await api.obterWorkflow(id);
       setWorkflow(wf);
-      const currentRender = await api.obterRender(id).catch(() => null);
-      setRender(currentRender);
-      const currentQA = await api.obterQAReport(id).catch(() => null);
-      setQa(currentQA);
+      if (shouldPollRender(wf)) {
+        setRender(await api.obterRender(id).catch(() => null));
+      } else {
+        setRender(null);
+      }
+      if (shouldPollQA(wf)) {
+        setQa(await api.obterQAReport(id).catch(() => null));
+      } else {
+        setQa(null);
+      }
       setErro(null);
     } catch (e) {
       setErro((e as Error).message);
@@ -49,6 +56,29 @@ export default function WorkflowDetail() {
     }
   }
 
+  function actionKey(label: string) {
+    const suffix = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+    return `ideas-hub:${label}:${id}:${suffix}`;
+  }
+
+  async function retryBlock(order: number) {
+    if (!id) return;
+    try { await api.retryAudioBlock(id, order, actionKey("retry-block")); await carregar(); }
+    catch (e) { setErro((e as Error).message); }
+  }
+
+  async function regenerateBlock(order: number) {
+    if (!id || !window.confirm("Gerar um novo take para este bloco? O take atual será preservado no histórico.")) return;
+    try { await api.regenerateAudioBlock(id, order, actionKey("regenerate-block")); await carregar(); }
+    catch (e) { setErro((e as Error).message); }
+  }
+
+  async function regenerateNarration() {
+    if (!id || !window.confirm("Regenerar toda a narração? Os takes e artefatos antigos serão preservados.")) return;
+    try { await api.regenerateNarration(id, actionKey("regenerate-narration")); await carregar(); }
+    catch (e) { setErro((e as Error).message); }
+  }
+
   const statusColors: Record<string, string> = {
     agendada: "#6c757d",
     gerando_audio: "#007bff",
@@ -68,7 +98,7 @@ export default function WorkflowDetail() {
       <div style={{ marginBottom: "2rem", padding: "1rem", background: "#f5f5f5", borderRadius: "8px" }}>
         <p><strong>Status:</strong> <span style={{ color: statusColors[workflow.status] }}>{workflow.status}</span></p>
         <p><strong>Perfil de Produção:</strong> {workflow.perfil_producao || "—"}</p>
-        <p><strong>Tentativas:</strong> {workflow.tentativas}</p>
+        <p><strong>Retries da execução:</strong> {workflow.tentativas}</p>
         <p><strong>Fase de áudio:</strong> {workflow.audio_phase}</p>
         <p><strong>Produção:</strong> {workflow.production_status || "legado / inativa"}</p>
         <p><strong>Fase de produção:</strong> {workflow.production_phase || "—"}</p>
@@ -169,6 +199,8 @@ export default function WorkflowDetail() {
             </button>
           )}
 
+          <button onClick={regenerateNarration}>Regenerar narração completa</button>
+
           {(workflow.production_status === "blocked" || workflow.production_status === null) && (
             <button onClick={() => api.retomarProducao(workflow.id).then(carregar)}>
               Retomar produção
@@ -194,6 +226,8 @@ export default function WorkflowDetail() {
               <th style={{ padding: "8px" }}>Duração</th>
               <th style={{ padding: "8px" }}>Voz / geração</th>
               <th style={{ padding: "8px" }}>Seed</th>
+              <th style={{ padding: "8px" }}>Takes / tentativa atual</th>
+              <th style={{ padding: "8px" }}>Texto</th>
               <th style={{ padding: "8px" }}>Erro</th>
               <th style={{ padding: "8px" }}>Áudio</th>
             </tr>
@@ -215,6 +249,35 @@ export default function WorkflowDetail() {
                   {bloco.voice_profile || "—"} / {bloco.generation_profile || "—"}
                 </td>
                 <td style={{ padding: "8px" }}>{bloco.resolved_seed ?? "—"}</td>
+                <td style={{ padding: "8px" }}>
+                  {bloco.generation_attempt + 1} / {bloco.takes?.length || 0}
+                  <div style={{ display: "flex", gap: "0.25rem", marginTop: "0.25rem" }}>
+                    {(bloco.status === "erro" || bloco.takes?.some((take) => take.status === "failed" && !take.is_current)) && <button onClick={() => retryBlock(bloco.ordem)}>Retry bloco</button>}
+                    <button onClick={() => regenerateBlock(bloco.ordem)}>Novo take</button>
+                  </div>
+                  {bloco.takes?.length > 0 && <details style={{ marginTop: "0.25rem" }}>
+                    <summary>Histórico</summary>
+                    <ul>
+                      {bloco.takes.map((take) => (
+                        <li key={take.id}>
+                          #{take.attempt_index} {take.kind} — {take.status}, seed {take.resolved_seed ?? take.requested_seed ?? "—"}
+                          {take.error_category ? ` — ${take.error_category}: ${take.error_message || ""}` : ""}
+                          {take.is_current ? " (atual)" : ""}
+                        </li>
+                      ))}
+                    </ul>
+                  </details>}
+                </td>
+                <td style={{ padding: "8px", maxWidth: 260 }}>
+                  <details><summary>Ver texto</summary>
+                    <p><strong>Canônico:</strong> {bloco.texto}</p>
+                    <p><strong>Normalizado:</strong> {bloco.normalized_text || "—"}</p>
+                    <p><strong>Síntese:</strong> {bloco.synthesis_text || "—"}</p>
+                    {bloco.pronunciation_replacements?.length ? (
+                      <p><strong>Pronúncias:</strong> {bloco.pronunciation_replacements.map((item) => `${item.term} → ${item.replacement} (${item.count}x)`).join(", ")}</p>
+                    ) : null}
+                  </details>
+                </td>
                 <td style={{ padding: "8px", color: "crimson" }}>
                   {bloco.erro_mensagem || "—"}
                 </td>

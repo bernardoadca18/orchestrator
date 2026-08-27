@@ -32,6 +32,7 @@ from app.services.narration_alignment_algorithm import (
     resolve_match_timestamps,
     validate_timed_words,
 )
+from app.services.narration_quality import NarrationSpeechQualityPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -104,17 +105,19 @@ def alignment_identity(
     transcription: TranscricaoAudio | None,
     *,
     strategy_version: str = ALIGNMENT_STRATEGY_VERSION,
+    quality_policy_identity: str = "legacy-unversioned-quality-policy",
 ) -> AlignmentIdentity:
     script_fingerprint = _script_identity(workflow)
     transcription_fingerprint = _transcription_identity(transcription)
     blocks = sorted(workflow.blocos or [], key=lambda block: block.ordem)
     fingerprint = _canonical_hash(
         {
-            "version": "stage_13_alignment_fingerprint_v1",
+            "version": "stage_13_alignment_fingerprint_v2",
             "final_audio_sha256": workflow.audio_final_sha256,
             "script_fingerprint": script_fingerprint,
             "transcription_fingerprint": transcription_fingerprint,
             "strategy_version": strategy_version,
+            "quality_policy_identity": quality_policy_identity,
             "blocks": [
                 {
                     "order": block.ordem,
@@ -152,6 +155,13 @@ class NarrationAlignmentService:
         )
         self.max_tokens_per_sequence = config.narration_alignment_max_tokens
         self.max_alignment_cells = config.narration_alignment_max_cells
+        self.quality_policy = NarrationSpeechQualityPolicy(
+            version=config.narration_quality_policy_version,
+            minimum_speech_coverage=self.minimum_speech_coverage,
+            max_repeated_ngram_occurrences=(
+                config.narration_quality_max_repeated_ngram_occurrences
+            ),
+        )
 
     async def current(self, workflow_id: uuid.UUID) -> NarrationAlignment | None:
         workflow = await self.workflows.obter_por_id(
@@ -160,7 +170,10 @@ class NarrationAlignmentService:
         if workflow is None:
             raise NarrationAlignmentNotFoundError("Workflow não encontrado")
         identity = alignment_identity(
-            workflow, workflow.transcricao, strategy_version=self.strategy_version
+            workflow,
+            workflow.transcricao,
+            strategy_version=self.strategy_version,
+            quality_policy_identity=self.quality_policy.identity,
         )
         return await self.alignments.get_by_fingerprint(identity.fingerprint, eager=True)
 
@@ -174,7 +187,10 @@ class NarrationAlignmentService:
             raise NarrationAlignmentNotFoundError("Workflow não encontrado")
         transcription = workflow.transcricao
         identity = alignment_identity(
-            workflow, transcription, strategy_version=self.strategy_version
+            workflow,
+            transcription,
+            strategy_version=self.strategy_version,
+            quality_policy_identity=self.quality_policy.identity,
         )
         alignment, created = await self.alignments.create_or_get(
             workflow_id=workflow.id,
@@ -209,6 +225,12 @@ class NarrationAlignmentService:
             await self.alignments.replace_outputs(
                 alignment, blocks=blocks, bindings=bindings, metrics=metrics
             )
+            speech_quality = cast(dict[str, object], metrics["speech_quality"])
+            if speech_quality["status"] == "invalid":
+                await self.alignments.mark_blocked(
+                    alignment,
+                    "final narration failed the versioned speech-quality policy",
+                )
         except Exception as exc:
             logger.exception(
                 "narration alignment failed without invalidating final audio",
@@ -409,6 +431,11 @@ class NarrationAlignmentService:
             "word_count": len(timed_words),
             "algorithm_complexity": "per-block O(canonical_tokens * synthesis/asr_tokens)",
         }
+        quality = self.quality_policy.evaluate(
+            persisted_blocks,
+            [word.word for word in timed_words],
+        )
+        metrics["speech_quality"] = quality.to_dict()
         return persisted_blocks, bindings, metrics
 
     @staticmethod

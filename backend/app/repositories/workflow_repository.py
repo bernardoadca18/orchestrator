@@ -4,11 +4,11 @@ import datetime as dt
 import uuid
 from collections.abc import Sequence
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.workflow import AudioBloco, TranscricaoAudio, WorkflowExecucao
+from app.models.workflow import AudioBloco, AudioBlocoTake, TranscricaoAudio, WorkflowExecucao
 
 
 class WorkflowRepository:
@@ -56,7 +56,9 @@ class WorkflowRepository:
     ) -> WorkflowExecucao | None:
         stmt = select(WorkflowExecucao).where(WorkflowExecucao.id == workflow_id)
         if com_blocos:
-            stmt = stmt.options(selectinload(WorkflowExecucao.blocos))
+            stmt = stmt.options(
+                selectinload(WorkflowExecucao.blocos).selectinload(AudioBloco.takes)
+            )
         if com_transcricao:
             stmt = stmt.options(selectinload(WorkflowExecucao.transcricao))
         return (await self.session.execute(stmt)).scalar_one_or_none()
@@ -113,6 +115,23 @@ class WorkflowRepository:
         await self.session.refresh(wf)
         return wf
 
+    async def invalidar_derivados_de_audio(
+        self, workflow: WorkflowExecucao, blocks: Sequence[AudioBloco] | None = None
+    ) -> None:
+        """Drop only current pointers; immutable historical rows/files remain available."""
+        workflow.audio_final_path = None
+        workflow.audio_final_sha256 = None
+        workflow.audio_final_sample_rate = None
+        workflow.audio_final_channels = None
+        workflow.audio_final_byte_size = None
+        workflow.duracao_audio_segundos = None
+        workflow.mastering_config = None
+        workflow.mastering_metrics = None
+        for block in blocks or ():
+            block.narration_start_seconds = None
+            block.narration_end_seconds = None
+        await self.session.flush()
+
     async def recoverable_productions(self) -> Sequence[WorkflowExecucao]:
         statement = (
             select(WorkflowExecucao)
@@ -143,11 +162,16 @@ class WorkflowRepository:
         synthesis_text_sha256: str,
         synthesis_identity: str,
         pronunciation_glossary_identity: str,
+        text_normalizer_version: str,
+        text_normalizer_identity: str,
         idempotency_key: str,
         voice_profile: str,
         voice_profile_identity: str,
         generation_profile: str,
         generation_profile_identity: str,
+        normalized_text: str | None = None,
+        pronunciation_replacements: list[dict] | None = None,
+        voice_chunking_identity: str | None = None,
     ) -> tuple[AudioBloco, bool]:
         """Create/update a block and report whether its synthesis identity is unchanged."""
         stmt = select(AudioBloco).where(
@@ -163,7 +187,10 @@ class WorkflowRepository:
             bloco.erro_mensagem = None
             bloco.job_id_voz = None
             bloco.resolved_seed = None
+            bloco.initial_resolved_seed = None
             bloco.generation_attempt = 0
+            bloco.retry_seed_strategy = None
+            bloco.generation_attempt_history = None
             bloco.audio_path = None
             bloco.duracao_segundos = None
             bloco.audio_sha256 = None
@@ -174,17 +201,22 @@ class WorkflowRepository:
             bloco.narration_end_seconds = None
         bloco.tipo = tipo
         bloco.texto = texto
+        bloco.normalized_text = normalized_text
         bloco.synthesis_text = synthesis_text
         bloco.source_text_sha256 = source_text_sha256
         bloco.synthesis_text_sha256 = synthesis_text_sha256
         bloco.synthesis_identity = synthesis_identity
         bloco.pronunciation_glossary_identity = pronunciation_glossary_identity
+        bloco.pronunciation_replacements = pronunciation_replacements
+        bloco.text_normalizer_version = text_normalizer_version
+        bloco.text_normalizer_identity = text_normalizer_identity
         if bloco.idempotency_key is None or not unchanged:
             bloco.idempotency_key = idempotency_key
         bloco.voice_profile = voice_profile
         bloco.voice_profile_identity = voice_profile_identity
         bloco.generation_profile = generation_profile
         bloco.generation_profile_identity = generation_profile_identity
+        bloco.voice_chunking_identity = voice_chunking_identity
         await self.session.commit()
         await self.session.refresh(bloco)
         return bloco, unchanged
@@ -197,6 +229,303 @@ class WorkflowRepository:
         for chave, valor in campos.items():
             setattr(bloco, chave, valor)
         await self.session.commit()
+
+    async def criar_take(
+        self,
+        *,
+        bloco: AudioBloco,
+        kind: str,
+        request_key: str | None,
+        idempotency_key: str,
+        requested_seed: int | None,
+        synthesis_identity: str | None,
+        chunking_identity: str | None,
+    ) -> tuple[AudioBlocoTake, bool]:
+        locked_block = (
+            await self.session.execute(
+                select(AudioBloco).where(AudioBloco.id == bloco.id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if locked_block is not None:
+            bloco = locked_block
+        if request_key:
+            existing = (
+                await self.session.execute(
+                    select(AudioBlocoTake).where(AudioBlocoTake.request_key == request_key)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing, False
+        max_index = (
+            await self.session.execute(
+                select(func.max(AudioBlocoTake.attempt_index)).where(
+                    AudioBlocoTake.audio_bloco_id == bloco.id
+                )
+            )
+        ).scalar_one()
+        take = AudioBlocoTake(
+            audio_bloco_id=bloco.id,
+            attempt_index=(max_index if max_index is not None else -1) + 1,
+            kind=kind,
+            status="queued",
+            request_key=request_key,
+            idempotency_key=idempotency_key,
+            requested_seed=requested_seed,
+            synthesis_identity=synthesis_identity,
+            chunking_identity=chunking_identity,
+        )
+        self.session.add(take)
+        await self.session.flush()
+        await self.session.commit()
+        await self.session.refresh(take)
+        return take, True
+
+    async def solicitar_take(
+        self,
+        *,
+        workflow_id: uuid.UUID,
+        ordem: int,
+        kind: str,
+        request_key: str,
+        idempotency_key: str,
+        requested_seed: int | None,
+    ) -> tuple[AudioBloco, AudioBlocoTake, bool]:
+        existing = (
+            await self.session.execute(
+                select(AudioBlocoTake).where(AudioBlocoTake.request_key == request_key)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            bloco = await self.obter_bloco_por_id(existing.audio_bloco_id)
+            if bloco is None:
+                raise LookupError("audio block for take request disappeared")
+            return bloco, existing, False
+        workflow = (
+            await self.session.execute(
+                select(WorkflowExecucao).where(WorkflowExecucao.id == workflow_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if workflow is None:
+            raise LookupError("workflow not found")
+        # Re-check after acquiring the workflow lock so concurrent identical
+        # HTTP requests cannot create two takes for one Idempotency-Key.
+        existing = (
+            await self.session.execute(
+                select(AudioBlocoTake).where(AudioBlocoTake.request_key == request_key)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            bloco = await self.obter_bloco_por_id(existing.audio_bloco_id)
+            if bloco is None:
+                raise LookupError("audio block for take request disappeared")
+            return bloco, existing, False
+        bloco = (
+            await self.session.execute(
+                select(AudioBloco)
+                .where(
+                    AudioBloco.workflow_execucao_id == workflow_id,
+                    AudioBloco.ordem == ordem,
+                )
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if bloco is None:
+            raise LookupError("audio block not found")
+        if bloco.requested_take_id is not None:
+            pending = await self.obter_take(bloco.requested_take_id)
+            if pending is not None and pending.status in {"queued", "running"}:
+                pending.status = "superseded"
+                pending.is_current = False
+            bloco.requested_take_id = None
+        max_index = (
+            await self.session.execute(
+                select(func.max(AudioBlocoTake.attempt_index)).where(
+                    AudioBlocoTake.audio_bloco_id == bloco.id
+                )
+            )
+        ).scalar_one()
+        take = AudioBlocoTake(
+            audio_bloco_id=bloco.id,
+            attempt_index=(max_index if max_index is not None else -1) + 1,
+            kind=kind,
+            status="queued",
+            request_key=request_key,
+            idempotency_key=idempotency_key,
+            requested_seed=requested_seed,
+            synthesis_identity=bloco.synthesis_identity,
+        )
+        self.session.add(take)
+        await self.session.flush()
+        bloco.requested_take_id = take.id
+        bloco.status = "pendente"
+        bloco.job_id_voz = None
+        bloco.idempotency_key = idempotency_key
+        bloco.resolved_seed = requested_seed
+        bloco.initial_resolved_seed = requested_seed
+        bloco.generation_attempt = 0
+        bloco.retry_seed_strategy = None
+        bloco.generation_attempt_history = []
+        bloco.erro_mensagem = None
+        workflow.status = "agendada"
+        workflow.audio_phase = "waiting"
+        workflow.production_status = "queued"
+        workflow.production_phase = "audio"
+        workflow.production_error_category = None
+        workflow.production_error_message = None
+        workflow.production_completed_at = None
+        await self.invalidar_derivados_de_audio(workflow, [bloco])
+        await self.session.commit()
+        await self.session.refresh(bloco)
+        await self.session.refresh(take)
+        return bloco, take, True
+
+    async def solicitar_takes(
+        self,
+        *,
+        workflow_id: uuid.UUID,
+        kind: str,
+        request_key: str,
+        idempotency_key_prefix: str,
+        requested_seed_by_order: dict[int, int | None],
+    ) -> list[tuple[AudioBloco, AudioBlocoTake]]:
+        existing = (
+            await self.session.execute(
+                select(AudioBlocoTake).where(AudioBlocoTake.request_key == request_key)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            bloco = await self.obter_bloco_por_id(existing.audio_bloco_id)
+            if bloco is None:
+                raise LookupError("audio block for take request disappeared")
+            return []
+        workflow = (
+            await self.session.execute(
+                select(WorkflowExecucao).where(WorkflowExecucao.id == workflow_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        if workflow is None:
+            raise LookupError("workflow not found")
+        existing = (
+            await self.session.execute(
+                select(AudioBlocoTake).where(AudioBlocoTake.request_key == request_key)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return []
+        blocks = list(
+            (
+                await self.session.execute(
+                    select(AudioBloco)
+                    .where(AudioBloco.workflow_execucao_id == workflow_id)
+                    .order_by(AudioBloco.ordem)
+                    .with_for_update()
+                )
+            ).scalars()
+        )
+        result: list[tuple[AudioBloco, AudioBlocoTake]] = []
+        for block in blocks:
+            if block.requested_take_id is not None:
+                pending = await self.obter_take(block.requested_take_id)
+                if pending is not None and pending.status in {"queued", "running"}:
+                    pending.status = "superseded"
+                    pending.is_current = False
+                block.requested_take_id = None
+            max_index = (
+                await self.session.execute(
+                    select(func.max(AudioBlocoTake.attempt_index)).where(
+                        AudioBlocoTake.audio_bloco_id == block.id
+                    )
+                )
+            ).scalar_one()
+            block_key = request_key if not result else f"{request_key}:block:{block.ordem}"
+            take = AudioBlocoTake(
+                audio_bloco_id=block.id,
+                attempt_index=(max_index if max_index is not None else -1) + 1,
+                kind=kind,
+                status="queued",
+                request_key=block_key,
+                idempotency_key=f"{idempotency_key_prefix}:block:{block.ordem}",
+                requested_seed=requested_seed_by_order.get(block.ordem),
+                synthesis_identity=block.synthesis_identity,
+            )
+            self.session.add(take)
+            await self.session.flush()
+            block.requested_take_id = take.id
+            block.status = "pendente"
+            block.job_id_voz = None
+            block.idempotency_key = take.idempotency_key
+            block.resolved_seed = take.requested_seed
+            block.initial_resolved_seed = take.requested_seed
+            block.generation_attempt = 0
+            block.retry_seed_strategy = None
+            block.generation_attempt_history = []
+            block.erro_mensagem = None
+            result.append((block, take))
+        workflow.status = "agendada"
+        workflow.audio_phase = "waiting"
+        workflow.production_status = "queued"
+        workflow.production_phase = "audio"
+        workflow.production_error_category = None
+        workflow.production_error_message = None
+        workflow.production_completed_at = None
+        await self.invalidar_derivados_de_audio(workflow, blocks)
+        await self.session.commit()
+        for block, take in result:
+            await self.session.refresh(block)
+            await self.session.refresh(take)
+        return result
+
+    async def obter_take(self, take_id: uuid.UUID) -> AudioBlocoTake | None:
+        return await self.session.get(AudioBlocoTake, take_id)
+
+    async def listar_takes(self, bloco_id: uuid.UUID) -> Sequence[AudioBlocoTake]:
+        statement = (
+            select(AudioBlocoTake)
+            .where(AudioBlocoTake.audio_bloco_id == bloco_id)
+            .order_by(AudioBlocoTake.attempt_index)
+        )
+        return (await self.session.execute(statement)).scalars().all()
+
+    async def atualizar_take(self, take_id: uuid.UUID, **campos) -> None:
+        take = await self.obter_take(take_id)
+        if take is None:
+            return
+        for chave, valor in campos.items():
+            setattr(take, chave, valor)
+        await self.session.commit()
+
+    async def promover_take(self, bloco_id: uuid.UUID, take_id: uuid.UUID, **campos) -> bool:
+        block_fields = campos.pop("block_fields", None)
+        bloco = (
+            await self.session.execute(
+                select(AudioBloco).where(AudioBloco.id == bloco_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        take = await self.obter_take(take_id)
+        if bloco is None or take is None:
+            raise LookupError("take promotion target not found")
+        if bloco.requested_take_id != take_id:
+            take.status = "superseded"
+            take.is_current = False
+            await self.session.commit()
+            return False
+        if bloco.current_take_id is not None and bloco.current_take_id != take_id:
+            previous = await self.obter_take(bloco.current_take_id)
+            if previous is not None:
+                previous.is_current = False
+        for chave, valor in campos.items():
+            setattr(take, chave, valor)
+        take.status = "completed"
+        take.is_current = True
+        if isinstance(block_fields, dict):
+            for chave, valor in block_fields.items():
+                setattr(bloco, chave, valor)
+        bloco.current_take_id = take.id
+        bloco.requested_take_id = None
+        await self.session.commit()
+        await self.session.refresh(bloco)
+        await self.session.refresh(take)
+        return True
 
     async def obter_blocos_orfaos(self) -> Sequence[AudioBloco]:
         """Retorna blocos com status 'gerando' cujo workflow não está concluído nem cancelado."""

@@ -301,7 +301,8 @@ async def test_zero_word_block_never_fabricates_timing_and_null_excerpt_is_not_a
     workflow.transcricao.palavras_timestamps = []
     service, _ = _service(workflow)
     alignment, _ = await service.ensure(workflow.id)
-    assert alignment.status == "completed"
+    assert alignment.status == "blocked"
+    assert alignment.metrics["speech_quality"]["status"] == "invalid"
     assert alignment.block_alignments[0].status == "no_words"
     assert alignment.visual_query_bindings[0].status == "unresolved"
     assert alignment.visual_query_bindings[0].narration_start_seconds is None

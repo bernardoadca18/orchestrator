@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     voice_download_timeout_seconds: float = 120.0
     voice_http_max_retries: int = 2
     voice_http_backoff_seconds: float = 1.0
+    voice_quality_max_retries: int = 2
 
     media_indexer_api_url: str = "http://localhost:8012"
     media_indexer_api_timeout_seconds: float = 30.0
@@ -51,6 +52,7 @@ class Settings(BaseSettings):
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
     pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
+    text_normalizer_version: str = "pt_br_text_normalizer_v1"
 
     # --- Parâmetros calibráveis do fluxo -------------------------------------
     # Silêncio inserido entre blocos narrativos na concatenação final.
@@ -63,6 +65,9 @@ class Settings(BaseSettings):
     audio_min_acceptable_lufs: float = -18.0
     audio_max_acceptable_lufs: float = -15.0
     audio_duration_tolerance_seconds: float = 0.01
+    audio_block_max_duration_seconds: float = 120.0
+    audio_block_max_seconds_per_char: float = 0.5
+    audio_block_duration_grace_seconds: float = 15.0
     workflow_max_tentativas: int = 3
 
     transcription_model: str = "small"
@@ -78,6 +83,8 @@ class Settings(BaseSettings):
     narration_alignment_timestamp_tolerance_seconds: float = 0.25
     narration_alignment_max_tokens: int = 2_500
     narration_alignment_max_cells: int = 2_000_000
+    narration_quality_policy_version: str = "narration_speech_quality_v1"
+    narration_quality_max_repeated_ngram_occurrences: int = 4
 
     visual_director_strategy_version: str = "visual_director_v1"
     visual_director_max_queries: int = 100
@@ -100,6 +107,12 @@ class Settings(BaseSettings):
 
     # --- Logging --------------------------------------------------------------
     json_logging: bool = True
+
+    @model_validator(mode="after")
+    def validate_audio_quality_limits(self) -> "Settings":
+        if self.audio_block_duration_grace_seconds >= self.audio_block_max_duration_seconds:
+            raise ValueError("audio block duration grace must be below the absolute duration limit")
+        return self
 
     @field_validator(
         "voice_api_url", "ideas_hub_api_url", "media_indexer_api_url", "video_composer_api_url"
@@ -141,6 +154,16 @@ class Settings(BaseSettings):
         return value
 
     @field_validator(
+        "text_normalizer_version",
+        "narration_quality_policy_version",
+    )
+    @classmethod
+    def validate_version_identity(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("version identities must not be empty")
+        return value
+
+    @field_validator(
         "media_indexer_api_timeout_seconds",
         "media_indexer_http_backoff_seconds",
         "video_composer_http_timeout_seconds",
@@ -148,6 +171,8 @@ class Settings(BaseSettings):
         "video_composer_poll_interval_seconds",
         "video_composer_render_timeout_seconds",
         "production_qa_task_retry_seconds",
+        "audio_block_max_duration_seconds",
+        "audio_block_max_seconds_per_char",
     )
     @classmethod
     def validate_positive_seconds(cls, value: float) -> float:
@@ -179,11 +204,26 @@ class Settings(BaseSettings):
         "media_indexer_http_max_retries",
         "video_composer_http_max_retries",
         "production_qa_task_max_retries",
+        "voice_quality_max_retries",
     )
     @classmethod
     def validate_non_negative(cls, value: int) -> int:
         if value < 0:
             raise ValueError("retry/alternative limits must be non-negative")
+        return value
+
+    @field_validator("narration_quality_max_repeated_ngram_occurrences")
+    @classmethod
+    def validate_repetition_limit(cls, value: int) -> int:
+        if value < 2:
+            raise ValueError("repeated n-gram occurrence limit must be at least 2")
+        return value
+
+    @field_validator("audio_block_duration_grace_seconds")
+    @classmethod
+    def validate_block_duration_grace(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("audio block duration grace must be non-negative")
         return value
 
     @field_validator("production_qa_deep_max_video_bytes")

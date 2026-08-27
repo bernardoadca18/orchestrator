@@ -8,7 +8,8 @@ Kokoro/Seed-VC Voice Workshop is deprecated reference code and is not an operati
 
 ```text
 canonical script block
-  -> deterministic pronunciation preprocessing
+  -> deterministic Portuguese text normalization
+  -> deterministic pronunciation glossary
   -> synthesis text
   -> Qwen Voice Service async job
   -> immutable native source WAV per editorial block
@@ -16,6 +17,7 @@ canonical script block
   -> transparent whole-narration gain mastering
   -> final WAV identity
   -> Faster-Whisper word timestamps
+  -> versioned narration speech-quality gate
 ```
 
 The Orchestrator's `AudioBloco` is an editorial block. Qwen inference chunks remain private to the
@@ -38,9 +40,12 @@ The provider-neutral client uses the actual Voice Service contract:
 
 The stable creation key includes workflow, block order and synthesis identity. A lost POST response
 is retried with the identical request/key. Remote job ID and resolved seed are committed before
-polling. Worker startup reconciles orphaned jobs. A failed remote take receives a persisted retry
-attempt key but retains the same resolved seed; a changed text/glossary/profile identity starts a
-new take with the configured seed policy.
+polling. Worker startup reconciles orphaned jobs. Transport failures retain the same semantic
+request and idempotency key. A `chunk_quality_guard` failure creates a bounded explicit quality
+attempt with a new seed derived by `qwen-orchestrator-quality-retry-v1`; attempt, rejected job,
+seed, category and retry strategy remain durable. Permanent profile/contract failures are not
+retried. A changed text/normalizer/glossary/profile identity starts a new take under the configured
+seed policy.
 
 A completed block is reused only when its synthesis identity is current and the local WAV reopens
 with the persisted checksum, size, rate and channels. Thus a failure in block 8 does not replace
@@ -49,8 +54,10 @@ valid takes 1–7. Missing local output is redownloaded from the same remote job
 ## Stage 13 Narration Timeline / Voice Alignment
 
 - **Script text** is the immutable editorial `conteudo` from Ideas Hub.
-- **Synthesis text** is a derived pronunciation variant sent to Qwen. Configure global/project
-  entries in `backend/config/pronunciation_glossary.yaml`.
+- **Synthesis text** is a deterministic derivative sent to Qwen: conservative Portuguese text
+  normalization first, then global/project pronunciation entries from
+  `backend/config/pronunciation_glossary.yaml`. Normalizer and glossary identities participate in
+  the block synthesis identity; the canonical editorial text is never overwritten.
 - **Gameplay time** belongs to a `VisualQuery` preferred source interval.
 - **Narration time** is a timestamp inside the final mastered narration WAV.
 
@@ -73,8 +80,13 @@ Endpoints:
 - `POST ...?force=true` rebuilds only derived rows—never Qwen, mastering or ASR.
 
 Alignment runs automatically after a current transcription is available. Missing/stale
-transcription yields `blocked`; algorithm/input failure yields `failed`. Neither state invalidates a
-healthy `audio_concluido` workflow.
+transcription yields `blocked`; algorithm/input failure yields `failed`. The versioned
+`narration_speech_quality_v1` policy reuses per-block synthesis/ASR coverage, empty-block evidence
+and an obvious repeated-ASR-run detector. Catastrophic evidence blocks Stage 17 while preserving
+source WAVs, the final WAV, transcription and alignment diagnostics. Harmless pronunciation
+differences do not require perfect WER. Neither state deletes or invalidates the technically valid
+`audio_concluido` artifact; `audio_phase=quality_unvalidated` distinguishes it from production-
+validated narration when transcription/alignment evidence is unavailable.
 
 ## Stage 14 Visual Director
 
@@ -236,10 +248,14 @@ Copy `.env.example`. Important settings include:
 
 - `VOICE_API_URL`, `VOICE_PROFILE`, `VOICE_GENERATION_PROFILE`, `VOICE_LANGUAGE`, `VOICE_SEED`;
 - separate create/status/download/overall timeouts and bounded HTTP retry/backoff;
+- bounded quality retries, deterministic retry-seed provenance and conservative source-block
+  duration limits;
+- versioned Portuguese text normalization before the pronunciation glossary;
 - `SILENCIO_ENTRE_BLOCOS_MS`, `AUDIO_FINAL_SAMPLE_RATE`;
 - LUFS/True Peak policy and duration tolerance;
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE`.
 - alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.
+- versioned narration speech-quality policy and repeated-ASR-run threshold.
 - `MEDIA_INDEXER_API_URL`, timeout/retry settings and the bounded Visual Director search policy.
 - Production Timeline strategy/schema versions, 0.5 s minimum visual duration, bounded source
   fallback and deterministic gap-fill/coalescing policy.

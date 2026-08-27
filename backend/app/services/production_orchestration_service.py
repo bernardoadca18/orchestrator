@@ -241,6 +241,9 @@ class ProductionOrchestrationService:
         )
 
     async def current_render(self, workflow_id: uuid.UUID) -> WorkflowRender | None:
+        workflow = await self.workflows.obter_por_id(workflow_id)
+        if workflow is None or workflow.production_phase not in {"render", "completed"}:
+            return None
         timeline = await self.timelines.current(workflow_id)
         if timeline is None:
             return None
@@ -431,6 +434,7 @@ class ProductionOrchestrationService:
     def _audio_is_reusable(workflow: WorkflowExecucao) -> bool:
         return bool(
             workflow.status == "audio_concluido"
+            and getattr(workflow, "audio_phase", "completed") == "completed"
             and workflow.audio_final_path
             and workflow.audio_final_sha256
             and workflow.duracao_audio_segundos

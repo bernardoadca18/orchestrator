@@ -24,17 +24,66 @@ class WorkflowCreateIn(BaseModel):
     roteiro_id: uuid.UUID
 
 
+class AudioActionIn(BaseModel):
+    confirm: bool = False
+
+
+class AudioBlocoTakeOut(BaseModel):
+    """Public take history without internal filesystem paths."""
+
+    model_config = ConfigDict(from_attributes=True, protected_namespaces=())
+    id: uuid.UUID
+    attempt_index: int
+    kind: str
+    status: str
+    request_key: str | None
+    job_id_voz: str | None
+    idempotency_key: str | None
+    requested_seed: int | None
+    resolved_seed: int | None
+    model_id: str | None
+    model_revision: str | None
+    voice_profile: str | None
+    voice_profile_identity: str | None
+    generation_profile: str | None
+    generation_profile_identity: str | None
+    voice_chunking_identity: str | None
+    chunking_identity: str | None
+    synthesis_identity: str | None
+    error_category: str | None
+    error_message: str | None
+    error_diagnostics: dict | None
+    audio_duration_seconds: float | None
+    audio_sha256: str | None
+    audio_byte_size: int | None
+    is_current: bool
+    created_at: dt.datetime
+    completed_at: dt.datetime | None
+
+
 class AudioBlocoOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: uuid.UUID
     ordem: int
     tipo: str
+    texto: str
+    normalized_text: str | None
     status: str
     synthesis_text: str | None
+    text_normalizer_version: str | None
+    text_normalizer_identity: str | None
+    pronunciation_glossary_identity: str | None
+    pronunciation_replacements: list[dict[str, Any]] | None
     voice_profile: str | None
     generation_profile: str | None
     resolved_seed: int | None
+    initial_resolved_seed: int | None
+    voice_chunking_identity: str | None
+    current_take_id: uuid.UUID | None
+    requested_take_id: uuid.UUID | None
     generation_attempt: int
+    retry_seed_strategy: str | None = None
+    generation_attempt_history: list[dict] | None = None
     duracao_segundos: float | None
     audio_sha256: str | None
     audio_sample_rate: int | None
@@ -43,6 +92,7 @@ class AudioBlocoOut(BaseModel):
     narration_start_seconds: float | None
     narration_end_seconds: float | None
     erro_mensagem: str | None
+    takes: list[AudioBlocoTakeOut] = Field(default_factory=list)
 
 
 class WorkflowOut(BaseModel):
@@ -123,6 +173,9 @@ class BlocoAudioPacoteOut(BaseModel):
     id: uuid.UUID
     ordem: int
     tipo: str
+    texto: str | None = None
+    normalized_text: str | None = None
+    synthesis_text: str | None = None
     audio_url: str | None
     duracao_segundos: float | None
     sha256: str | None
@@ -134,7 +187,15 @@ class BlocoAudioPacoteOut(BaseModel):
     voice_profile: str | None
     generation_profile: str | None
     resolved_seed: int | None
+    initial_resolved_seed: int | None
+    voice_chunking_identity: str | None
     generation_attempt: int
+    text_normalizer_version: str | None
+    text_normalizer_identity: str | None
+    pronunciation_glossary_identity: str | None = None
+    pronunciation_replacements: list[dict[str, Any]] | None = None
+    retry_seed_strategy: str | None
+    generation_attempt_history: list[dict] | None
 
 
 class AudioPacoteOut(BaseModel):
