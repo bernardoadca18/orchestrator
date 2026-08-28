@@ -34,7 +34,7 @@ export interface AudioBloco {
   text_normalizer_version: string | null;
   text_normalizer_identity: string | null;
   pronunciation_glossary_identity: string | null;
-  pronunciation_replacements: Array<{ term: string; replacement: string; count: number }> | null;
+  pronunciation_replacements: PronunciationReplacement[] | null;
   voice_profile: string | null;
   generation_profile: string | null;
   resolved_seed: number | null;
@@ -53,6 +53,19 @@ export interface AudioBloco {
   narration_start_seconds: number | null;
   narration_end_seconds: number | null;
   erro_mensagem: string | null;
+}
+
+export interface PronunciationReplacement {
+  entry_id?: string;
+  entry_version?: number;
+  original_text?: string;
+  replacement_text?: string;
+  changed?: boolean;
+  input_start?: number;
+  input_end?: number;
+  term?: string;
+  replacement?: string;
+  count?: number;
 }
 
 export interface AudioBlocoTake {
@@ -74,6 +87,13 @@ export interface AudioBlocoTake {
   voice_chunking_identity: string | null;
   chunking_identity: string | null;
   synthesis_identity: string | null;
+  canonical_text: string | null;
+  normalized_text: string | null;
+  synthesis_text: string | null;
+  pronunciation_glossary_identity: string | null;
+  pronunciation_replacements: PronunciationReplacement[] | null;
+  text_normalizer_version: string | null;
+  text_normalizer_identity: string | null;
   error_category: string | null;
   error_message: string | null;
   error_diagnostics: Record<string, unknown> | null;

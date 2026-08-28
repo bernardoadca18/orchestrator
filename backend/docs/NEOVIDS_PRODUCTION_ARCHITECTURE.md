@@ -75,8 +75,17 @@ lock; a late remote result is retained as historical evidence and cannot be prom
 
 Canonical script text, normalized synthesis text, glossary substitutions, model/profile identities,
 chunking identity, seeds and bounded failure diagnostics are returned in workflow detail without
-exposing host filesystem paths. Edit `backend/config/pronunciation_glossary.yaml`, increment its
-version, and regenerate affected blocks to apply a deterministic pronunciation override. The
-Qwen Base voice-clone API has no native speaking-rate argument; benchmark manifests therefore
+exposing host filesystem paths. Pronunciation entries are versioned, enabled and explicitly human
+approved. The compiled one-pass resolver rejects ambiguous/non-idempotent config and includes its
+semantic identity in block synthesis identity. A changed identity supersedes an in-flight old take,
+preserves all historical takes/WAVs and invalidates current final-audio/downstream pointers through
+the existing locked take workflow. A late old result cannot promote itself.
+
+`scripts/pronunciation.py` is the operator surface for list/show/validate/resolve, controlled Qwen
+lab matrices, JSONL/WAV inspection, human review, optimistic promotion and disable. Production
+never experiments. Lab failures—including Qwen's runaway guard—remain evidence, and no scorer can
+auto-promote a candidate. The full contract and commands are in `docs/PRONUNCIATION_LAB.md`.
+
+The Qwen Base voice-clone API has no native speaking-rate argument; benchmark manifests therefore
 record measured words-per-minute and characters-per-second rather than applying an unsafe speed
 transform.

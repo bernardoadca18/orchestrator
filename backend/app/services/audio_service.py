@@ -157,6 +157,8 @@ class AudioWorkflowService:
                     pronunciation = self.preprocessor.preprocess(
                         normalization.normalized_text,
                         project=str(workflow.ideia_id),
+                        locale=self.config.pronunciation_locale,
+                        canonical_text=canonical_text,
                     )
                     source_hash = _sha256_text(canonical_text)
                     synthesis_hash = _sha256_text(pronunciation.synthesis_text)

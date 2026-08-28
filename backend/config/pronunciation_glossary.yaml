@@ -1,12 +1,111 @@
-version: "2"
-global:
-  Aard: "Árd"
-  Kaer Morhen: "Kér Mórren"
-  Scoia'tael: "Scóiatael"
-  Yennefer: "Iênefer"
-  Dijkstra: "Dáikstra"
-  Rockstar Games: "Rócstar Gueimes"
-  Red Dead Redemption: "Réd Déd Redémption"
-  GTA: "Gê Tê Á"
-  NPC: "Êne Pê Cê"
-projects: {}
+schema: neovids_pronunciation_lexicon_v2
+version: "3"
+entries:
+  - id: term.aard
+    canonical_term: Aard
+    synthesis_representation: Árd
+    category: technical_term
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: place.kaer-morhen
+    canonical_term: Kaer Morhen
+    synthesis_representation: Kér Mórren
+    category: proper_name
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: name.scoiatael
+    canonical_term: Scoia'tael
+    synthesis_representation: Scóiatael
+    category: proper_name
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: name.yennefer
+    canonical_term: Yennefer
+    synthesis_representation: Iênefer
+    category: proper_name
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: name.dijkstra
+    canonical_term: Dijkstra
+    synthesis_representation: Dáikstra
+    category: proper_name
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: brand.rockstar-games
+    canonical_term: Rockstar Games
+    synthesis_representation: Rócstar Gueimes
+    category: brand
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: game.red-dead-redemption
+    canonical_term: Red Dead Redemption
+    synthesis_representation: Réd Déd Redémption
+    category: game_title
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: initialism.gta
+    canonical_term: GTA
+    synthesis_representation: Gê Tê Á
+    category: initialism
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
+  - id: initialism.npc
+    canonical_term: NPC
+    synthesis_representation: Êne Pê Cê
+    category: initialism
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: existing_production_glossary
+    approval: {status: approved, approved_by: existing-production-config}
+    notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.

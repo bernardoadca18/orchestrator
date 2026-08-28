@@ -1,5 +1,6 @@
 """Configuração central do orchestrator, via variáveis de ambiente."""
 
+import re
 from pathlib import Path
 
 from pydantic import field_validator, model_validator
@@ -52,6 +53,7 @@ class Settings(BaseSettings):
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
     pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
+    pronunciation_locale: str = "pt-BR"
     text_normalizer_version: str = "pt_br_text_normalizer_v1"
 
     # --- Parâmetros calibráveis do fluxo -------------------------------------
@@ -161,6 +163,13 @@ class Settings(BaseSettings):
     def validate_version_identity(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("version identities must not be empty")
+        return value
+
+    @field_validator("pronunciation_locale")
+    @classmethod
+    def validate_pronunciation_locale(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*", value):
+            raise ValueError("pronunciation_locale must be a BCP-47-like locale")
         return value
 
     @field_validator(

@@ -10,3 +10,4 @@ data/audio/*
 cache/huggingface/*
 !cache/huggingface/.gitkeep
 frontend/*.tsbuildinfo
+backend/pronunciation-lab-results/

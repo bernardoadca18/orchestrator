@@ -1,7 +1,15 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, ProductionQAReport, Workflow, WorkflowRender } from "../api/client";
+import { api, ProductionQAReport, PronunciationReplacement, Workflow, WorkflowRender } from "../api/client";
 import { shouldPollQA, shouldPollRender } from "./polling";
+
+function formatPronunciation(item: PronunciationReplacement) {
+  const original = item.original_text ?? item.term ?? "?";
+  const replacement = item.replacement_text ?? item.replacement ?? "?";
+  const identity = item.entry_id ? ` [${item.entry_id}@${item.entry_version ?? "?"}]` : "";
+  const count = item.count && item.count > 1 ? ` (${item.count}x)` : "";
+  return `${original} → ${replacement}${identity}${count}`;
+}
 
 export default function WorkflowDetail() {
   const { id } = useParams<{ id: string }>();
@@ -263,6 +271,15 @@ export default function WorkflowDetail() {
                           #{take.attempt_index} {take.kind} — {take.status}, seed {take.resolved_seed ?? take.requested_seed ?? "—"}
                           {take.error_category ? ` — ${take.error_category}: ${take.error_message || ""}` : ""}
                           {take.is_current ? " (atual)" : ""}
+                          {take.synthesis_text ? <details>
+                            <summary>Proveniência do take</summary>
+                            <div>Canônico: {take.canonical_text || "—"}</div>
+                            <div>Normalizado: {take.normalized_text || "—"}</div>
+                            <div>Síntese: {take.synthesis_text}</div>
+                            {take.pronunciation_replacements?.length ? (
+                              <div>Pronúncias: {take.pronunciation_replacements.map(formatPronunciation).join(", ")}</div>
+                            ) : null}
+                          </details> : null}
                         </li>
                       ))}
                     </ul>
@@ -274,7 +291,7 @@ export default function WorkflowDetail() {
                     <p><strong>Normalizado:</strong> {bloco.normalized_text || "—"}</p>
                     <p><strong>Síntese:</strong> {bloco.synthesis_text || "—"}</p>
                     {bloco.pronunciation_replacements?.length ? (
-                      <p><strong>Pronúncias:</strong> {bloco.pronunciation_replacements.map((item) => `${item.term} → ${item.replacement} (${item.count}x)`).join(", ")}</p>
+                      <p><strong>Pronúncias:</strong> {bloco.pronunciation_replacements.map(formatPronunciation).join(", ")}</p>
                     ) : null}
                   </details>
                 </td>

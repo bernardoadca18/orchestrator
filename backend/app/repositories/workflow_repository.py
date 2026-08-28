@@ -1,5 +1,6 @@
 """Camada de acesso a dados para WorkflowExecucao e AudioBloco."""
 
+import copy
 import datetime as dt
 import uuid
 from collections.abc import Sequence
@@ -9,6 +10,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.workflow import AudioBloco, AudioBlocoTake, TranscricaoAudio, WorkflowExecucao
+
+
+def _take_text_provenance(block: AudioBloco) -> dict[str, object]:
+    """Snapshot current derivation inputs; old takes must not follow mutable block pointers."""
+    return {
+        "canonical_text": block.texto,
+        "normalized_text": block.normalized_text,
+        "synthesis_text": block.synthesis_text,
+        "pronunciation_glossary_identity": block.pronunciation_glossary_identity,
+        "pronunciation_replacements": copy.deepcopy(block.pronunciation_replacements),
+        "text_normalizer_version": block.text_normalizer_version,
+        "text_normalizer_identity": block.text_normalizer_identity,
+    }
 
 
 class WorkflowRepository:
@@ -174,8 +188,15 @@ class WorkflowRepository:
         voice_chunking_identity: str | None = None,
     ) -> tuple[AudioBloco, bool]:
         """Create/update a block and report whether its synthesis identity is unchanged."""
-        stmt = select(AudioBloco).where(
-            AudioBloco.workflow_execucao_id == workflow_id, AudioBloco.ordem == ordem
+        workflow = (
+            await self.session.execute(
+                select(WorkflowExecucao).where(WorkflowExecucao.id == workflow_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        stmt = (
+            select(AudioBloco)
+            .where(AudioBloco.workflow_execucao_id == workflow_id, AudioBloco.ordem == ordem)
+            .with_for_update()
         )
         bloco = (await self.session.execute(stmt)).scalar_one_or_none()
         unchanged = bloco is not None and bloco.synthesis_identity == synthesis_identity
@@ -183,6 +204,12 @@ class WorkflowRepository:
             bloco = AudioBloco(workflow_execucao_id=workflow_id, ordem=ordem)
             self.session.add(bloco)
         elif not unchanged:
+            if bloco.requested_take_id is not None:
+                pending = await self.obter_take(bloco.requested_take_id)
+                if pending is not None and pending.status in {"queued", "running"}:
+                    pending.status = "superseded"
+                    pending.is_current = False
+                bloco.requested_take_id = None
             bloco.status = "pendente"
             bloco.erro_mensagem = None
             bloco.job_id_voz = None
@@ -199,6 +226,13 @@ class WorkflowRepository:
             bloco.audio_byte_size = None
             bloco.narration_start_seconds = None
             bloco.narration_end_seconds = None
+            if workflow is not None:
+                workflow.production_status = "queued"
+                workflow.production_phase = "audio"
+                workflow.production_error_category = None
+                workflow.production_error_message = None
+                workflow.production_completed_at = None
+                await self.invalidar_derivados_de_audio(workflow, [bloco])
         bloco.tipo = tipo
         bloco.texto = texto
         bloco.normalized_text = normalized_text
@@ -273,6 +307,7 @@ class WorkflowRepository:
             requested_seed=requested_seed,
             synthesis_identity=synthesis_identity,
             chunking_identity=chunking_identity,
+            **_take_text_provenance(bloco),
         )
         self.session.add(take)
         await self.session.flush()
@@ -353,6 +388,7 @@ class WorkflowRepository:
             idempotency_key=idempotency_key,
             requested_seed=requested_seed,
             synthesis_identity=bloco.synthesis_identity,
+            **_take_text_provenance(bloco),
         )
         self.session.add(take)
         await self.session.flush()
@@ -447,6 +483,7 @@ class WorkflowRepository:
                 idempotency_key=f"{idempotency_key_prefix}:block:{block.ordem}",
                 requested_seed=requested_seed_by_order.get(block.ordem),
                 synthesis_identity=block.synthesis_identity,
+                **_take_text_provenance(block),
             )
             self.session.add(take)
             await self.session.flush()

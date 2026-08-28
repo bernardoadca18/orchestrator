@@ -51,6 +51,32 @@ A completed block is reused only when its synthesis identity is current and the 
 with the persisted checksum, size, rate and channels. Thus a failure in block 8 does not replace
 valid takes 1–7. Missing local output is redownloaded from the same remote job when available.
 
+## Pronunciation resolution and laboratory
+
+The production glossary is a versioned YAML lexicon of enabled, human-approved entries rather than
+an unstructured replacement map. Its one-pass Unicode/token-aware resolver supports explicit
+categories, locale/project scope, case policy, priority, stable entry revisions, raw-spelling
+no-ops and per-occurrence span provenance. Ambiguous or non-idempotent configurations fail at
+load. Canonical script text remains immutable.
+
+The operator CLI validates and previews without synthesis, runs bounded controlled Qwen candidate
+matrices, keeps WAV/JSONL evidence including quality-guard failures, records human reviews and
+performs optimistic atomic promotion/disable mutations. A candidate is never promoted from a
+machine score or lab result alone. Examples:
+
+```bash
+cd backend
+.venv/bin/python scripts/pronunciation.py validate
+.venv/bin/python scripts/pronunciation.py resolve --text 'A Rockstar Games mostrou GTA 6.'
+.venv/bin/python scripts/pronunciation.py lab-run \
+  --target GTA --context 'A análise de {target} começa agora.' \
+  --initialism-candidates --generation narration_temp080 --seeds 101
+```
+
+See `backend/docs/PRONUNCIATION_LAB.md` for the lexicon schema, approval workflow, all CLI
+commands, controlled real-Qwen progression and ownership constraints. Pronunciation rewriting is
+never performed inside `qwen3-tts-workshop`.
+
 ## Stage 13 Narration Timeline / Voice Alignment
 
 - **Script text** is the immutable editorial `conteudo` from Ideas Hub.
@@ -251,6 +277,7 @@ Copy `.env.example`. Important settings include:
 - bounded quality retries, deterministic retry-seed provenance and conservative source-block
   duration limits;
 - versioned Portuguese text normalization before the pronunciation glossary;
+- `PRONUNCIATION_GLOSSARY_PATH` and the explicit `PRONUNCIATION_LOCALE=pt-BR` context;
 - `SILENCIO_ENTRE_BLOCOS_MS`, `AUDIO_FINAL_SAMPLE_RATE`;
 - LUFS/True Peak policy and duration tolerance;
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE`.

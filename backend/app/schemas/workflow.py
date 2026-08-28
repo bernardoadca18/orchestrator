@@ -50,6 +50,13 @@ class AudioBlocoTakeOut(BaseModel):
     voice_chunking_identity: str | None
     chunking_identity: str | None
     synthesis_identity: str | None
+    canonical_text: str | None
+    normalized_text: str | None
+    synthesis_text: str | None
+    pronunciation_glossary_identity: str | None
+    pronunciation_replacements: list[dict[str, Any]] | None
+    text_normalizer_version: str | None
+    text_normalizer_identity: str | None
     error_category: str | None
     error_message: str | None
     error_diagnostics: dict | None

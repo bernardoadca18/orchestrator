@@ -49,10 +49,41 @@ revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestra
     "SELECT version_num FROM alembic_version;")"
 column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_blocos' AND column_name IN ('text_normalizer_version','text_normalizer_identity','initial_resolved_seed','retry_seed_strategy','generation_attempt_history','current_take_id','requested_take_id','voice_chunking_identity','pronunciation_replacements','normalized_text');")"
-test "${revision}" = "011"
+test "${revision}" = "012"
 test "${column_count}" = "10"
 take_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='audio_bloco_takes';")"
 test "${take_table_count}" = "1"
+take_provenance_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_bloco_takes' AND column_name IN ('canonical_text','normalized_text','synthesis_text','pronunciation_glossary_identity','pronunciation_replacements','text_normalizer_version','text_normalizer_identity');")"
+test "${take_provenance_count}" = "7"
 
-echo "Fresh Orchestrator migrations passed: 001 -> 011"
+docker run --rm \
+    --network "${network_name}" \
+    --env "DATABASE_URL=${database_url}" \
+    --env PYTHONPATH=/app \
+    "${backend_image}" \
+    alembic downgrade 011
+revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT version_num FROM alembic_version;")"
+test "${revision}" = "011"
+take_provenance_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_bloco_takes' AND column_name IN ('canonical_text','normalized_text','synthesis_text','pronunciation_glossary_identity','pronunciation_replacements','text_normalizer_version','text_normalizer_identity');")"
+test "${take_provenance_count}" = "0"
+docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
+    "INSERT INTO workflow_execucoes (id, ideia_id, roteiro_id, roteiro_snapshot, status) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', '{}'::jsonb, 'agendada'); INSERT INTO audio_blocos (id, workflow_execucao_id, ordem, tipo, texto, status) VALUES ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 0, 'intro', 'Historical text', 'concluido'); INSERT INTO audio_bloco_takes (id, audio_bloco_id, attempt_index, kind, status, is_current) VALUES ('00000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000004', 0, 'initial', 'completed', true);" >/dev/null
+
+docker run --rm \
+    --network "${network_name}" \
+    --env "DATABASE_URL=${database_url}" \
+    --env PYTHONPATH=/app \
+    "${backend_image}" \
+    alembic upgrade head
+revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT version_num FROM alembic_version;")"
+test "${revision}" = "012"
+historical_take_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM audio_bloco_takes WHERE id='00000000-0000-0000-0000-000000000005' AND status='completed' AND canonical_text IS NULL AND normalized_text IS NULL AND synthesis_text IS NULL AND pronunciation_glossary_identity IS NULL AND pronunciation_replacements IS NULL AND text_normalizer_version IS NULL AND text_normalizer_identity IS NULL;")"
+test "${historical_take_count}" = "1"
+
+echo "Fresh/reversible Orchestrator migrations passed: 001 -> 012 -> 011 -> 012"
