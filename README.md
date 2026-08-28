@@ -286,7 +286,9 @@ Copy `.env.example`. Important settings include:
 - `PRONUNCIATION_GLOSSARY_PATH` and the explicit `PRONUNCIATION_LOCALE=pt-BR` context;
 - `SILENCIO_ENTRE_BLOCOS_MS`, `AUDIO_FINAL_SAMPLE_RATE`;
 - LUFS/True Peak policy and duration tolerance;
-- `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE`.
+- `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE` and optional
+  `TRANSCRIPTION_LANGUAGE` (blank means Faster-Whisper autodetection; the clone benchmark uses
+  its independent `--asr-language pt` default).
 - alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.
 - versioned narration speech-quality policy and repeated-ASR-run threshold.
 - `MEDIA_INDEXER_API_URL`, timeout/retry settings and the bounded Visual Director search policy.

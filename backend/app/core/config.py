@@ -140,6 +140,15 @@ class Settings(BaseSettings):
             raise ValueError("audio_final_sample_rate must be between 8000 and 192000")
         return value
 
+    @field_validator("transcription_language", mode="before")
+    @classmethod
+    def normalize_transcription_language(cls, value: str | None) -> str | None:
+        """Use ``None`` for Faster-Whisper language autodetection."""
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
     @field_validator("voice_seed")
     @classmethod
     def validate_seed(cls, value: int) -> int:

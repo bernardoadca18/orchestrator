@@ -6,19 +6,32 @@ import argparse
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from app.clients.voice_client import VoiceClient, VoiceJobFailedError
-from app.core.config import Settings
-from app.services.audio_diagnostics import analyze_audio
-from app.services.content_coverage import ContentCoverageThresholds, analyze_content_coverage
-from app.services.production_audio import publish_source_block
-from app.services.pronunciation import PronunciationPreprocessor
-from app.services.text_normalization import PortugueseTextNormalizer
-from app.services.transcription_service import FasterWhisperNarrationProvider
+# The documented container command executes this file directly from /app/scripts.
+# Add /app so the application package is importable without a PYTHONPATH override.
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from app.clients.voice_client import VoiceClient, VoiceJobFailedError  # noqa: E402
+from app.core.config import Settings  # noqa: E402
+from app.services.audio_diagnostics import analyze_audio  # noqa: E402
+from app.services.content_coverage import (  # noqa: E402
+    ContentCoverageThresholds,
+    analyze_content_coverage,
+)
+from app.services.production_audio import publish_source_block  # noqa: E402
+from app.services.pronunciation import PronunciationPreprocessor  # noqa: E402
+from app.services.text_normalization import PortugueseTextNormalizer  # noqa: E402
+from app.services.transcription_service import FasterWhisperNarrationProvider  # noqa: E402
+
+DEFAULT_ASR_LANGUAGE = "pt"
+SYNTHESIS_LANGUAGE = "Portuguese"
 
 DEFAULT_CASES = (
     ("natural_ptbr", "A", "Hoje vamos entender como uma boa decisão simplifica todo o processo."),
@@ -75,7 +88,10 @@ async def run(args: argparse.Namespace) -> int:
     config = Settings(_env_file=args.env_file)
     normalizer = PortugueseTextNormalizer(version=config.text_normalizer_version)
     pronunciation = PronunciationPreprocessor.load(config.pronunciation_glossary_path)
-    transcription = FasterWhisperNarrationProvider(config)
+    transcription = FasterWhisperNarrationProvider(
+        config,
+        asr_language=getattr(args, "asr_language", DEFAULT_ASR_LANGUAGE),
+    )
     run_id = args.run_id or uuid4().hex
     run_output = args.output / run_id
     run_output.mkdir(parents=True, exist_ok=True)
@@ -102,7 +118,7 @@ async def run(args: argparse.Namespace) -> int:
                     voice_profile=profile,
                     generation_profile=args.generation,
                     idempotency_key=key,
-                    language="Portuguese",
+                    language=SYNTHESIS_LANGUAGE,
                     seed=args.seed,
                 )
                 try:
@@ -178,6 +194,7 @@ async def run(args: argparse.Namespace) -> int:
                             "provider": asr.provider,
                             "model": asr.model,
                             "language": asr.language,
+                            "language_requested": transcription.asr_language,
                         },
                         "signal_diagnostics": signal,
                         "qwen_chunks": completed.metadata.get("chunks", []),
@@ -205,18 +222,27 @@ async def run(args: argparse.Namespace) -> int:
     return 0
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--env-file", default=".env")
     parser.add_argument("--voices", nargs=2, default=["bernardo_v1", "bernardo_xvec_v1"])
     parser.add_argument("--generation", default="narration_v1")
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument(
+        "--asr-language",
+        default=DEFAULT_ASR_LANGUAGE,
+        help="Faster-Whisper ISO-639-1 language code; blank enables autodetection",
+    )
+    parser.add_argument(
         "--run-id",
         help="Optional idempotency scope; omitted creates a fresh real generation run",
     )
     parser.add_argument("--output", type=Path, required=True)
-    return asyncio.run(run(parser.parse_args()))
+    return parser
+
+
+def main() -> int:
+    return asyncio.run(run(build_parser().parse_args()))
 
 
 if __name__ == "__main__":

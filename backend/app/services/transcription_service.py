@@ -5,9 +5,20 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from app.core.config import Settings, settings
+
+
+def normalize_asr_language(value: str | None) -> str | None:
+    """Normalize optional Faster-Whisper language codes for autodetection."""
+    if value is None:
+        return None
+    normalized = value.strip()
+    return normalized or None
+
+
+_ASR_LANGUAGE_FROM_CONFIG = object()
 
 
 @dataclass(frozen=True)
@@ -46,8 +57,21 @@ class FasterWhisperNarrationProvider:
 
     provider_name = "faster-whisper"
 
-    def __init__(self, config: Settings = settings) -> None:
+    def __init__(
+        self,
+        config: Settings = settings,
+        *,
+        asr_language: str | None | object = _ASR_LANGUAGE_FROM_CONFIG,
+    ) -> None:
         self.config = config
+        # Omitting the override uses the generic service configuration; an
+        # explicit None deliberately requests Faster-Whisper autodetection.
+        configured_language = (
+            config.transcription_language
+            if asr_language is _ASR_LANGUAGE_FROM_CONFIG
+            else cast(str | None, asr_language)
+        )
+        self.asr_language = normalize_asr_language(configured_language)
         self._model: Any | None = None
         self._lock = threading.Lock()
 
@@ -67,7 +91,7 @@ class FasterWhisperNarrationProvider:
     def transcribe(self, audio_path: Path) -> NarrationTranscription:
         segments, info = self._get_model().transcribe(
             str(audio_path),
-            language=self.config.transcription_language,
+            language=self.asr_language,
             word_timestamps=True,
         )
         text_parts: list[str] = []
@@ -89,13 +113,13 @@ class FasterWhisperNarrationProvider:
                         ),
                     )
                 )
-        language = getattr(info, "language", None)
+        detected_language = normalize_asr_language(getattr(info, "language", None))
         return NarrationTranscription(
             text=" ".join(part.strip() for part in text_parts if part.strip()),
             words=tuple(words),
             provider=self.provider_name,
             model=self.config.transcription_model,
-            language=str(language) if language else self.config.transcription_language,
+            language=detected_language or self.asr_language,
         )
 
 

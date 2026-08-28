@@ -54,13 +54,16 @@ docker compose exec api python scripts/benchmark_clone_modes.py \
   --output /data/audio/benchmarks/icl-vs-xvec-v1 \
   --voices bernardo_v1 bernardo_xvec_v1 \
   --generation narration_v1 \
+  --asr-language pt \
   --seed 12345
 ```
 
 The seven fixed categories use identical synthesis text, normalizer/pronunciation identities,
-language, generation profile, seed, model and revision for both voices. JSONL records physical and
-Qwen integrity, duration/RTF, ASR coverage, pause/silence and transient candidates. Fill the human
-review fields for timbre, naturality, pace, accent, pauses and pronunciation. The script never
+the synthesis language (`Portuguese`), generation profile, seed, model and revision for both
+voices. Faster-Whisper uses the independent ISO ASR language (`pt` by default); pass an empty value
+to enable autodetection. JSONL records physical and Qwen integrity, duration/RTF, ASR coverage,
+pause/silence and transient candidates. Fill the human review fields for timbre, naturality, pace,
+accent, pauses and pronunciation. The script never
 declares a winner or changes the production profile. Each invocation creates a fresh idempotency
 scope and output subdirectory by default; pass `--run-id` only to deliberately resume the same
 benchmark run.

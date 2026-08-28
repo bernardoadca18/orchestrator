@@ -38,3 +38,48 @@ def test_faster_whisper_model_is_lazy_cached_and_words_are_preserved(tmp_path: P
     assert first.text == "Olá mundo."
     assert [word.word for word in first.words] == ["Olá", "mundo"]
     assert first.language == "pt"
+
+
+def test_blank_configured_asr_language_uses_autodetection(tmp_path: Path) -> None:
+    model = MagicMock()
+    model.transcribe.return_value = ([], SimpleNamespace(language=""))
+    provider = FasterWhisperNarrationProvider(
+        Settings(_env_file=None, transcription_language="  "),
+    )
+    provider._model = model
+
+    result = provider.transcribe(tmp_path / "blank-language.wav")
+
+    assert provider.config.transcription_language is None
+    assert model.transcribe.call_args.kwargs["language"] is None
+    assert result.language is None
+
+
+def test_configured_asr_language_pt_is_passed_to_faster_whisper(tmp_path: Path) -> None:
+    model = MagicMock()
+    model.transcribe.return_value = ([], SimpleNamespace(language="pt"))
+    provider = FasterWhisperNarrationProvider(
+        Settings(_env_file=None, transcription_language=None),
+        asr_language="pt",
+    )
+    provider._model = model
+
+    result = provider.transcribe(tmp_path / "portuguese.wav")
+
+    assert model.transcribe.call_args.kwargs["language"] == "pt"
+    assert result.language == "pt"
+
+
+def test_none_asr_language_is_forwarded_for_generic_autodetection(tmp_path: Path) -> None:
+    model = MagicMock()
+    model.transcribe.return_value = ([], SimpleNamespace(language="en"))
+    provider = FasterWhisperNarrationProvider(
+        Settings(_env_file=None, transcription_language="pt"),
+        asr_language=None,
+    )
+    provider._model = model
+
+    result = provider.transcribe(tmp_path / "autodetect.wav")
+
+    assert model.transcribe.call_args.kwargs["language"] is None
+    assert result.language == "en"
