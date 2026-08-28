@@ -60,6 +60,8 @@ class VoiceNarrationJob(BaseModel):
     result_subtype: str | None = None
     result_byte_size: int | None = None
     result_sha256: str | None = None
+    result_frame_count: int | None = None
+    result_riff_data_byte_size: int | None = None
     error_category: str | None = None
     error_message: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -70,6 +72,7 @@ class VoiceProfileDescriptor(BaseModel):
     name: str
     version: str
     identity: str
+    clone_mode: str = "unknown"
 
 
 class GenerationProfileDescriptor(BaseModel):

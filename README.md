@@ -12,7 +12,7 @@ canonical script block
   -> deterministic pronunciation glossary
   -> synthesis text
   -> Qwen Voice Service async job
-  -> immutable native source WAV per editorial block
+  -> immutable native source WAV + take-level ASR content gate
   -> deterministic block assembly (pause, 48 kHz mono PCM16)
   -> transparent whole-narration gain mastering
   -> final WAV identity
@@ -48,8 +48,14 @@ retried. A changed text/normalizer/glossary/profile identity starts a new take u
 seed policy.
 
 A completed block is reused only when its synthesis identity is current and the local WAV reopens
-with the persisted checksum, size, rate and channels. Thus a failure in block 8 does not replace
+with the persisted checksum, size, rate, channels, sample count and subtype. Serving performs the
+same reconciliation and uses SHA-addressed cache revalidation plus byte ranges. Thus a failure in block 8 does not replace
 valid takes 1–7. Missing local output is redownloaded from the same remote job when available.
+
+The take-level content gate compares Faster-Whisper against the actual synthesis text and persists
+WER/CER, deletions, insertions, repetitions, missing spans and premature-ending evidence before a
+take becomes current. See `backend/docs/NARRATION_HARDENING.md` for integrity, diagnostics,
+x-vector benchmark and experimental prosody-transfer operation.
 
 ## Pronunciation resolution and laboratory
 

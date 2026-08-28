@@ -110,8 +110,9 @@ export default function WorkflowDetail() {
         <p><strong>Fase de áudio:</strong> {workflow.audio_phase}</p>
         <p><strong>Produção:</strong> {workflow.production_status || "legado / inativa"}</p>
         <p><strong>Fase de produção:</strong> {workflow.production_phase || "—"}</p>
-        <p><strong>Duração Total:</strong> {workflow.duracao_audio_segundos ? `${workflow.duracao_audio_segundos.toFixed(1)}s` : "—"}</p>
-        <p><strong>Formato final:</strong> {workflow.audio_final_sample_rate ? `${workflow.audio_final_sample_rate} Hz / ${workflow.audio_final_channels} canal` : "—"}</p>
+        <p><strong>Duração física final:</strong> {workflow.duracao_audio_segundos ? `${workflow.duracao_audio_segundos.toFixed(1)}s` : "—"}</p>
+        <p><strong>Formato final:</strong> {workflow.audio_final_sample_rate ? `${workflow.audio_final_sample_rate} Hz / ${workflow.audio_final_channels} canal / ${workflow.audio_final_subtype || "subtipo desconhecido"}` : "—"}</p>
+        <p><strong>Integridade do artefato:</strong> {(workflow.audio_integrity?.status as string) || "não validada"}</p>
 
         {workflow.erro_mensagem && (
           <p style={{ color: "crimson" }}><strong>Erro:</strong> {workflow.erro_mensagem}</p>
@@ -191,7 +192,7 @@ export default function WorkflowDetail() {
           {workflow.status === "audio_concluido" && workflow.audio_available && (
             <div>
               <p><strong>Áudio Final:</strong></p>
-              <audio controls src={api.urlAudio(workflow.id)} style={{ width: "100%", maxWidth: "500px" }} />
+              <audio key={workflow.audio_final_sha256 || "pending"} controls preload="metadata" src={api.urlAudio(workflow.id, workflow.audio_final_sha256)} style={{ width: "100%", maxWidth: "500px" }} />
             </div>
           )}
 
@@ -271,6 +272,7 @@ export default function WorkflowDetail() {
                           #{take.attempt_index} {take.kind} — {take.status}, seed {take.resolved_seed ?? take.requested_seed ?? "—"}
                           {take.error_category ? ` — ${take.error_category}: ${take.error_message || ""}` : ""}
                           {take.is_current ? " (atual)" : ""}
+                          {take.quality_status ? ` — cobertura: ${take.quality_status}` : ""}
                           {take.synthesis_text ? <details>
                             <summary>Proveniência do take</summary>
                             <div>Canônico: {take.canonical_text || "—"}</div>
@@ -300,7 +302,7 @@ export default function WorkflowDetail() {
                 </td>
                 <td style={{ padding: "8px" }}>
                   {bloco.status === "concluido" && bloco.audio_sha256 && (
-                    <audio controls src={api.urlAudioBloco(workflow.id, bloco.id)} style={{ height: 30 }} />
+                    <audio key={`${bloco.id}:${bloco.audio_sha256}`} controls preload="metadata" src={api.urlAudioBloco(workflow.id, bloco.id, bloco.audio_sha256)} style={{ height: 30 }} />
                   )}
                 </td>
               </tr>

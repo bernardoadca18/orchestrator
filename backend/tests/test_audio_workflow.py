@@ -154,6 +154,42 @@ class FailingTranscriptionProvider:
         raise RuntimeError("transcription unavailable")
 
 
+class ScriptedTranscriptionProvider:
+    def __init__(self, texts: list[str]) -> None:
+        self.texts = texts
+        self.calls = 0
+
+    def transcribe(self, audio_path: Path) -> NarrationTranscription:
+        text = self.texts[min(self.calls, len(self.texts) - 1)]
+        self.calls += 1
+        words = tuple(
+            NarrationWord(word, index * 0.05, index * 0.05 + 0.04)
+            for index, word in enumerate(text.split())
+        )
+        return NarrationTranscription(
+            text=text,
+            words=words,
+            provider="fake",
+            model="fake-v1",
+            language="pt",
+        )
+
+
+class LowConfidenceTranscriptionProvider:
+    def transcribe(self, audio_path: Path) -> NarrationTranscription:
+        return NarrationTranscription(
+            text="conteúdo possivelmente incompleto",
+            words=(
+                NarrationWord("conteúdo", 0.0, 0.2, probability=0.12),
+                NarrationWord("possivelmente", 0.2, 0.4, probability=0.18),
+                NarrationWord("incompleto", 0.4, 0.6, probability=0.15),
+            ),
+            provider="fake",
+            model="fake-low-confidence",
+            language="pt",
+        )
+
+
 class FakeAlignmentService:
     def __init__(self) -> None:
         self.calls: list[uuid.UUID] = []
@@ -185,6 +221,7 @@ def _config(tmp_path: Path, glossary: Path) -> Settings:
         audio_storage_path=str(tmp_path / "audio"),
         pronunciation_glossary_path=glossary,
         voice_poll_interval_seconds=0,
+        audio_take_content_validation_enabled=False,
     )
 
 
@@ -476,6 +513,98 @@ async def test_permanent_remote_failure_is_not_retried(tmp_path: Path, write_ton
     assert block.generation_attempt == 0
     assert block.generation_attempt_history is None
     assert workflow.status == "erro"
+
+
+@pytest.mark.asyncio
+async def test_missing_spoken_content_retries_before_take_becomes_active(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    synthesis = "A primeira frase explica todo o conteúdo e confirma a conclusão final."
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": synthesis}]},
+    )
+    repo = FakeRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    transcription = ScriptedTranscriptionProvider(
+        ["A primeira frase explica", synthesis, synthesis]
+    )
+    config = _config(tmp_path, glossary)
+    config.audio_take_content_validation_enabled = True
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=transcription,
+        alignment_service_factory=lambda session: FakeAlignmentService(),  # type: ignore[arg-type]
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    assert workflow.status == "audio_concluido"
+    assert len(voice.created) == 2
+    assert voice.created[1]["seed"] == derive_quality_retry_seed(1001, 1)
+    assert repo.blocks[0].generation_attempt_history[0]["error_category"] == (
+        "content_quality_guard"
+    )
+
+
+@pytest.mark.asyncio
+async def test_content_quality_retry_is_bounded(tmp_path: Path, write_tone) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    synthesis = "A frase completa possui muitos detalhes importantes no encerramento."
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": synthesis}]},
+    )
+    repo = FakeRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    config = _config(tmp_path, glossary)
+    config.audio_take_content_validation_enabled = True
+    config.voice_quality_max_retries = 0
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=ScriptedTranscriptionProvider(["A frase completa"]),
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    assert workflow.status == "erro"
+    assert len(voice.created) == 1
+    assert repo.blocks[0].generation_attempt_history[0]["error_category"] == (
+        "content_quality_guard"
+    )
+
+
+def test_low_confidence_asr_is_inconclusive_not_content_rejection(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    config = _config(tmp_path, glossary)
+    config.audio_take_content_validation_enabled = True
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        transcription_provider=LowConfidenceTranscriptionProvider(),
+    )
+
+    report = service._validate_take_content(
+        tone,
+        "O conteúdo completo possui várias palavras que não podem desaparecer.",
+    )
+
+    assert report["status"] == "unavailable"
+    assert report["reasons"] == ["asr_low_confidence"]
+    assert report["asr"]["confidence_status"] == "low_confidence"
+    assert report["metrics"]["raw_content_coverage"]["status"] == "rejected"
 
 
 @pytest.mark.asyncio

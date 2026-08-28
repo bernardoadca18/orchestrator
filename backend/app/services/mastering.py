@@ -152,6 +152,8 @@ def master_narration(source: Path, destination: Path, config: MasteringConfig) -
             > config.duration_tolerance_seconds
         ):
             raise MasteringError("mastering changed narration duration")
+        if metadata.frame_count != source_metadata.frame_count:
+            raise MasteringError("mastering changed narration sample count")
         if after.sample_peak_dbfs >= 0:
             raise MasteringError("mastered narration contains digital clipping")
         if after.true_peak_dbtp > config.max_true_peak_dbtp + config.true_peak_tolerance_db:
@@ -167,6 +169,10 @@ def master_narration(source: Path, destination: Path, config: MasteringConfig) -
             status = "pass"
             reason = "loudness and True Peak are within policy"
         os.replace(temporary, destination)
+        published = inspect_wav(destination)
+        if published != metadata:
+            destination.unlink(missing_ok=True)
+            raise MasteringError("mastered WAV changed during atomic publication")
         return MasteringResult(
             before=before,
             after=after,
@@ -174,7 +180,7 @@ def master_narration(source: Path, destination: Path, config: MasteringConfig) -
             peak_constrained=peak_constrained,
             status=status,
             reason=reason,
-            metadata=metadata,
+            metadata=published,
         )
     finally:
         temporary.unlink(missing_ok=True)

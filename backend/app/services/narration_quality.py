@@ -9,6 +9,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from app.services.content_coverage import (
+    ContentCoverageThresholds,
+    analyze_content_coverage,
+)
+
 
 @dataclass(frozen=True)
 class NarrationQualityDecision:
@@ -35,6 +40,7 @@ class NarrationSpeechQualityPolicy:
         version: str,
         minimum_speech_coverage: float,
         max_repeated_ngram_occurrences: int,
+        content_thresholds: ContentCoverageThresholds | None = None,
     ) -> None:
         if not version.strip() or not 0 <= minimum_speech_coverage <= 1:
             raise ValueError("invalid narration speech-quality policy")
@@ -44,6 +50,7 @@ class NarrationSpeechQualityPolicy:
         self.minimum_speech_coverage = minimum_speech_coverage
         self.hard_block_coverage = minimum_speech_coverage / 2
         self.max_repeated_ngram_occurrences = max_repeated_ngram_occurrences
+        self.content_thresholds = content_thresholds or ContentCoverageThresholds()
         canonical = json.dumps(
             {
                 "version": version,
@@ -51,6 +58,7 @@ class NarrationSpeechQualityPolicy:
                 "hard_block_coverage": self.hard_block_coverage,
                 "max_repeated_ngram_occurrences": max_repeated_ngram_occurrences,
                 "repetition_policy": "consecutive-ngram-at-least-12-tokens-v1",
+                "content_coverage_policy_identity": self.content_thresholds.identity,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -61,6 +69,9 @@ class NarrationSpeechQualityPolicy:
         self,
         block_alignments: Sequence[Any],
         asr_words: Sequence[str],
+        *,
+        synthesis_text: str | None = None,
+        asr_text: str | None = None,
     ) -> NarrationQualityDecision:
         coverages = [float(block.synthesis_asr_coverage) for block in block_alignments]
         average = sum(coverages) / len(coverages) if coverages else 0.0
@@ -81,6 +92,15 @@ class NarrationSpeechQualityPolicy:
             reasons.append("average_synthesis_asr_coverage_below_threshold")
         if repeated:
             reasons.append("catastrophic_repeated_asr_run")
+        content = None
+        if synthesis_text is not None and asr_text is not None:
+            content = analyze_content_coverage(
+                synthesis_text,
+                asr_text,
+                thresholds=self.content_thresholds,
+            )
+            if content.status == "rejected":
+                reasons.append("content_coverage_rejected")
         if reasons:
             status: Literal["healthy", "warning", "invalid"] = "invalid"
         elif any(coverage < self.minimum_speech_coverage for coverage in coverages):
@@ -100,6 +120,7 @@ class NarrationSpeechQualityPolicy:
                 "no_word_block_count": no_words,
                 "catastrophic_block_count": catastrophic_blocks,
                 "catastrophic_repetition": repeated,
+                "content_coverage": content.to_dict() if content is not None else None,
             },
             policy_version=self.version,
             policy_identity=self.identity,

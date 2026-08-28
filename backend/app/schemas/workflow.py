@@ -63,6 +63,15 @@ class AudioBlocoTakeOut(BaseModel):
     audio_duration_seconds: float | None
     audio_sha256: str | None
     audio_byte_size: int | None
+    audio_sample_rate: int | None
+    audio_channels: int | None
+    audio_frame_count: int | None
+    audio_subtype: str | None
+    quality_status: str | None
+    artifact_integrity: dict | None
+    provider_metadata: dict | None
+    content_quality: dict | None
+    pause_diagnostics: dict | None
     is_current: bool
     created_at: dt.datetime
     completed_at: dt.datetime | None
@@ -96,6 +105,10 @@ class AudioBlocoOut(BaseModel):
     audio_sample_rate: int | None
     audio_channels: int | None
     audio_byte_size: int | None
+    audio_frame_count: int | None
+    audio_subtype: str | None
+    artifact_integrity: dict | None
+    pause_diagnostics: dict | None
     narration_start_seconds: float | None
     narration_end_seconds: float | None
     erro_mensagem: str | None
@@ -116,6 +129,10 @@ class WorkflowOut(BaseModel):
     audio_final_sample_rate: int | None
     audio_final_channels: int | None
     audio_final_byte_size: int | None
+    audio_final_frame_count: int | None
+    audio_final_subtype: str | None
+    audio_integrity: dict | None
+    narration_diagnostics: dict | None = Field(default=None, exclude=True)
     mastering_config: dict | None
     mastering_metrics: dict | None
     erro_mensagem: str | None

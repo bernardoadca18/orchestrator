@@ -49,7 +49,7 @@ revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestra
     "SELECT version_num FROM alembic_version;")"
 column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_blocos' AND column_name IN ('text_normalizer_version','text_normalizer_identity','initial_resolved_seed','retry_seed_strategy','generation_attempt_history','current_take_id','requested_take_id','voice_chunking_identity','pronunciation_replacements','normalized_text');")"
-test "${revision}" = "012"
+test "${revision}" = "013"
 test "${column_count}" = "10"
 take_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='audio_bloco_takes';")"
@@ -57,19 +57,22 @@ test "${take_table_count}" = "1"
 take_provenance_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_bloco_takes' AND column_name IN ('canonical_text','normalized_text','synthesis_text','pronunciation_glossary_identity','pronunciation_replacements','text_normalizer_version','text_normalizer_identity');")"
 test "${take_provenance_count}" = "7"
+integrity_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='workflow_execucoes' AND column_name IN ('audio_final_frame_count','audio_final_subtype','audio_integrity','narration_diagnostics')) OR (table_name='audio_blocos' AND column_name IN ('audio_frame_count','audio_subtype','artifact_integrity','pause_diagnostics')) OR (table_name='audio_bloco_takes' AND column_name IN ('audio_sample_rate','audio_channels','audio_frame_count','audio_subtype','quality_status','artifact_integrity','provider_metadata','content_quality','pause_diagnostics')));")"
+test "${integrity_column_count}" = "17"
 
 docker run --rm \
     --network "${network_name}" \
     --env "DATABASE_URL=${database_url}" \
     --env PYTHONPATH=/app \
     "${backend_image}" \
-    alembic downgrade 011
+    alembic downgrade 012
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT version_num FROM alembic_version;")"
-test "${revision}" = "011"
-take_provenance_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
-    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_bloco_takes' AND column_name IN ('canonical_text','normalized_text','synthesis_text','pronunciation_glossary_identity','pronunciation_replacements','text_normalizer_version','text_normalizer_identity');")"
-test "${take_provenance_count}" = "0"
+test "${revision}" = "012"
+integrity_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='workflow_execucoes' AND column_name IN ('audio_final_frame_count','audio_final_subtype','audio_integrity','narration_diagnostics')) OR (table_name='audio_blocos' AND column_name IN ('audio_frame_count','audio_subtype','artifact_integrity','pause_diagnostics')) OR (table_name='audio_bloco_takes' AND column_name IN ('audio_sample_rate','audio_channels','audio_frame_count','audio_subtype','quality_status','artifact_integrity','provider_metadata','content_quality','pause_diagnostics')));")"
+test "${integrity_column_count}" = "0"
 docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
     "INSERT INTO workflow_execucoes (id, ideia_id, roteiro_id, roteiro_snapshot, status) VALUES ('00000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000003', '{}'::jsonb, 'agendada'); INSERT INTO audio_blocos (id, workflow_execucao_id, ordem, tipo, texto, status) VALUES ('00000000-0000-0000-0000-000000000004', '00000000-0000-0000-0000-000000000001', 0, 'intro', 'Historical text', 'concluido'); INSERT INTO audio_bloco_takes (id, audio_bloco_id, attempt_index, kind, status, is_current) VALUES ('00000000-0000-0000-0000-000000000005', '00000000-0000-0000-0000-000000000004', 0, 'initial', 'completed', true);" >/dev/null
 
@@ -81,9 +84,9 @@ docker run --rm \
     alembic upgrade head
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT version_num FROM alembic_version;")"
-test "${revision}" = "012"
+test "${revision}" = "013"
 historical_take_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
-    "SELECT count(*) FROM audio_bloco_takes WHERE id='00000000-0000-0000-0000-000000000005' AND status='completed' AND canonical_text IS NULL AND normalized_text IS NULL AND synthesis_text IS NULL AND pronunciation_glossary_identity IS NULL AND pronunciation_replacements IS NULL AND text_normalizer_version IS NULL AND text_normalizer_identity IS NULL;")"
+    "SELECT count(*) FROM audio_bloco_takes WHERE id='00000000-0000-0000-0000-000000000005' AND status='completed' AND canonical_text IS NULL AND normalized_text IS NULL AND synthesis_text IS NULL AND pronunciation_glossary_identity IS NULL AND pronunciation_replacements IS NULL AND text_normalizer_version IS NULL AND text_normalizer_identity IS NULL AND audio_sample_rate IS NULL AND audio_channels IS NULL AND audio_frame_count IS NULL AND audio_subtype IS NULL AND quality_status IS NULL AND artifact_integrity IS NULL AND provider_metadata IS NULL AND content_quality IS NULL AND pause_diagnostics IS NULL;")"
 test "${historical_take_count}" = "1"
 
-echo "Fresh/reversible Orchestrator migrations passed: 001 -> 012 -> 011 -> 012"
+echo "Fresh/reversible Orchestrator migrations passed: 001 -> 013 -> 012 -> 013"

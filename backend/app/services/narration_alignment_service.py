@@ -22,6 +22,7 @@ from app.models.workflow import (
 )
 from app.repositories.narration_alignment_repository import NarrationAlignmentRepository
 from app.repositories.workflow_repository import WorkflowRepository
+from app.services.content_coverage import ContentCoverageThresholds
 from app.services.narration_alignment_algorithm import (
     AlignmentAlgorithmError,
     BlockRange,
@@ -160,6 +161,14 @@ class NarrationAlignmentService:
             minimum_speech_coverage=self.minimum_speech_coverage,
             max_repeated_ngram_occurrences=(
                 config.narration_quality_max_repeated_ngram_occurrences
+            ),
+            content_thresholds=ContentCoverageThresholds(
+                minimum_coverage_ratio=config.audio_content_minimum_coverage_ratio,
+                maximum_deletion_ratio=config.audio_content_maximum_deletion_ratio,
+                maximum_insertion_ratio=config.audio_content_maximum_insertion_ratio,
+                maximum_repetition_ratio=config.audio_content_maximum_repetition_ratio,
+                maximum_missing_contiguous_tokens=config.audio_content_maximum_missing_tokens,
+                maximum_trailing_missing_tokens=config.audio_content_maximum_trailing_missing_tokens,
             ),
         )
 
@@ -434,6 +443,10 @@ class NarrationAlignmentService:
         quality = self.quality_policy.evaluate(
             persisted_blocks,
             [word.word for word in timed_words],
+            synthesis_text="\n".join(
+                (block.synthesis_text or block.texto) for block in audio_blocks
+            ),
+            asr_text=transcription.texto_completo,
         )
         metrics["speech_quality"] = quality.to_dict()
         return persisted_blocks, bindings, metrics

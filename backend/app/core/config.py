@@ -70,6 +70,16 @@ class Settings(BaseSettings):
     audio_block_max_duration_seconds: float = 120.0
     audio_block_max_seconds_per_char: float = 0.5
     audio_block_duration_grace_seconds: float = 15.0
+    audio_take_content_validation_enabled: bool = True
+    audio_content_minimum_coverage_ratio: float = 0.72
+    audio_content_maximum_deletion_ratio: float = 0.22
+    audio_content_maximum_insertion_ratio: float = 0.30
+    audio_content_maximum_repetition_ratio: float = 0.20
+    audio_content_minimum_asr_confidence: float = 0.50
+    audio_content_maximum_missing_tokens: int = 6
+    audio_content_maximum_trailing_missing_tokens: int = 4
+    audio_diagnostics_silence_threshold_dbfs: float = -45.0
+    audio_diagnostics_minimum_silence_seconds: float = 0.15
     workflow_max_tentativas: int = 3
 
     transcription_model: str = "small"
@@ -141,6 +151,11 @@ class Settings(BaseSettings):
         "narration_alignment_fuzzy_min_score",
         "narration_alignment_ambiguity_delta",
         "narration_alignment_min_speech_coverage",
+        "audio_content_minimum_coverage_ratio",
+        "audio_content_maximum_deletion_ratio",
+        "audio_content_maximum_insertion_ratio",
+        "audio_content_maximum_repetition_ratio",
+        "audio_content_minimum_asr_confidence",
     )
     @classmethod
     def validate_alignment_ratio(cls, value: float) -> float:
@@ -148,7 +163,12 @@ class Settings(BaseSettings):
             raise ValueError("narration alignment ratios must be between 0 and 1")
         return value
 
-    @field_validator("narration_alignment_max_tokens", "narration_alignment_max_cells")
+    @field_validator(
+        "narration_alignment_max_tokens",
+        "narration_alignment_max_cells",
+        "audio_content_maximum_missing_tokens",
+        "audio_content_maximum_trailing_missing_tokens",
+    )
     @classmethod
     def validate_alignment_guard(cls, value: int) -> int:
         if value <= 0:

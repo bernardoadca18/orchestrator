@@ -138,6 +138,10 @@ class WorkflowRepository:
         workflow.audio_final_sample_rate = None
         workflow.audio_final_channels = None
         workflow.audio_final_byte_size = None
+        workflow.audio_final_frame_count = None
+        workflow.audio_final_subtype = None
+        workflow.audio_integrity = None
+        workflow.narration_diagnostics = None
         workflow.duracao_audio_segundos = None
         workflow.mastering_config = None
         workflow.mastering_metrics = None
@@ -224,6 +228,10 @@ class WorkflowRepository:
             bloco.audio_sample_rate = None
             bloco.audio_channels = None
             bloco.audio_byte_size = None
+            bloco.audio_frame_count = None
+            bloco.audio_subtype = None
+            bloco.artifact_integrity = None
+            bloco.pause_diagnostics = None
             bloco.narration_start_seconds = None
             bloco.narration_end_seconds = None
             if workflow is not None:

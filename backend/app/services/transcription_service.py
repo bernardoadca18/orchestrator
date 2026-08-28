@@ -15,13 +15,17 @@ class NarrationWord:
     word: str
     start_seconds: float
     end_seconds: float
+    probability: float | None = None
 
     def to_legacy_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "palavra": self.word,
             "inicio": round(self.start_seconds, 3),
             "fim": round(self.end_seconds, 3),
         }
+        if self.probability is not None:
+            payload["probabilidade"] = round(self.probability, 6)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -78,6 +82,11 @@ class FasterWhisperNarrationProvider:
                         word=word.word.strip(),
                         start_seconds=float(word.start),
                         end_seconds=float(word.end),
+                        probability=(
+                            float(word.probability)
+                            if getattr(word, "probability", None) is not None
+                            else None
+                        ),
                     )
                 )
         language = getattr(info, "language", None)

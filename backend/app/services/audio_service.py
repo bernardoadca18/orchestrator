@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -26,6 +27,12 @@ from app.clients.voice_client import (
 from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco, AudioBlocoTake
 from app.repositories.workflow_repository import WorkflowRepository
+from app.services.audio_diagnostics import analyze_audio
+from app.services.content_coverage import (
+    ContentCoverageThresholds,
+    analyze_content_coverage,
+    unavailable_content_report,
+)
 from app.services.mastering import MasteringConfig, MasteringError, master_narration
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.production_audio import (
@@ -42,7 +49,7 @@ from app.services.transcription_service import (
 )
 
 logger = logging.getLogger(__name__)
-QUALITY_RETRY_CATEGORIES = frozenset({"chunk_quality_guard"})
+QUALITY_RETRY_CATEGORIES = frozenset({"chunk_quality_guard", "content_quality_guard"})
 QUALITY_RETRY_SEED_STRATEGY = "qwen-orchestrator-quality-retry-v1"
 MANUAL_TAKE_SEED_STRATEGY = "qwen-orchestrator-manual-take-v1"
 
@@ -84,6 +91,45 @@ def _mastering_config(config: Settings) -> MasteringConfig:
         max_acceptable_lufs=config.audio_max_acceptable_lufs,
         duration_tolerance_seconds=config.audio_duration_tolerance_seconds,
     )
+
+
+def _content_thresholds(config: Settings) -> ContentCoverageThresholds:
+    return ContentCoverageThresholds(
+        minimum_coverage_ratio=config.audio_content_minimum_coverage_ratio,
+        maximum_deletion_ratio=config.audio_content_maximum_deletion_ratio,
+        maximum_insertion_ratio=config.audio_content_maximum_insertion_ratio,
+        maximum_repetition_ratio=config.audio_content_maximum_repetition_ratio,
+        maximum_missing_contiguous_tokens=config.audio_content_maximum_missing_tokens,
+        maximum_trailing_missing_tokens=config.audio_content_maximum_trailing_missing_tokens,
+    )
+
+
+def _provider_inserted_pauses(metadata: dict[str, object]) -> list[dict[str, object]]:
+    timeline = metadata.get("assembly_timeline")
+    if not isinstance(timeline, list):
+        return []
+    result: list[dict[str, object]] = []
+    for item in timeline:
+        if not isinstance(item, dict) or item.get("kind") != "inserted_pause":
+            continue
+        try:
+            start = float(item["start_seconds"])
+            end = float(item["end_seconds"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        result.append(
+            {
+                "start_seconds": start,
+                "end_seconds": end,
+                "source": "provider_chunk_boundary_pause",
+                "reason": "Qwen deterministic chunk-boundary pause",
+                "chunk_index": item.get("chunk_index"),
+                "boundary_type": item.get("boundary_type"),
+            }
+        )
+    return result
 
 
 class AudioWorkflowService:
@@ -144,6 +190,7 @@ class AudioWorkflowService:
                     self.config.voice_generation_profile,
                 )
                 source_paths: list[Path] = []
+                block_pause_timelines: dict[int, list[dict[str, object]]] = {}
                 for order, raw_block in enumerate(blocks):
                     if await self._cancelled(workflow.id):
                         raise VoiceClientCancelledError("workflow cancelled")
@@ -172,6 +219,7 @@ class AudioWorkflowService:
                             "pronunciation_glossary_identity": pronunciation.glossary_identity,
                             "voice_profile": provenance.voice.name,
                             "voice_profile_identity": provenance.voice.identity,
+                            "voice_clone_mode": provenance.voice.clone_mode,
                             "generation_profile": provenance.generation.name,
                             "generation_profile_identity": provenance.generation.identity,
                             "voice_chunking_identity": provenance.chunking_identity,
@@ -210,6 +258,15 @@ class AudioWorkflowService:
                     ):
                         assert block.audio_path is not None
                         source_paths.append(Path(block.audio_path))
+                        existing_pauses = getattr(block, "pause_diagnostics", None)
+                        if isinstance(existing_pauses, dict) and isinstance(
+                            existing_pauses.get("pause_timeline"), list
+                        ):
+                            block_pause_timelines[order] = [
+                                item
+                                for item in existing_pauses["pause_timeline"]
+                                if isinstance(item, dict)
+                            ]
                         logger.info(
                             "reusing completed voice block",
                             extra={"workflow_id": str(workflow.id), "block_order": order},
@@ -249,40 +306,86 @@ class AudioWorkflowService:
                         except VoiceJobFailedError as exc:
                             take = await self._prepare_quality_retry(block, take, exc)
                             active_take = take
+                            if hasattr(self.repo, "atualizar_take"):
+                                await self.repo.atualizar_take(take.id, status="running")
                             continue
                         await self._persist_remote_job(block, completed, take)
-                        break
-                    payload = await voice.download_audio(completed.id)
-                    take_dir = source_dir / "takes"
-                    take_dir.mkdir(parents=True, exist_ok=True)
-                    source_path = take_dir / f"take_{take.id}.wav"
-                    metadata = publish_source_block(
-                        payload,
-                        source_path,
-                        expected_sha256=completed.result_sha256,
-                        expected_byte_size=completed.result_byte_size,
-                        text_length_chars=len(pronunciation.synthesis_text),
-                        max_duration_seconds=self.config.audio_block_max_duration_seconds,
-                        max_seconds_per_char=self.config.audio_block_max_seconds_per_char,
-                        duration_grace_seconds=self.config.audio_block_duration_grace_seconds,
-                    )
-                    if hasattr(self.repo, "obter_bloco_por_id"):
-                        current = await self.repo.obter_bloco_por_id(block.id)
-                        if current is not None and current.requested_take_id != take.id:
+                        payload = await voice.download_audio(completed.id)
+                        take_dir = source_dir / "takes"
+                        take_dir.mkdir(parents=True, exist_ok=True)
+                        source_path = take_dir / f"take_{take.id}.wav"
+                        metadata = publish_source_block(
+                            payload,
+                            source_path,
+                            expected_sha256=completed.result_sha256,
+                            expected_byte_size=completed.result_byte_size,
+                            expected_duration_seconds=completed.result_duration_seconds,
+                            expected_sample_rate=completed.result_sample_rate,
+                            expected_channels=completed.result_channels,
+                            expected_subtype=completed.result_subtype,
+                            expected_frame_count=completed.result_frame_count,
+                            expected_riff_data_byte_size=(completed.result_riff_data_byte_size),
+                            text_length_chars=len(pronunciation.synthesis_text),
+                            max_duration_seconds=self.config.audio_block_max_duration_seconds,
+                            max_seconds_per_char=self.config.audio_block_max_seconds_per_char,
+                            duration_grace_seconds=self.config.audio_block_duration_grace_seconds,
+                        )
+                        provider_pauses = _provider_inserted_pauses(completed.metadata)
+                        pause_diagnostics = analyze_audio(
+                            source_path,
+                            inserted_pauses=provider_pauses,
+                            silence_threshold_dbfs=(
+                                self.config.audio_diagnostics_silence_threshold_dbfs
+                            ),
+                            minimum_silence_seconds=(
+                                self.config.audio_diagnostics_minimum_silence_seconds
+                            ),
+                        )
+                        content_quality = self._validate_take_content(
+                            source_path, pronunciation.synthesis_text
+                        )
+                        if hasattr(self.repo, "atualizar_take"):
+                            await self.repo.atualizar_take(
+                                take.id,
+                                audio_path=str(source_path),
+                                audio_duration_seconds=metadata.duration_seconds,
+                                audio_sha256=metadata.sha256,
+                                audio_byte_size=metadata.byte_size,
+                                audio_sample_rate=metadata.sample_rate,
+                                audio_channels=metadata.channels,
+                                audio_frame_count=metadata.frame_count,
+                                audio_subtype=metadata.subtype,
+                                artifact_integrity=asdict(metadata),
+                                provider_metadata=completed.metadata,
+                                content_quality=content_quality,
+                                pause_diagnostics=pause_diagnostics,
+                                quality_status=content_quality["status"],
+                            )
+                        if hasattr(self.repo, "obter_bloco_por_id"):
+                            current = await self.repo.obter_bloco_por_id(block.id)
+                            if current is not None and current.requested_take_id != take.id:
+                                if hasattr(self.repo, "atualizar_take"):
+                                    await self.repo.atualizar_take(
+                                        take.id,
+                                        status="superseded",
+                                        error_category="superseded",
+                                        error_message="A newer take was requested",
+                                    )
+                                active_block = None
+                                active_take = None
+                                return
+                        if content_quality["status"] == "rejected":
+                            failure = VoiceJobFailedError(
+                                "content_quality_guard",
+                                "generated speech failed ASR content coverage validation",
+                            )
+                            failure.diagnostics = content_quality  # type: ignore[attr-defined]
+                            take = await self._prepare_quality_retry(block, take, failure)
+                            active_take = take
                             if hasattr(self.repo, "atualizar_take"):
-                                await self.repo.atualizar_take(
-                                    take.id,
-                                    status="superseded",
-                                    error_category="superseded",
-                                    error_message="A newer take was requested",
-                                    audio_path=str(source_path),
-                                    audio_duration_seconds=metadata.duration_seconds,
-                                    audio_sha256=metadata.sha256,
-                                    audio_byte_size=metadata.byte_size,
-                                )
-                            active_block = None
-                            active_take = None
-                            return
+                                await self.repo.atualizar_take(take.id, status="running")
+                            continue
+                        break
                     if hasattr(self.repo, "promover_take"):
                         promoted = await self.repo.promover_take(
                             block.id,
@@ -299,6 +402,15 @@ class AudioWorkflowService:
                             audio_duration_seconds=metadata.duration_seconds,
                             audio_sha256=metadata.sha256,
                             audio_byte_size=metadata.byte_size,
+                            audio_sample_rate=metadata.sample_rate,
+                            audio_channels=metadata.channels,
+                            audio_frame_count=metadata.frame_count,
+                            audio_subtype=metadata.subtype,
+                            artifact_integrity=asdict(metadata),
+                            provider_metadata=completed.metadata,
+                            content_quality=content_quality,
+                            pause_diagnostics=pause_diagnostics,
+                            quality_status=content_quality["status"],
                             completed_at=dt.datetime.now(dt.UTC),
                             block_fields={
                                 "status": "concluido",
@@ -308,6 +420,10 @@ class AudioWorkflowService:
                                 "audio_sample_rate": metadata.sample_rate,
                                 "audio_channels": metadata.channels,
                                 "audio_byte_size": metadata.byte_size,
+                                "audio_frame_count": metadata.frame_count,
+                                "audio_subtype": metadata.subtype,
+                                "artifact_integrity": asdict(metadata),
+                                "pause_diagnostics": pause_diagnostics,
                                 "erro_mensagem": None,
                             },
                         )
@@ -325,9 +441,18 @@ class AudioWorkflowService:
                             audio_sample_rate=metadata.sample_rate,
                             audio_channels=metadata.channels,
                             audio_byte_size=metadata.byte_size,
+                            audio_frame_count=metadata.frame_count,
+                            audio_subtype=metadata.subtype,
+                            artifact_integrity=asdict(metadata),
+                            pause_diagnostics=pause_diagnostics,
                             erro_mensagem=None,
                         )
                     source_paths.append(source_path)
+                    block_pause_timelines[order] = [
+                        item
+                        for item in pause_diagnostics.get("pause_timeline", [])
+                        if isinstance(item, dict)
+                    ]
                     active_block = None
                     active_take = None
 
@@ -348,6 +473,41 @@ class AudioWorkflowService:
                         narration_end_seconds=offset.end_seconds,
                     )
 
+            inserted_final_pauses: list[dict[str, object]] = []
+            for index, offset in enumerate(assembly.offsets):
+                for pause_item in block_pause_timelines.get(offset.order, []):
+                    if pause_item.get("source") != "provider_chunk_boundary_pause":
+                        continue
+                    inserted_final_pauses.append(
+                        {
+                            **pause_item,
+                            "start_seconds": offset.start_seconds
+                            + float(cast(float | int | str, pause_item.get("start_seconds", 0.0))),
+                            "end_seconds": offset.start_seconds
+                            + float(cast(float | int | str, pause_item.get("end_seconds", 0.0))),
+                        }
+                    )
+                if index + 1 < len(assembly.offsets):
+                    following = assembly.offsets[index + 1]
+                    if following.start_seconds > offset.end_seconds:
+                        inserted_final_pauses.append(
+                            {
+                                "start_seconds": offset.end_seconds,
+                                "end_seconds": following.start_seconds,
+                                "source": "orchestrator_block_boundary_pause",
+                                "reason": "configured silence between editorial blocks",
+                                "chunk_index": None,
+                                "boundary_type": "editorial_block",
+                            }
+                        )
+
+            assembled_diagnostics = analyze_audio(
+                assembled_path,
+                inserted_pauses=inserted_final_pauses,
+                silence_threshold_dbfs=self.config.audio_diagnostics_silence_threshold_dbfs,
+                minimum_silence_seconds=self.config.audio_diagnostics_minimum_silence_seconds,
+            )
+
             await self.repo.atualizar_status(workflow.id, "gerando_audio", audio_phase="mastering")
             final_path = root / "narration_final.wav"
             mastering_config = _mastering_config(self.config)
@@ -357,25 +517,136 @@ class AudioWorkflowService:
                 > self.config.audio_duration_tolerance_seconds
             ):
                 raise MasteringError("final narration duration changed after mastering")
+            final_metadata = inspect_wav(final_path)
+            if final_metadata != mastered.metadata:
+                raise MasteringError("mastered narration metadata differs after final reopen")
+            final_diagnostics = analyze_audio(
+                final_path,
+                inserted_pauses=inserted_final_pauses,
+                silence_threshold_dbfs=self.config.audio_diagnostics_silence_threshold_dbfs,
+                minimum_silence_seconds=self.config.audio_diagnostics_minimum_silence_seconds,
+            )
+            manifest_blocks: list[dict[str, object]] = []
+            for offset in assembly.offsets:
+                manifest_block = await self.repo.obter_bloco_por_ordem(workflow.id, offset.order)
+                if manifest_block is None:
+                    continue
+                current_take = None
+                current_take_id = getattr(manifest_block, "current_take_id", None)
+                if current_take_id is not None and hasattr(self.repo, "obter_take"):
+                    current_take = await self.repo.obter_take(current_take_id)
+                manifest_blocks.append(
+                    {
+                        "block_id": str(manifest_block.id),
+                        "order": manifest_block.ordem,
+                        "current_take_id": str(current_take_id) if current_take_id else None,
+                        "canonical_text_sha256": getattr(
+                            manifest_block, "source_text_sha256", None
+                        ),
+                        "normalized_text": getattr(manifest_block, "normalized_text", None),
+                        "synthesis_text": getattr(manifest_block, "synthesis_text", None),
+                        "synthesis_identity": getattr(manifest_block, "synthesis_identity", None),
+                        "pronunciation_replacements": getattr(
+                            manifest_block, "pronunciation_replacements", None
+                        ),
+                        "voice_profile": getattr(manifest_block, "voice_profile", None),
+                        "voice_profile_identity": getattr(
+                            manifest_block, "voice_profile_identity", None
+                        ),
+                        "generation_profile": getattr(manifest_block, "generation_profile", None),
+                        "generation_profile_identity": getattr(
+                            manifest_block, "generation_profile_identity", None
+                        ),
+                        "resolved_seed": getattr(manifest_block, "resolved_seed", None),
+                        "qwen_job_id": getattr(manifest_block, "job_id_voz", None),
+                        "start_seconds": offset.start_seconds,
+                        "end_seconds": offset.end_seconds,
+                        "artifact": getattr(manifest_block, "artifact_integrity", None),
+                        "provider_metadata": getattr(current_take, "provider_metadata", None),
+                        "content_quality": getattr(current_take, "content_quality", None),
+                        "pause_diagnostics": getattr(manifest_block, "pause_diagnostics", None),
+                    }
+                )
+            integrity = {
+                "status": "passed",
+                "artifact": asdict(final_metadata),
+                "expected_assembly_duration_seconds": assembly.metadata.duration_seconds,
+                "decoded_physical_duration_seconds": final_metadata.duration_seconds,
+                "persisted_duration_seconds": final_metadata.duration_seconds,
+                "duration_delta_seconds": round(
+                    final_metadata.duration_seconds - assembly.metadata.duration_seconds, 9
+                ),
+                "expected_frame_count": assembly.expected_frame_count,
+                "decoded_frame_count": final_metadata.frame_count,
+                "physical_size_matches_persisted_size": True,
+            }
+            diagnostics_manifest = {
+                "version": "narration_diagnostic_manifest_v1",
+                "workflow_id": str(workflow.id),
+                "artifact_sha256": final_metadata.sha256,
+                "assembly": {
+                    "artifact": asdict(assembly.metadata),
+                    "expected_frame_count": assembly.expected_frame_count,
+                    "diagnostics": assembled_diagnostics,
+                },
+                "mastering": mastered.to_dict(),
+                "final": {
+                    "artifact": asdict(final_metadata),
+                    "diagnostics": final_diagnostics,
+                },
+                "inserted_pause_count": len(inserted_final_pauses),
+                "blocks": manifest_blocks,
+            }
             await self.repo.atualizar_status(
                 workflow.id,
                 "gerando_audio",
                 audio_phase="transcribing",
                 audio_final_path=str(final_path),
-                duracao_audio_segundos=mastered.metadata.duration_seconds,
-                audio_final_sha256=mastered.metadata.sha256,
-                audio_final_sample_rate=mastered.metadata.sample_rate,
-                audio_final_channels=mastered.metadata.channels,
-                audio_final_byte_size=mastered.metadata.byte_size,
+                duracao_audio_segundos=final_metadata.duration_seconds,
+                audio_final_sha256=final_metadata.sha256,
+                audio_final_sample_rate=final_metadata.sample_rate,
+                audio_final_channels=final_metadata.channels,
+                audio_final_byte_size=final_metadata.byte_size,
+                audio_final_frame_count=final_metadata.frame_count,
+                audio_final_subtype=final_metadata.subtype,
+                audio_integrity=integrity,
+                narration_diagnostics=diagnostics_manifest,
                 mastering_config=asdict(mastering_config),
                 mastering_metrics=mastered.to_dict(),
             )
+            persisted = await self.repo.obter_por_id(workflow.id)
+            if persisted is None or any(
+                (
+                    persisted.duracao_audio_segundos != final_metadata.duration_seconds,
+                    persisted.audio_final_sha256 != final_metadata.sha256,
+                    persisted.audio_final_byte_size != final_metadata.byte_size,
+                    getattr(persisted, "audio_final_frame_count", None)
+                    != final_metadata.frame_count,
+                )
+            ):
+                raise ProductionAudioError(
+                    "persisted final narration metadata differs from the physical artifact"
+                )
 
             transcription_available = True
             try:
                 await self._ensure_transcription(workflow.id, final_path, mastered.metadata.sha256)
+                current_transcription = await self.repo.obter_transcricao(workflow.id)
+                diagnostics_manifest["asr"] = (
+                    {
+                        "status": "available",
+                        "transcript": current_transcription.texto_completo,
+                        "provider": current_transcription.provider,
+                        "model": current_transcription.model,
+                        "language": current_transcription.language,
+                        "word_count": len(current_transcription.palavras_timestamps or []),
+                    }
+                    if current_transcription is not None
+                    else {"status": "unavailable"}
+                )
             except Exception:
                 transcription_available = False
+                diagnostics_manifest["asr"] = {"status": "unavailable"}
                 logger.exception(
                     "final narration transcription failed without invalidating audio",
                     extra={"workflow_id": str(workflow.id)},
@@ -390,6 +661,16 @@ class AudioWorkflowService:
                 alignment_result = await self.alignment_service_factory(self.session).ensure(
                     workflow.id
                 )
+                alignment = (
+                    alignment_result[0]
+                    if isinstance(alignment_result, tuple) and alignment_result
+                    else alignment_result
+                )
+                diagnostics_manifest["content_quality"] = {
+                    "alignment_id": str(getattr(alignment, "id", "")) or None,
+                    "status": getattr(alignment, "status", "unavailable"),
+                    "metrics": (getattr(alignment, "metrics", None) or {}).get("speech_quality"),
+                }
                 if (
                     isinstance(alignment_result, tuple)
                     and alignment_result
@@ -401,6 +682,7 @@ class AudioWorkflowService:
                         audio_phase="quality_unvalidated",
                     )
             except Exception:
+                diagnostics_manifest["content_quality"] = {"status": "unavailable"}
                 logger.exception(
                     "automatic narration alignment failed without invalidating audio",
                     extra={"workflow_id": str(workflow.id)},
@@ -410,6 +692,11 @@ class AudioWorkflowService:
                     "audio_concluido",
                     audio_phase="quality_unvalidated",
                 )
+            await self.repo.atualizar_status(
+                workflow.id,
+                "audio_concluido",
+                narration_diagnostics=diagnostics_manifest,
+            )
         except VoiceClientCancelledError:
             logger.info(
                 "workflow cancelled during audio processing",
@@ -436,12 +723,18 @@ class AudioWorkflowService:
                     erro_mensagem=str(exc),
                 )
             if active_take is not None and hasattr(self.repo, "atualizar_take"):
-                await self.repo.atualizar_take(
-                    active_take.id,
-                    status="failed",
-                    error_category=type(exc).__name__,
-                    error_message=str(exc),
+                persisted_take = (
+                    await self.repo.obter_take(active_take.id)
+                    if hasattr(self.repo, "obter_take")
+                    else None
                 )
+                if persisted_take is None or persisted_take.status in {"queued", "running"}:
+                    await self.repo.atualizar_take(
+                        active_take.id,
+                        status="failed",
+                        error_category=type(exc).__name__,
+                        error_message=str(exc),
+                    )
             await self.repo.atualizar_status(
                 workflow.id,
                 "erro",
@@ -554,7 +847,11 @@ class AudioWorkflowService:
                     status="failed",
                     error_category="quality_retry_exhausted",
                     error_message=failure.public_message,
-                    error_diagnostics={"history": history},
+                    error_diagnostics={
+                        "history": history,
+                        "last_failure": getattr(failure, "diagnostics", None),
+                    },
+                    quality_status="rejected",
                 )
             await self.repo.atualizar_bloco(
                 block.id,
@@ -580,7 +877,8 @@ class AudioWorkflowService:
                 status="failed",
                 error_category=failure.category,
                 error_message=failure.public_message,
-                error_diagnostics=entry,
+                error_diagnostics=getattr(failure, "diagnostics", entry),
+                quality_status="rejected",
             )
         if hasattr(self.repo, "criar_take"):
             next_take, _ = await self.repo.criar_take(
@@ -667,11 +965,78 @@ class AudioWorkflowService:
             and block.audio_sample_rate == metadata.sample_rate
             and block.audio_channels == metadata.channels
             and block.audio_byte_size == metadata.byte_size
+            and block.duracao_segundos == metadata.duration_seconds
+            and (
+                getattr(block, "audio_frame_count", None) is None
+                or block.audio_frame_count == metadata.frame_count
+            )
+            and (
+                getattr(block, "audio_subtype", None) is None
+                or block.audio_subtype == metadata.subtype
+            )
         )
 
     async def _cancelled(self, workflow_id: uuid.UUID) -> bool:
         workflow = await self.repo.obter_por_id(workflow_id)
         return workflow is None or workflow.status == "cancelada"
+
+    def _validate_take_content(self, audio_path: Path, synthesis_text: str) -> dict[str, object]:
+        thresholds = _content_thresholds(self.config)
+        if not self.config.audio_take_content_validation_enabled:
+            return unavailable_content_report(
+                thresholds, reason="take_asr_validation_disabled"
+            ).to_dict()
+        provider = self.transcription_provider or get_transcription_provider()
+        try:
+            transcription = provider.transcribe(audio_path)
+        except Exception:
+            logger.exception(
+                "take ASR content validation is unavailable",
+                extra={"audio_sha256": inspect_wav(audio_path).sha256},
+            )
+            return unavailable_content_report(thresholds).to_dict()
+        report = analyze_content_coverage(
+            synthesis_text,
+            transcription.text,
+            thresholds=thresholds,
+        ).to_dict()
+        known_probabilities = [
+            word.probability for word in transcription.words if word.probability is not None
+        ]
+        average_confidence = (
+            sum(known_probabilities) / len(known_probabilities) if known_probabilities else None
+        )
+        confidence_status = (
+            "unavailable"
+            if average_confidence is None
+            else (
+                "low_confidence"
+                if average_confidence < self.config.audio_content_minimum_asr_confidence
+                else "accepted"
+            )
+        )
+        if confidence_status == "low_confidence":
+            raw_report = report
+            report = unavailable_content_report(thresholds, reason="asr_low_confidence").to_dict()
+            report["metrics"] = {
+                **cast(dict[str, object], report["metrics"]),
+                "raw_content_coverage": raw_report,
+            }
+        report["asr"] = {
+            "transcript": transcription.text,
+            "provider": transcription.provider,
+            "model": transcription.model,
+            "language": transcription.language,
+            "word_count": len(transcription.words),
+            "confidence_status": confidence_status,
+            "average_word_probability": (
+                round(average_confidence, 6) if average_confidence is not None else None
+            ),
+            "minimum_accepted_average_probability": (
+                self.config.audio_content_minimum_asr_confidence
+            ),
+        }
+        return report
 
     async def _ensure_transcription(
         self, workflow_id: uuid.UUID, final_path: Path, audio_sha256: str

@@ -7,7 +7,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
@@ -61,6 +61,12 @@ from app.schemas.workflow import (
     WorkflowRenderOutputOut,
 )
 from app.services.audio_service import derive_manual_take_seed
+from app.services.audio_serving import (
+    AudioArtifactExpectation,
+    AudioServingIntegrityError,
+    audio_file_response,
+    verify_audio_artifact,
+)
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
@@ -703,15 +709,30 @@ async def cancelar_workflow(
     return await repo.obter_por_id(wf.id)
 
 
-@router.get("/{workflow_id}/audio")
+@router.api_route("/{workflow_id}/audio", methods=["GET", "HEAD"])
 async def baixar_audio_final(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
 ):
     repo = WorkflowRepository(session)
     wf = await repo.obter_por_id(workflow_id)
-    if wf is None or not wf.audio_final_path:
+    if wf is None or not wf.audio_final_path or wf.status != "audio_concluido":
         raise HTTPException(404, "Áudio final ainda não disponível para este workflow")
-    return FileResponse(wf.audio_final_path, media_type="audio/wav", filename=f"{workflow_id}.wav")
+    try:
+        path, metadata = verify_audio_artifact(
+            wf.audio_final_path,
+            AudioArtifactExpectation(
+                sha256=wf.audio_final_sha256,
+                byte_size=wf.audio_final_byte_size,
+                duration_seconds=wf.duracao_audio_segundos,
+                sample_rate=wf.audio_final_sample_rate,
+                channels=wf.audio_final_channels,
+                frame_count=getattr(wf, "audio_final_frame_count", None),
+                subtype=getattr(wf, "audio_final_subtype", None),
+            ),
+        )
+    except AudioServingIntegrityError as exc:
+        raise HTTPException(409, "Áudio final ativo falhou na verificação de integridade") from exc
+    return audio_file_response(path, metadata, filename=f"{workflow_id}.wav")
 
 
 @router.get("/{workflow_id}/transcricao", response_model=TranscricaoOut)
@@ -935,7 +956,7 @@ async def baixar_video_final(
     )
 
 
-@router.get("/{workflow_id}/blocos/{bloco_id}/audio")
+@router.api_route("/{workflow_id}/blocos/{bloco_id}/audio", methods=["GET", "HEAD"])
 async def baixar_audio_bloco(
     workflow_id: uuid.UUID, bloco_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
 ):
@@ -946,12 +967,48 @@ async def baixar_audio_bloco(
     if bloco is None or bloco.workflow_execucao_id != workflow_id:
         raise HTTPException(404, "Bloco não encontrado")
 
-    if not bloco.audio_path:
+    if not bloco.audio_path or bloco.status != "concluido":
         raise HTTPException(404, "Áudio do bloco ainda não disponível")
-
-    return FileResponse(
-        bloco.audio_path, media_type="audio/wav", filename=f"bloco_{bloco.ordem:02d}.wav"
-    )
+    if bloco.current_take_id is not None:
+        take = await repo.obter_take(bloco.current_take_id)
+        if (
+            take is None
+            or take.status != "completed"
+            or not take.is_current
+            or take.audio_path != bloco.audio_path
+            or take.audio_duration_seconds != bloco.duracao_segundos
+            or take.audio_sha256 != bloco.audio_sha256
+            or take.audio_byte_size != bloco.audio_byte_size
+            or (
+                take.audio_sample_rate is not None
+                and take.audio_sample_rate != bloco.audio_sample_rate
+            )
+            or (take.audio_channels is not None and take.audio_channels != bloco.audio_channels)
+            or (
+                take.audio_frame_count is not None
+                and take.audio_frame_count != bloco.audio_frame_count
+            )
+            or (take.audio_subtype is not None and take.audio_subtype != bloco.audio_subtype)
+        ):
+            raise HTTPException(409, "Ponteiro do take ativo está inconsistente")
+    try:
+        path, metadata = verify_audio_artifact(
+            bloco.audio_path,
+            AudioArtifactExpectation(
+                sha256=bloco.audio_sha256,
+                byte_size=bloco.audio_byte_size,
+                duration_seconds=bloco.duracao_segundos,
+                sample_rate=bloco.audio_sample_rate,
+                channels=bloco.audio_channels,
+                frame_count=getattr(bloco, "audio_frame_count", None),
+                subtype=getattr(bloco, "audio_subtype", None),
+            ),
+        )
+    except AudioServingIntegrityError as exc:
+        raise HTTPException(
+            409, "Áudio do take ativo falhou na verificação de integridade"
+        ) from exc
+    return audio_file_response(path, metadata, filename=f"bloco_{bloco.ordem:02d}.wav")
 
 
 @router.get("/{workflow_id}/pacote-producao", response_model=PacoteProducaoOut)

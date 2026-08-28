@@ -24,6 +24,12 @@ def test_publish_validates_and_atomically_preserves_source(tmp_path: Path, write
         destination,
         expected_sha256=expected.sha256,
         expected_byte_size=expected.byte_size,
+        expected_duration_seconds=expected.duration_seconds,
+        expected_sample_rate=expected.sample_rate,
+        expected_channels=expected.channels,
+        expected_subtype=expected.subtype,
+        expected_frame_count=expected.frame_count,
+        expected_riff_data_byte_size=expected.riff_data_byte_size,
     )
     assert result.sha256 == expected.sha256
     assert destination.read_bytes() == original.read_bytes()
@@ -39,6 +45,12 @@ def test_corrupt_or_checksum_mismatched_source_is_never_published(
     source = write_tone(tmp_path / "valid.wav")
     with pytest.raises(ProductionAudioError, match="checksum"):
         publish_source_block(source.read_bytes(), destination, expected_sha256="0" * 64)
+    with pytest.raises(ProductionAudioError, match="frame count"):
+        publish_source_block(
+            source.read_bytes(),
+            destination,
+            expected_frame_count=inspect_wav(source).frame_count + 1,
+        )
     assert not destination.exists()
 
 

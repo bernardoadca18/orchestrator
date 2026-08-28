@@ -50,6 +50,10 @@ export interface AudioBloco {
   audio_sample_rate: number | null;
   audio_channels: number | null;
   audio_byte_size: number | null;
+  audio_frame_count: number | null;
+  audio_subtype: string | null;
+  artifact_integrity: Record<string, unknown> | null;
+  pause_diagnostics: Record<string, unknown> | null;
   narration_start_seconds: number | null;
   narration_end_seconds: number | null;
   erro_mensagem: string | null;
@@ -100,6 +104,15 @@ export interface AudioBlocoTake {
   audio_duration_seconds: number | null;
   audio_sha256: string | null;
   audio_byte_size: number | null;
+  audio_sample_rate: number | null;
+  audio_channels: number | null;
+  audio_frame_count: number | null;
+  audio_subtype: string | null;
+  quality_status: string | null;
+  artifact_integrity: Record<string, unknown> | null;
+  provider_metadata: Record<string, unknown> | null;
+  content_quality: Record<string, unknown> | null;
+  pause_diagnostics: Record<string, unknown> | null;
   is_current: boolean;
   created_at: string;
   completed_at: string | null;
@@ -118,6 +131,9 @@ export interface Workflow {
   audio_final_sample_rate: number | null;
   audio_final_channels: number | null;
   audio_final_byte_size: number | null;
+  audio_final_frame_count: number | null;
+  audio_final_subtype: string | null;
+  audio_integrity: Record<string, unknown> | null;
   erro_mensagem: string | null;
   tentativas: number;
   production_status: string | null;
@@ -266,7 +282,9 @@ export const api = {
       { method: "POST" },
     ),
   obterDashboardStats: () => request<DashboardStats>("/dashboard/stats"),
-  urlAudio: (id: string) => `${BASE_URL}/workflow/${id}/audio`,
-  urlAudioBloco: (workflowId: string, blocoId: string) => `${BASE_URL}/workflow/${workflowId}/blocos/${blocoId}/audio`,
+  urlAudio: (id: string, sha256?: string | null) =>
+    `${BASE_URL}/workflow/${id}/audio${sha256 ? `?artifact=${encodeURIComponent(sha256)}` : ""}`,
+  urlAudioBloco: (workflowId: string, blocoId: string, sha256?: string | null) =>
+    `${BASE_URL}/workflow/${workflowId}/blocos/${blocoId}/audio${sha256 ? `?artifact=${encodeURIComponent(sha256)}` : ""}`,
   urlVideo: (id: string) => `${BASE_URL}/workflow/${id}/video`,
 };
