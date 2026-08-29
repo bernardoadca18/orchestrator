@@ -73,6 +73,8 @@ class VoiceProfileDescriptor(BaseModel):
     version: str
     identity: str
     clone_mode: str = "unknown"
+    reference_id: str | None = None
+    audio_sha256: str | None = None
 
 
 class GenerationProfileDescriptor(BaseModel):

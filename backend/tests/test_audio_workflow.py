@@ -112,8 +112,17 @@ class FakeVoiceClient:
 
     async def resolve_profiles(self, voice, generation):
         return VoiceProfileProvenance(
-            VoiceProfileDescriptor(name=voice, version="1", identity="v" * 64),
-            GenerationProfileDescriptor(name=generation, version="1", identity="g" * 64),
+            VoiceProfileDescriptor(
+                name=voice,
+                version="2",
+                identity="v" * 64,
+                clone_mode="x_vector_only",
+                reference_id="ref_full_processed_raw.wav",
+                audio_sha256=(
+                    "8856924e05f76d1a3a5b8554218f80b5e1a898aebfe211ec1b65b60eabdbc70b"
+                ),
+            ),
+            GenerationProfileDescriptor(name=generation, version="2", identity="g" * 64),
             chunking_identity=self.chunking_identity,
         )
 
@@ -207,11 +216,19 @@ def _job(job_id: str, seed: int) -> VoiceNarrationJob:
     return VoiceNarrationJob(
         id=job_id,
         status="completed",
-        voice_profile="bernardo_v1",
-        generation_profile="narration_v1",
+        voice_profile="bernardo_xvec_v2",
+        generation_profile="narration_v2",
         resolved_seed=seed,
         model_id="Qwen/Qwen3-TTS",
         model_revision="revision",
+        metadata={
+            "voice_clone_mode": "x_vector_only",
+            "voice_reference_id": "ref_full_processed_raw.wav",
+            "voice_reference_sha256": (
+                "8856924e05f76d1a3a5b8554218f80b5e1a898aebfe211ec1b65b60eabdbc70b"
+            ),
+            "chunking_identity": "chunk-v1",
+        },
     )
 
 
@@ -265,8 +282,13 @@ async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     assert repo.blocks[0].synthesis_text == "Geralt usa Árd."
     assert repo.blocks[0].text_normalizer_version == "pt_br_text_normalizer_v1"
     assert len(repo.blocks[0].text_normalizer_identity) == 64
-    assert repo.blocks[0].resolved_seed == 1001
-    assert repo.blocks[1].resolved_seed == 1002
+    assert repo.blocks[0].resolved_seed == 303
+    assert repo.blocks[1].resolved_seed == 303
+    assert voice.created[0]["voice_profile"] == "bernardo_xvec_v2"
+    assert voice.created[0]["generation_profile"] == "narration_v2"
+    assert voice.created[0]["seed"] == 303
+    assert repo.blocks[0].voice_profile_identity == "v" * 64
+    assert repo.blocks[0].generation_profile_identity == "g" * 64
     assert repo.blocks[0].narration_start_seconds == 0
     assert repo.blocks[1].narration_start_seconds == pytest.approx(1.5, abs=1 / 48_000)
     final_metadata = inspect_wav(Path(workflow.audio_final_path))
@@ -379,7 +401,7 @@ async def test_profile_or_glossary_change_invalidates_completed_block(
     if changed_input == "voice":
         config.voice_profile = "bernardo_v2"
     elif changed_input == "generation":
-        config.voice_generation_profile = "narration_v2"
+        config.voice_generation_profile = "narration_v1"
     elif changed_input == "glossary":
         glossary.write_text(
             "version: '2'\nglobal: {Texto: Téxto}\nprojects: {}\n", encoding="utf-8"
@@ -546,7 +568,7 @@ async def test_missing_spoken_content_retries_before_take_becomes_active(
     await service.process(workflow.id)
     assert workflow.status == "audio_concluido"
     assert len(voice.created) == 2
-    assert voice.created[1]["seed"] == derive_quality_retry_seed(1001, 1)
+    assert voice.created[1]["seed"] == derive_quality_retry_seed(303, 1)
     assert repo.blocks[0].generation_attempt_history[0]["error_category"] == (
         "content_quality_guard"
     )

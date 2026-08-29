@@ -41,7 +41,7 @@ recipe/version and checksum; the raw reference remains immutable.
 
 ## ICL versus speaker-embedding-only benchmark
 
-`bernardo_v1` remains ICL. `bernardo_xvec_v1` is an explicit Qwen profile using
+`bernardo_v1` remains the historical ICL profile. `bernardo_xvec_v1` is an explicit historical Qwen profile using
 `x_vector_only_mode=True`, the same raw reference audio and no transcript. Clone mode is part of
 the voice identity and Qwen prompt cache key.
 
@@ -96,7 +96,9 @@ docker compose run --rm api alembic upgrade head
 docker compose up -d --build api worker frontend
 ```
 
-Qwen needs a rebuild/restart to expose `bernardo_xvec_v1`; production remains `bernardo_v1`.
+The current production freeze uses the separately versioned `bernardo_xvec_v2` and
+`narration_v2`; see `PRODUCTION_VOICE_BASELINE.md`. The historical profiles above remain
+registered and this document's comparison commands stay reproducible.
 
 Rollback application containers first, then (only if no new deployment is using revision 013):
 

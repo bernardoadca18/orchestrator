@@ -59,11 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--mode", choices=("quick", "full"), default="quick")
     parser.add_argument("--refs", nargs="+")
     parser.add_argument("--all-refs", action="store_true")
-    parser.add_argument("--generation", default="narration_v1")
+    parser.add_argument("--generation", default="narration_v2")
     parser.add_argument("--seeds", nargs="+", type=int)
     parser.add_argument("--asr-language", default=DEFAULT_ASR_LANGUAGE)
     parser.add_argument("--resume", metavar="RUN_ID")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument(
+        "--allow-failures",
+        action="store_true",
+        help="return exit status 0 even when matrix cases fail; intended only for exploratory runs",
+    )
     parser.add_argument("--max-cases", type=int)
     parser.add_argument("--no-asr", action="store_true")
     parser.add_argument(
@@ -86,6 +91,11 @@ def _validate_args(args: argparse.Namespace, parser: argparse.ArgumentParser) ->
 def _resolved_asr_language(value: str) -> str | None:
     normalized = value.strip()
     return None if not normalized or normalized.casefold() == "none" else normalized
+
+
+def _benchmark_exit_status(*, failed_total: int, allow_failures: bool) -> int:
+    """Fail automation on any unsuccessful matrix result unless explicitly waived."""
+    return 0 if failed_total == 0 or allow_failures else 1
 
 
 def _select_references(
@@ -501,7 +511,16 @@ async def run_benchmark(
         f"elapsed={time.monotonic() - run_started:.1f}s output={run_directory}",
         flush=True,
     )
-    return 0
+    exit_status = _benchmark_exit_status(
+        failed_total=failed_total, allow_failures=args.allow_failures
+    )
+    if exit_status:
+        print(
+            "benchmark completed with failures; returning non-zero "
+            "(use --allow-failures only for intentional exploratory collection)",
+            flush=True,
+        )
+    return exit_status
 
 
 def main(argv: list[str] | None = None) -> int:

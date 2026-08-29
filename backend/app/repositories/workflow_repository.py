@@ -22,6 +22,11 @@ def _take_text_provenance(block: AudioBloco) -> dict[str, object]:
         "pronunciation_replacements": copy.deepcopy(block.pronunciation_replacements),
         "text_normalizer_version": block.text_normalizer_version,
         "text_normalizer_identity": block.text_normalizer_identity,
+        "voice_profile": getattr(block, "voice_profile", None),
+        "voice_profile_identity": getattr(block, "voice_profile_identity", None),
+        "generation_profile": getattr(block, "generation_profile", None),
+        "generation_profile_identity": getattr(block, "generation_profile_identity", None),
+        "voice_chunking_identity": getattr(block, "voice_chunking_identity", None),
     }
 
 

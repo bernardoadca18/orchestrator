@@ -293,6 +293,8 @@ Copy `.env.example`. Important settings include:
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE` and optional
   `TRANSCRIPTION_LANGUAGE` (blank means Faster-Whisper autodetection; the clone benchmark uses
   its independent `--asr-language pt` default).
+- the frozen production voice/profile/seed contract and normal workflow command are documented in
+  [`backend/docs/PRODUCTION_VOICE_BASELINE.md`](backend/docs/PRODUCTION_VOICE_BASELINE.md).
 - `TRANSCRIPTION_MODEL_LIFETIME=resident|per_job`; bounded audio behavior and measurement details
   are documented in [`backend/docs/RESOURCE_HARDENING.md`](backend/docs/RESOURCE_HARDENING.md).
 - alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.

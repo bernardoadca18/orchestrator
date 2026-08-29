@@ -135,6 +135,102 @@ def test_blank_benchmark_asr_language_resolves_to_autodetect() -> None:
     assert benchmark_voice_references._resolved_asr_language("  ") is None
 
 
+def test_reference_benchmark_failures_are_nonzero_unless_explicitly_allowed() -> None:
+    assert (
+        benchmark_voice_references._benchmark_exit_status(
+            failed_total=1, allow_failures=False
+        )
+        == 1
+    )
+    assert (
+        benchmark_voice_references._benchmark_exit_status(
+            failed_total=5, allow_failures=True
+        )
+        == 0
+    )
+    assert (
+        benchmark_voice_references._benchmark_exit_status(
+            failed_total=0, allow_failures=False
+        )
+        == 0
+    )
+
+
+def test_reference_benchmark_uses_frozen_generation_profile_by_default() -> None:
+    args = benchmark_voice_references.build_parser().parse_args([])
+    assert args.generation == "narration_v2"
+    assert args.allow_failures is False
+
+
+@pytest.mark.asyncio
+async def test_real_run_path_returns_nonzero_for_failed_matrix_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    references_dir = tmp_path / "references"
+    _write_wav(references_dir / "reference.wav")
+    references, invalid = discover_references(references_dir)
+    corpus = load_reference_corpus()
+    matrix = expand_matrix(
+        references,
+        corpus.quick_cases,
+        (101,),
+        generation_profile="narration_v2",
+        lexicon_identity="l" * 64,
+        max_cases=1,
+    )
+    args = benchmark_voice_references.build_parser().parse_args(
+        [
+            "--references-dir",
+            str(references_dir),
+            "--output",
+            str(tmp_path / "output"),
+            "--max-cases",
+            "1",
+            "--no-asr",
+            "--run",
+        ]
+    )
+
+    class FakeVoiceClient:
+        def __init__(self, *_: object, **__: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeVoiceClient:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    async def failed_case(matrix_case: object, **_: object) -> dict[str, object]:
+        return {
+            "case_identity": matrix_case.identity,  # type: ignore[attr-defined]
+            "reference_identity": matrix_case.reference.reference_identity,  # type: ignore[attr-defined]
+            "generation_status": "failed",
+            "artifact_integrity_status": "unavailable",
+            "qwen_guard_status": "not_evaluated",
+            "asr_status": "disabled",
+            "content_status": "not_evaluated",
+            "pronunciation_disagreement_status": "not_evaluated",
+            "failure_category": "VoiceClientTransientError",
+            "failure_reason": "systemic connectivity failure",
+        }
+
+    monkeypatch.setattr(benchmark_voice_references, "VoiceClient", FakeVoiceClient)
+    monkeypatch.setattr(benchmark_voice_references, "_run_case", failed_case)
+
+    assert (
+        await benchmark_voice_references.run_benchmark(
+            args,
+            references,
+            invalid,
+            matrix,
+            corpus,
+            "l" * 64,
+        )
+        == 1
+    )
+
+
 def test_content_pronunciation_disagreement_is_inconclusive() -> None:
     report = analyze_content_coverage(
         "Rockstar Games iniciou a missão", "Rock star games iniciou a missão"

@@ -22,12 +22,21 @@ def test_take_provenance_is_a_snapshot_not_a_mutable_block_alias() -> None:
         ],
         text_normalizer_version="pt_br_text_normalizer_v1",
         text_normalizer_identity="n" * 64,
+        voice_profile="bernardo_xvec_v2",
+        voice_profile_identity="v" * 64,
+        generation_profile="narration_v2",
+        generation_profile_identity="g" * 64,
+        voice_chunking_identity="c" * 64,
     )
     snapshot = _take_text_provenance(block)  # type: ignore[arg-type]
     block.pronunciation_replacements[0]["entry_version"] = 2
     block.synthesis_text = "A nova forma chegou."
     assert snapshot["synthesis_text"] == "A Rócstar Gueimes chegou."
     assert snapshot["pronunciation_replacements"][0]["entry_version"] == 1  # type: ignore[index]
+    assert snapshot["voice_profile"] == "bernardo_xvec_v2"
+    assert snapshot["voice_profile_identity"] == "v" * 64
+    assert snapshot["generation_profile"] == "narration_v2"
+    assert snapshot["generation_profile_identity"] == "g" * 64
 
 
 def test_take_model_contains_nullable_historical_pronunciation_fields() -> None:

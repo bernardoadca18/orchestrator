@@ -17,8 +17,9 @@ reconstruct the same prompt after a restart. The Orchestrator API receives a
 narrow read-only mount of the canonical reference directory for discovery; no
 broad host filesystem mount is used.
 
-The normal `/v1/narrations` contract and `bernardo_v1`/
-`bernardo_xvec_v1` profiles are unchanged.
+The normal `/v1/narrations` contract and historical `bernardo_v1`/
+`bernardo_xvec_v1` profiles remain available. Production promotion is a separate versioned
+configuration decision; the 2026-08-29 decision is recorded in `PRODUCTION_VOICE_BASELINE.md`.
 
 ## Quick and full matrices
 
@@ -29,7 +30,7 @@ for relative paths. No family is inferred from a filename.
 
 Quick uses six Portuguese cases and seed `101`. Full uses all twelve cases and
 seeds `101 202 303`; full requires explicit `--refs` or `--all-refs`. The
-generation profile is `narration_v1`, synthesis language is `Portuguese`, ASR
+default generation profile is `narration_v2`, synthesis language is `Portuguese`, ASR
 language defaults to ISO `pt`, and clone mode is always `x_vector_only`.
 Pass `--asr-language none` (or a blank value) only when deliberately requesting
 Faster-Whisper autodetection; it is kept separate from Qwen's `Portuguese`
@@ -64,7 +65,10 @@ python scripts/benchmark_voice_references.py --mode full \
 checksum matches. Missing or changed artifacts run again. Failed entries are
 skipped unless `--retry-failed` is supplied; prior JSONL lines remain intact.
 Every case is appended and fsynced as it completes, so interruption leaves a
-recoverable manifest. Run ids are UTC timestamps plus random suffixes.
+recoverable manifest. Run ids are UTC timestamps plus random suffixes. A real run returns a
+non-zero exit status when any matrix case failed, including a previously failed case skipped on
+resume. `--allow-failures` must be explicit for an exploratory collection in which failed cases
+are expected data and a zero process status is still desired.
 
 ## Artifacts and review
 
@@ -96,7 +100,7 @@ the existing Pronunciation Lab (still no automatic promotion):
 
 ```bash
 python scripts/benchmark_pronunciation_corpus.py \
-  --voice-profile bernardo_v1 --generation-profile narration_v1 --run
+  --voice-profile bernardo_xvec_v2 --generation-profile narration_v2 --run
 ```
 
 Candidates remain confined to Lab artifacts and require explicit human review

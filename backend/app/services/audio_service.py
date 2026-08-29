@@ -211,7 +211,7 @@ class AudioWorkflowService:
                     synthesis_hash = _sha256_text(pronunciation.synthesis_text)
                     identity = _canonical_hash(
                         {
-                            "version": "qwen_audio_block_v2",
+                            "version": "qwen_audio_block_v3",
                             "source_text_sha256": source_hash,
                             "synthesis_text_sha256": synthesis_hash,
                             "text_normalizer_version": normalization.version,
@@ -220,6 +220,8 @@ class AudioWorkflowService:
                             "voice_profile": provenance.voice.name,
                             "voice_profile_identity": provenance.voice.identity,
                             "voice_clone_mode": provenance.voice.clone_mode,
+                            "voice_reference_id": provenance.voice.reference_id,
+                            "voice_reference_sha256": provenance.voice.audio_sha256,
                             "generation_profile": provenance.generation.name,
                             "generation_profile_identity": provenance.generation.identity,
                             "voice_chunking_identity": provenance.chunking_identity,
@@ -396,7 +398,13 @@ class AudioWorkflowService:
                             model_id=completed.model_id,
                             model_revision=completed.model_revision,
                             voice_profile=completed.voice_profile,
+                            voice_profile_identity=getattr(
+                                block, "voice_profile_identity", None
+                            ),
                             generation_profile=completed.generation_profile,
+                            generation_profile_identity=getattr(
+                                block, "generation_profile_identity", None
+                            ),
                             voice_chunking_identity=completed.metadata.get("chunking_identity"),
                             audio_path=str(source_path),
                             audio_duration_seconds=metadata.duration_seconds,
@@ -940,7 +948,11 @@ class AudioWorkflowService:
                 model_id=job.model_id,
                 model_revision=job.model_revision,
                 voice_profile=job.voice_profile,
+                voice_profile_identity=getattr(block, "voice_profile_identity", None),
                 generation_profile=job.generation_profile,
+                generation_profile_identity=getattr(
+                    block, "generation_profile_identity", None
+                ),
                 chunking_identity=getattr(block, "voice_chunking_identity", None),
                 voice_chunking_identity=job.metadata.get("chunking_identity")
                 or getattr(block, "voice_chunking_identity", None),

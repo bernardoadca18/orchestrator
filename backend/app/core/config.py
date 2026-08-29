@@ -22,10 +22,10 @@ class Settings(BaseSettings):
     ideas_hub_http_backoff_seconds: float = 0.25
 
     voice_api_url: str = "http://localhost:8889"
-    voice_profile: str = "bernardo_v1"
-    voice_generation_profile: str = "narration_v1"
+    voice_profile: str = "bernardo_xvec_v2"
+    voice_generation_profile: str = "narration_v2"
     voice_language: str = "Portuguese"
-    voice_seed: int = 0
+    voice_seed: int = 303
     voice_poll_interval_seconds: float = 5.0
     voice_job_timeout_seconds: float = 1800.0
     voice_create_timeout_seconds: float = 30.0
