@@ -2,6 +2,7 @@
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -88,6 +89,7 @@ class Settings(BaseSettings):
     transcription_device: str = "cpu"
     transcription_compute_type: str = "int8"
     transcription_language: str | None = None
+    transcription_model_lifetime: Literal["resident", "per_job"] = "resident"
 
     narration_alignment_strategy_version: str = "narration_alignment_v1"
     narration_alignment_fuzzy_min_score: float = 0.72

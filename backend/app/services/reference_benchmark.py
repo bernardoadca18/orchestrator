@@ -44,6 +44,14 @@ QUICK_SEEDS = (101,)
 FULL_SEEDS = (101, 202, 303)
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class ReferenceDescriptor:
     filename: str
@@ -175,13 +183,10 @@ def _inspect_source_wav(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """Inspect reference WAVs without imposing the PCM16 *output* contract."""
     try:
         info = sf.info(str(path))
-        samples, sample_rate = sf.read(str(path), dtype="float64", always_2d=True)
     except (OSError, RuntimeError) as exc:
         raise ProductionAudioError("reference WAV is unreadable") from exc
-    if info.format != "WAV" or samples.size == 0 or info.frames <= 0 or info.channels <= 0:
+    if info.format != "WAV" or info.frames <= 0 or info.channels <= 0 or info.samplerate <= 0:
         raise ProductionAudioError("reference WAV is empty or not a supported WAV")
-    if not np.all(np.isfinite(samples)):
-        raise ProductionAudioError("reference WAV contains non-finite samples")
     file_size = path.stat().st_size
     with path.open("rb") as stream:
         header = stream.read(12)
@@ -207,30 +212,75 @@ def _inspect_source_wav(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
             position += chunk_size + (chunk_size % 2)
         if position != file_size or data_size is None:
             raise ProductionAudioError("reference WAV has no complete data chunk")
-    mono = np.mean(samples, axis=1)
-    peak = float(np.max(np.abs(samples))) if samples.size else 0.0
-    clipping = int(np.count_nonzero(np.abs(samples) >= 0.999))
-    rms = float(np.sqrt(np.mean(np.square(mono)))) if mono.size else 0.0
+    sample_rate = int(info.samplerate)
+    threshold = 10.0 ** (-45.0 / 20.0)
+    minimum_silence_frames = round(0.15 * sample_rate)
+    peak = 0.0
+    clipping = 0
+    mono_sum = 0.0
+    mono_square_sum = 0.0
+    mono_count = 0
+    silence_start: int | None = None
+    spans_frames: list[tuple[int, int]] = []
+    global_frame = 0
+    try:
+        with sf.SoundFile(str(path), mode="r") as source:
+            for samples in source.blocks(
+                blocksize=262_144,
+                dtype="float64",
+                always_2d=True,
+            ):
+                if not np.all(np.isfinite(samples)):
+                    raise ProductionAudioError("reference WAV contains non-finite samples")
+                absolute = np.abs(samples)
+                peak = max(peak, float(np.max(absolute)))
+                clipping += int(np.count_nonzero(absolute >= 0.999))
+                mono = np.mean(samples, axis=1, dtype=np.float64)
+                mono_sum += float(np.sum(mono, dtype=np.float64))
+                mono_square_sum += float(np.sum(np.square(mono), dtype=np.float64))
+                mono_count += len(mono)
+                mask = np.abs(mono) <= threshold
+                if silence_start is not None and not mask[0]:
+                    if global_frame - silence_start >= minimum_silence_frames:
+                        spans_frames.append((silence_start, global_frame))
+                    silence_start = None
+                padded = np.pad(mask.astype(np.int8), (1, 1))
+                edges = np.flatnonzero(np.diff(padded))
+                for start, end in edges.reshape(-1, 2):
+                    run_start = (
+                        silence_start
+                        if int(start) == 0 and silence_start is not None
+                        else global_frame + int(start)
+                    )
+                    if int(end) < len(mask):
+                        if global_frame + int(end) - run_start >= minimum_silence_frames:
+                            spans_frames.append((run_start, global_frame + int(end)))
+                        silence_start = None
+                    else:
+                        silence_start = run_start
+                global_frame += len(mono)
+    except ProductionAudioError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise ProductionAudioError("reference WAV is unreadable") from exc
+    if silence_start is not None and global_frame - silence_start >= minimum_silence_frames:
+        spans_frames.append((silence_start, global_frame))
+    if mono_count != info.frames:
+        raise ProductionAudioError("reference WAV decoded frame count is inconsistent")
+    rms = math.sqrt(mono_square_sum / mono_count)
 
     def db(value: float) -> float:
         return 20.0 * math.log10(value) if value > 0 else -120.0
 
-    threshold = 10.0 ** (-45.0 / 20.0)
-    mask = np.abs(mono) <= threshold
-    runs: list[tuple[int, int]] = []
-    padded = np.pad(mask.astype(np.int8), (1, 1))
-    edges = np.flatnonzero(np.diff(padded))
-    runs.extend((int(start), int(end)) for start, end in edges.reshape(-1, 2))
     spans = [
         ((end - start) / sample_rate, start, end)
-        for start, end in runs
-        if (end - start) / sample_rate >= 0.15
+        for start, end in spans_frames
     ]
     silence_total = sum(item[0] for item in spans)
     diagnostics = {
         "signal": {
             "rms_dbfs": round(db(rms), 4),
-            "dc_offset": round(float(np.mean(mono)), 9),
+            "dc_offset": round(mono_sum / mono_count, 9),
             "leading_silence_seconds": round(spans[0][0] if spans and spans[0][1] == 0 else 0.0, 6),
             "trailing_silence_seconds": round(
                 spans[-1][0] if spans and spans[-1][2] >= info.frames else 0.0, 6
@@ -249,7 +299,7 @@ def _inspect_source_wav(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         "channels": int(info.channels),
         "subtype": str(info.subtype),
         "byte_size": path.stat().st_size,
-        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "sha256": _sha256_file(path),
         "frame_count": int(info.frames),
         "block_alignment": int(info.channels)
         * ({"PCM_16": 2, "PCM_24": 3, "PCM_32": 4}.get(str(info.subtype), 0)),
@@ -697,7 +747,7 @@ def resume_decision(
         expected = previous.get("artifact_sha256")
         if artifact_path.is_file() and expected:
             try:
-                actual = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+                actual = _sha256_file(artifact_path)
             except OSError:
                 return "run"
             return "skip" if actual == expected else "run"

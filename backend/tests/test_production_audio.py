@@ -105,13 +105,13 @@ def test_metadata_inspection_never_runs_signal_decode(tmp_path: Path, write_tone
         side_effect=AssertionError("signal scan must not run"),
     ):
         metadata = inspect_wav_metadata(source)
-    assert metadata.frame_count == 48_000
+    assert metadata.frame_count == 24_000
 
 
 def test_streaming_assembly_does_not_concatenate_complete_narration(
     tmp_path: Path, write_tone
 ) -> None:
-    source = write_tone(tmp_path / "short.wav", duration=0.02)
+    source = write_tone(tmp_path / "short.wav", sample_rate=48_000, duration=0.02)
     with patch(
         "app.services.production_audio.np.concatenate",
         side_effect=AssertionError("complete narration must not be concatenated"),

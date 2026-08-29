@@ -273,8 +273,9 @@ plan, timeline, render, policy, strategy or mode creates another report identity
 
 Workflow state exposes duration, SHA-256, byte size, 48 kHz sample rate, mono channels, mastering
 configuration and measured before/after metrics. Host paths are not returned by the public schemas.
-Transcription is upserted by final audio SHA-256. `FasterWhisperNarrationProvider` lazily creates and
-caches one model per worker process (CPU/int8 by default); a transcription failure does not corrupt
+Transcription is upserted by final audio SHA-256. `FasterWhisperNarrationProvider` serializes model
+access and uses the explicit `resident` (default) or `per_job` lifetime policy (CPU/int8 by default);
+a transcription failure does not corrupt
 or invalidate a safely completed final WAV.
 
 ## Configuration
@@ -292,6 +293,8 @@ Copy `.env.example`. Important settings include:
 - `TRANSCRIPTION_MODEL`, `TRANSCRIPTION_DEVICE`, `TRANSCRIPTION_COMPUTE_TYPE` and optional
   `TRANSCRIPTION_LANGUAGE` (blank means Faster-Whisper autodetection; the clone benchmark uses
   its independent `--asr-language pt` default).
+- `TRANSCRIPTION_MODEL_LIFETIME=resident|per_job`; bounded audio behavior and measurement details
+  are documented in [`backend/docs/RESOURCE_HARDENING.md`](backend/docs/RESOURCE_HARDENING.md).
 - alignment strategy, fuzzy/ambiguity thresholds, minimum speech coverage and complexity guards.
 - versioned narration speech-quality policy and repeated-ASR-run threshold.
 - `MEDIA_INDEXER_API_URL`, timeout/retry settings and the bounded Visual Director search policy.

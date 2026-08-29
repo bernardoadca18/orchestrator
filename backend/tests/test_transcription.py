@@ -83,3 +83,40 @@ def test_none_asr_language_is_forwarded_for_generic_autodetection(tmp_path: Path
 
     assert model.transcribe.call_args.kwargs["language"] is None
     assert result.language == "en"
+
+
+def test_per_job_lifetime_releases_each_model_reference(tmp_path: Path) -> None:
+    first_model = MagicMock()
+    first_model.transcribe.return_value = ([], SimpleNamespace(language="pt"))
+    second_model = MagicMock()
+    second_model.transcribe.return_value = ([], SimpleNamespace(language="pt"))
+    provider = FasterWhisperNarrationProvider(
+        Settings(
+            _env_file=None,
+            transcription_model="tiny",
+            transcription_device="cpu",
+            transcription_compute_type="int8",
+            transcription_model_lifetime="per_job",
+        )
+    )
+
+    with patch(
+        "faster_whisper.WhisperModel",
+        side_effect=[first_model, second_model],
+    ) as constructor:
+        provider.transcribe(tmp_path / "first.wav")
+        provider.transcribe(tmp_path / "second.wav")
+
+    assert constructor.call_count == 2
+    assert provider._model is None
+    assert provider.model_diagnostics() == {
+        "policy": "per_job",
+        "model": "tiny",
+        "device": "cpu",
+        "compute_type": "int8",
+        "resident_loaded": False,
+        "active_transcriptions": 0,
+        "model_loads": 2,
+        "model_releases": 2,
+        "inference_concurrency_limit": 1,
+    }

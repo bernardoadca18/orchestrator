@@ -142,10 +142,7 @@ def _streaming_transient_candidates(
                 local_start = core_start - read_start
                 local_end = core_end - read_start
                 core = mono[local_start:local_end]
-                if core_start == 0:
-                    previous = core[0]
-                else:
-                    previous = mono[local_start - 1]
+                previous = core[0] if core_start == 0 else mono[local_start - 1]
                 difference = np.abs(np.diff(core, prepend=previous))
                 for local_index in np.flatnonzero(difference >= threshold):
                     global_index = core_start + int(local_index)
@@ -258,7 +255,11 @@ def analyze_audio(
                         spans_frames.append((silence_start, global_frame))
                     silence_start = None
                 for start, end in _runs(silent_mask):
-                    run_start = silence_start if start == 0 and silence_start is not None else global_frame + start
+                    run_start = (
+                        silence_start
+                        if start == 0 and silence_start is not None
+                        else global_frame + start
+                    )
                     if end < len(silent_mask):
                         if global_frame + end - run_start >= minimum_frames:
                             spans_frames.append((run_start, global_frame + end))

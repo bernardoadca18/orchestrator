@@ -154,7 +154,12 @@ def inspect_wav_metadata(path: Path) -> WavPhysicalMetadata:
         raise ProductionAudioError("WAV is unreadable") from exc
     if info.format != "WAV" or info.subtype != "PCM_16" or info.frames <= 0:
         raise ProductionAudioError("audio result is not a non-empty PCM16 WAV")
-    if info.samplerate < 8_000 or info.samplerate > 192_000 or info.channels < 1 or info.channels > 8:
+    if (
+        info.samplerate < 8_000
+        or info.samplerate > 192_000
+        or info.channels < 1
+        or info.channels > 8
+    ):
         raise ProductionAudioError("WAV format metadata is outside safe bounds")
     duration = float(info.frames / info.samplerate)
     if not math.isfinite(duration) or duration <= 0:

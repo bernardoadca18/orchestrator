@@ -8,7 +8,12 @@ import pyloudnorm as pyln
 import pytest
 import soundfile as sf
 
-from app.services.mastering import MasteringConfig, MasteringError, master_narration
+from app.services.mastering import (
+    MasteringConfig,
+    MasteringError,
+    master_narration,
+    measure_true_peak,
+)
 from app.services.production_audio import inspect_wav
 
 
@@ -85,10 +90,18 @@ def test_streaming_ebur128_is_within_declared_legacy_lufs_tolerance(
     sf.write(source, samples, sample_rate, format="WAV", subtype="PCM_16")
     decoded, _ = sf.read(source, dtype="float64")
     legacy_lufs = float(pyln.Meter(sample_rate).integrated_loudness(decoded))
+    legacy_true_peak = measure_true_peak(source)
+    config = MasteringConfig()
+    legacy_gain = min(
+        config.target_lufs - legacy_lufs,
+        config.max_true_peak_dbtp - config.true_peak_safety_margin_db - legacy_true_peak,
+    )
 
-    result = master_narration(source, tmp_path / f"{name}-mastered.wav", MasteringConfig())
+    result = master_narration(source, tmp_path / f"{name}-mastered.wav", config)
 
     assert result.before.integrated_lufs == pytest.approx(legacy_lufs, abs=0.05)
+    assert result.before.true_peak_dbtp == pytest.approx(legacy_true_peak, abs=1e-9)
+    assert result.applied_gain_db == pytest.approx(legacy_gain, abs=0.05)
     assert result.metadata.frame_count == len(decoded)
     assert result.metadata.sample_rate == sample_rate
 

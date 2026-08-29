@@ -18,7 +18,7 @@ from app.services.audio_diagnostics import DIAGNOSTICS_VERSION, analyze_audio
 from app.services.mastering import MasteringConfig, master_narration
 from app.services.production_audio import assemble_narration
 
-BENCHMARK_VERSION = "audio_memory_benchmark_v1"
+BENCHMARK_VERSION = "audio_memory_benchmark_v2"
 OPERATIONS = ("assembly", "diagnostics", "mastering")
 
 
@@ -28,7 +28,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minutes", type=int, nargs="+", default=[10, 60])
     parser.add_argument("--output", type=Path)
     parser.add_argument("--run", action="store_true")
-    parser.add_argument("--_case", nargs=2, metavar=("OPERATION", "MINUTES"), help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--_case",
+        nargs=2,
+        metavar=("OPERATION", "MINUTES"),
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -78,37 +83,42 @@ def _run_case(operation: str, minutes: int) -> dict[str, object]:
         output = root / "output.wav"
         if operation == "assembly":
             _write_short_block(source)
-            result = assemble_narration(
+            assembly = assemble_narration(
                 [source] * (minutes * 6),
                 output,
                 sample_rate=48_000,
                 silence_ms=0,
             )
-            output_size = result.metadata.byte_size
+            output_size = assembly.metadata.byte_size
             implementation = "orchestrator_streaming_assembly_v1"
         elif operation == "diagnostics":
             _write_repeated_source(source, minutes=minutes, diagnostics=True)
-            result = analyze_audio(source)
+            diagnostics = analyze_audio(source)
             output_size = source.stat().st_size
-            implementation = str(result["version"])
+            implementation = str(diagnostics["version"])
         elif operation == "mastering":
             _write_repeated_source(source, minutes=minutes)
-            result = master_narration(source, output, MasteringConfig())
-            output_size = result.metadata.byte_size
+            mastering = master_narration(source, output, MasteringConfig())
+            output_size = mastering.metadata.byte_size
             implementation = MasteringConfig().version
         else:
             raise ValueError("unsupported benchmark operation")
-    usage = resource.getrusage(resource.RUSAGE_SELF)
+    self_usage = resource.getrusage(resource.RUSAGE_SELF)
+    child_usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    self_peak = int(self_usage.ru_maxrss)
+    child_peak = int(child_usage.ru_maxrss)
     return {
         "benchmark_version": BENCHMARK_VERSION,
         "operation": operation,
         "input_minutes": minutes,
         "wall_seconds": round(time.monotonic() - started, 6),
-        "peak_rss_kib": int(usage.ru_maxrss),
+        "peak_rss_kib": max(self_peak, child_peak),
+        "peak_self_rss_kib": self_peak,
+        "peak_child_rss_kib": child_peak,
         "output_size_bytes": output_size,
         "success": True,
         "implementation": implementation,
-        "rss_scope": "isolated_child_process_ru_maxrss",
+        "rss_scope": "isolated_case_process_max_of_self_and_child_ru_maxrss",
         "gpu_vram": "not_used",
     }
 

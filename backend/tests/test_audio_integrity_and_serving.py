@@ -207,8 +207,11 @@ def test_streaming_diagnostics_match_legacy_signal_metrics(tmp_path: Path) -> No
     windows = decoded[: len(decoded) - (len(decoded) % window_frames)].reshape(
         -1, window_frames
     )
-    legacy_noise = 20.0 * np.log10(
+    legacy_noise_amplitude = float(
         np.percentile(np.sqrt(np.mean(np.square(windows), axis=1)), 10)
+    )
+    legacy_noise = (
+        20.0 * np.log10(legacy_noise_amplitude) if legacy_noise_amplitude > 0 else -120.0
     )
 
     report = analyze_audio(wav)
