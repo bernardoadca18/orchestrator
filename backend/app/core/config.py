@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     # --- Serviços integrados -------------------------------------------------
     ideas_hub_api_url: str = "http://localhost:8000"
     ideas_hub_api_timeout: int = 30
+    ideas_hub_http_max_retries: int = 2
+    ideas_hub_http_backoff_seconds: float = 0.25
 
     voice_api_url: str = "http://localhost:8889"
     voice_profile: str = "bernardo_v1"

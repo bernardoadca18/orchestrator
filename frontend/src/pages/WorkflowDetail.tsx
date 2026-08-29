@@ -1,7 +1,34 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { api, ProductionQAReport, PronunciationReplacement, Workflow, WorkflowRender } from "../api/client";
+import {
+  api,
+  isExpectedNotFound,
+  NarrationTimeline,
+  ProductionQAReport,
+  ProductionTimeline,
+  PronunciationReplacement,
+  VisualPlan,
+  Workflow,
+  WorkflowRender,
+} from "../api/client";
 import { shouldPollQA, shouldPollRender } from "./polling";
+import { startSerialPolling } from "../utils/serialPolling";
+
+const productionStages = [
+  ["audio", "Audio"],
+  ["narration_alignment", "Narration Alignment"],
+  ["visual_plan", "Visual Plan"],
+  ["production_timeline", "Production Timeline"],
+  ["render", "Render"],
+] as const;
+
+async function optionalArtifact<T>(operation: () => Promise<T>): Promise<T | null> {
+  try { return await operation(); }
+  catch (error) {
+    if (isExpectedNotFound(error)) return null;
+    throw error;
+  }
+}
 
 function formatPronunciation(item: PronunciationReplacement) {
   const original = item.original_text ?? item.term ?? "?";
@@ -16,35 +43,66 @@ export default function WorkflowDetail() {
   const navigate = useNavigate();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [erro, setErro] = useState<string | null>(null);
+  const [alignment, setAlignment] = useState<NarrationTimeline | null>(null);
+  const [visualPlan, setVisualPlan] = useState<VisualPlan | null>(null);
+  const [productionTimeline, setProductionTimeline] = useState<ProductionTimeline | null>(null);
   const [render, setRender] = useState<WorkflowRender | null>(null);
   const [qa, setQa] = useState<ProductionQAReport | null>(null);
   const [qaExecutando, setQaExecutando] = useState(false);
 
-  async function carregar() {
+  async function carregar(signal?: AbortSignal): Promise<boolean | void> {
     if (!id) return;
     try {
-      const wf = await api.obterWorkflow(id);
+      const wf = await api.obterWorkflow(id, signal);
       setWorkflow(wf);
+      const phaseRank = wf.production_status === "completed"
+        ? productionStages.length
+        : productionStages.findIndex(([phase]) => phase === wf.production_phase);
+      const currentAlignment = phaseRank >= 1
+        ? await optionalArtifact(() => api.obterNarrationTimeline(id, signal))
+        : null;
+      const currentVisualPlan = phaseRank >= 2
+        ? await optionalArtifact(() => api.obterVisualPlan(id, signal))
+        : null;
+      const currentProductionTimeline = phaseRank >= 3
+        ? await optionalArtifact(() => api.obterProductionTimeline(id, signal))
+        : null;
+      setAlignment(currentAlignment);
+      setVisualPlan(currentVisualPlan);
+      setProductionTimeline(currentProductionTimeline);
+      let currentRender: WorkflowRender | null = null;
+      let currentQa: ProductionQAReport | null = null;
       if (shouldPollRender(wf)) {
-        setRender(await api.obterRender(id).catch(() => null));
+        try { currentRender = await api.obterRender(id, signal); }
+        catch (error) { if (!isExpectedNotFound(error)) throw error; }
+        setRender(currentRender);
       } else {
         setRender(null);
       }
       if (shouldPollQA(wf)) {
-        setQa(await api.obterQAReport(id).catch(() => null));
+        try { currentQa = await api.obterQAReport(id, "standard", signal); }
+        catch (error) { if (!isExpectedNotFound(error)) throw error; }
+        setQa(currentQa);
       } else {
         setQa(null);
       }
       setErro(null);
+      const terminal = ["failed", "blocked", "cancelled"].includes(wf.production_status || "")
+        || (wf.production_status === "completed" && currentQa !== null);
+      return !terminal;
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return false;
       setErro((e as Error).message);
+      throw e;
     }
   }
 
   useEffect(() => {
-    carregar();
-    const interval = setInterval(carregar, 3000); // Poll a cada 3s
-    return () => clearInterval(interval);
+    if (!id) return;
+    return startSerialPolling((signal) => carregar(signal), {
+      intervalMs: 3000,
+      maxBackoffMs: 30_000,
+    });
   }, [id]);
 
   if (erro) return <div style={{ color: "crimson", padding: "2rem" }}>Erro: {erro}</div>;
@@ -95,6 +153,46 @@ export default function WorkflowDetail() {
     cancelada: "#ffc107",
   };
 
+  const currentWorkflow = workflow;
+  const currentStage = currentWorkflow.production_phase === "completed"
+    ? productionStages.length
+    : productionStages.findIndex(([phase]) => phase === currentWorkflow.production_phase);
+
+  function stageState(index: number): string {
+    if (currentWorkflow.production_status === null) return index === 0 && currentWorkflow.status === "audio_concluido" ? "completed" : "legacy";
+    if (index < currentStage || currentWorkflow.production_status === "completed") return "completed";
+    if (index > currentStage) return "not_started";
+    if (currentWorkflow.production_status === "blocked") return "blocked";
+    if (currentWorkflow.production_status === "failed") return "failed";
+    if (currentWorkflow.production_status === "cancelled") return "cancelled";
+    return "active";
+  }
+
+  function stageDetail(index: number): string | null {
+    if (index === 0 && currentWorkflow.duracao_audio_segundos != null) {
+      return `${currentWorkflow.duracao_audio_segundos.toFixed(1)}s de áudio físico`;
+    }
+    if (index === 1 && alignment) {
+      const coverage = alignment.blocks.length
+        ? alignment.blocks.reduce((sum, block) => sum + block.overall_coverage, 0)
+          / alignment.blocks.length
+        : null;
+      return coverage == null
+        ? `${alignment.unresolved_visual_queries} queries não resolvidas`
+        : `coverage média ${(coverage * 100).toFixed(1)}% · ${alignment.unresolved_visual_queries} não resolvidas`;
+    }
+    if (index === 2 && visualPlan) {
+      return `${visualPlan.resolved_queries}/${visualPlan.total_queries} resolvidas · ${visualPlan.required_gaps} gaps obrigatórios`;
+    }
+    if (index === 3 && productionTimeline) {
+      return `coverage ${(productionTimeline.visual_coverage_ratio * 100).toFixed(1)}% · ${productionTimeline.gap_count} gaps`;
+    }
+    if (index === 4 && render) {
+      return `${Math.round(render.progress * 100)}% · ${render.frames_rendered}/${render.total_frames ?? "?"} frames`;
+    }
+    return null;
+  }
+
   return (
     <div style={{ fontFamily: "sans-serif", maxWidth: 1000, margin: "2rem auto", padding: "0 1rem" }}>
       <button onClick={() => navigate("/")} style={{ marginBottom: "1rem" }}>
@@ -102,6 +200,23 @@ export default function WorkflowDetail() {
       </button>
 
       <h1>Workflow {workflow.id.slice(0, 8)}...</h1>
+
+      <section className="production-timeline" aria-label="Timeline de produção">
+        {productionStages.map(([, label], index) => {
+          const state = stageState(index);
+          return <div className={`production-stage ${state}`} key={label}>
+            <span>{state === "completed" ? "✓" : index + 1}</span>
+            <strong>{label}</strong>
+            <small>{state.replace("_", " ")}</small>
+            <em>{index === currentStage && workflow.production_error_message
+              ? workflow.production_error_message
+              : stageDetail(index)}</em>
+          </div>;
+        })}
+        <div className={`production-stage ${qa ? (qa.publication_ready ? "completed" : qa.status) : "not_started"}`}>
+          <span>{qa?.publication_ready ? "✓" : 6}</span><strong>QA</strong><small>{qa?.status || "not started"}</small>
+        </div>
+      </section>
 
       <div style={{ marginBottom: "2rem", padding: "1rem", background: "#f5f5f5", borderRadius: "8px" }}>
         <p><strong>Status:</strong> <span style={{ color: statusColors[workflow.status] }}>{workflow.status}</span></p>
@@ -197,13 +312,13 @@ export default function WorkflowDetail() {
           )}
 
           {workflow.status === "erro" && (
-            <button onClick={() => api.repetirWorkflow(workflow.id).then(carregar)}>
+            <button onClick={() => api.repetirWorkflow(workflow.id).then(() => carregar())}>
               Repetir Workflow
             </button>
           )}
 
           {workflow.production_status === "failed" && workflow.status !== "erro" && (
-            <button onClick={() => api.repetirWorkflow(workflow.id).then(carregar)}>
+            <button onClick={() => api.repetirWorkflow(workflow.id).then(() => carregar())}>
               Repetir fase de produção
             </button>
           )}
@@ -211,13 +326,13 @@ export default function WorkflowDetail() {
           <button onClick={regenerateNarration}>Regenerar narração completa</button>
 
           {(workflow.production_status === "blocked" || workflow.production_status === null) && (
-            <button onClick={() => api.retomarProducao(workflow.id).then(carregar)}>
+            <button onClick={() => api.retomarProducao(workflow.id).then(() => carregar())}>
               Retomar produção
             </button>
           )}
 
           {(workflow.production_status === "queued" || workflow.production_status === "running") && (
-            <button onClick={() => api.cancelarWorkflow(workflow.id).then(carregar)}>
+            <button onClick={() => api.cancelarWorkflow(workflow.id).then(() => carregar())}>
               Cancelar
             </button>
           )}

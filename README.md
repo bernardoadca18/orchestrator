@@ -339,8 +339,20 @@ docker compose config
 ```
 
 `GET /health` is liveness. `GET /health/dependencias` independently verifies PostgreSQL, Redis,
-Ideas Hub, Voice Service and Video Composer readiness. Composer availability never changes
-liveness.
+Ideas Hub, Voice Service, Media Indexer and Video Composer readiness. It reports `ready` only when
+all dependencies are healthy and otherwise reports `degraded` with the unavailable boundary;
+dependency failure never changes process liveness. Dashboard queue measurement reads the real
+Kombu Redis list `audio_producao`; an unavailable Redis is represented as `fila_status=unavailable`
+and `fila_tamanho=null`, never as a falsely empty queue.
+
+The frontend is an operator console over both state models. It preserves the legacy audio lifecycle
+while presenting the canonical Stage 17 production status/phase, a production timeline, dependency
+health and an attention queue for blocked/failed/retry/publication states. Polling is serial
+(request, response, bounded delay), aborts on unmount and applies bounded backoff; expected artifact
+404s mean “not created yet”, while 5xx, malformed responses and network failures stay visible.
+Dashboard `duracao_media_audio_bloco_segundos` is explicitly physical audio duration. Processing
+performance is shown only from measured take/workflow/render timestamps (latency p50/p95, retries,
+failed takes, attempts, completion time, render factor and QA rate).
 
 For an already prepared, current, gap-free workflow, the opt-in real boundary smoke is:
 
@@ -359,6 +371,22 @@ cd backend
 .venv/bin/python scripts/smoke_stage18_qa.py --workflow-id <uuid>
 .venv/bin/python scripts/smoke_stage18_qa.py --workflow-id <uuid> --mode deep --force
 ```
+
+The complete integration/contract smoke is also opt-in and has a strict plan mode. It neither
+deletes data nor judges creative quality. With `--run`, it creates a workflow only from the exact
+approved script ID (or observes the exact workflow ID), follows durable phase transitions, validates
+alignment/plan/timeline/render contracts and executes standard Stage 18 QA. A blocked existing
+workflow is not resumed unless `--resume-blocked` is explicitly supplied.
+
+```bash
+cd backend
+.venv/bin/python scripts/smoke_production_e2e.py --roteiro-id <uuid>
+.venv/bin/python scripts/smoke_production_e2e.py --roteiro-id <uuid> --run \
+  --report production-e2e-smoke.json
+```
+
+Use the first command to inspect the non-mutating plan. Run the second only in a prepared environment
+after the voice benchmark; it can invoke every real production dependency and create durable rows.
 
 ## Production handoff
 

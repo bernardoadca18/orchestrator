@@ -1,4 +1,5 @@
 import time
+from typing import Literal
 
 import httpx
 import redis.asyncio as redis
@@ -13,13 +14,13 @@ router = APIRouter()
 
 
 class DependenciaStatus(BaseModel):
-    status: str
+    status: Literal["healthy", "unavailable"]
     latency_ms: float | None = None
     error: str | None = None
 
 
 class DependenciasHealth(BaseModel):
-    status: str
+    status: Literal["ready", "degraded"]
     dependencies: dict[str, DependenciaStatus]
 
 
@@ -42,22 +43,25 @@ async def _check_dependencies() -> DependenciasHealth:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
         latency = (time.monotonic() - start) * 1000
-        deps["postgres"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["postgres"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["postgres"] = DependenciaStatus(status="error", error=type(exc).__name__)
+        deps["postgres"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
     # Redis
+    redis_client: redis.Redis | None = None
     try:
         start = time.monotonic()
-        r = redis.from_url(settings.redis_url)
-        await r.ping()
-        await r.close()
+        redis_client = redis.from_url(settings.redis_url)
+        await redis_client.ping()
         latency = (time.monotonic() - start) * 1000
-        deps["redis"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["redis"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["redis"] = DependenciaStatus(status="error", error=type(exc).__name__)
+        deps["redis"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
+    finally:
+        if redis_client is not None:
+            await redis_client.aclose()
 
     # Ideas Hub
     try:
@@ -66,10 +70,10 @@ async def _check_dependencies() -> DependenciasHealth:
             resp = await client.get("/health")
             resp.raise_for_status()
         latency = (time.monotonic() - start) * 1000
-        deps["ideas_hub"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["ideas_hub"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["ideas_hub"] = DependenciaStatus(status="error", error=type(exc).__name__)
+        deps["ideas_hub"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
     # Media Indexer
     try:
@@ -81,10 +85,10 @@ async def _check_dependencies() -> DependenciasHealth:
             resp = await client.get("/health/ready")
             resp.raise_for_status()
         latency = (time.monotonic() - start) * 1000
-        deps["media_indexer"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["media_indexer"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["media_indexer"] = DependenciaStatus(status="error", error=type(exc).__name__)
+        deps["media_indexer"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
     # Canonical Qwen Voice Service readiness
     try:
@@ -93,10 +97,10 @@ async def _check_dependencies() -> DependenciasHealth:
             resp = await client.get("/health/ready")
             resp.raise_for_status()
         latency = (time.monotonic() - start) * 1000
-        deps["voice_service"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["voice_service"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["voice_service"] = DependenciaStatus(status="error", error=type(exc).__name__)
+        deps["voice_service"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
     # Frozen Stage 16 Video Composer readiness
     try:
@@ -105,13 +109,13 @@ async def _check_dependencies() -> DependenciasHealth:
             if not await composer.health_ready():
                 raise RuntimeError("not_ready")
         latency = (time.monotonic() - start) * 1000
-        deps["video_composer"] = DependenciaStatus(status="ok", latency_ms=round(latency, 2))
+        deps["video_composer"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
     except Exception as exc:
         all_healthy = False
-        deps["video_composer"] = DependenciaStatus(status="error", error=type(exc).__name__)
+        deps["video_composer"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
     return DependenciasHealth(
-        status="ok" if all_healthy else "degraded",
+        status="ready" if all_healthy else "degraded",
         dependencies=deps,
     )
 
@@ -124,6 +128,6 @@ async def health_dependencias() -> DependenciasHealth:
 @router.get("/health/ready", response_model=DependenciasHealth)
 async def health_ready(response: Response) -> DependenciasHealth:
     result = await _check_dependencies()
-    if result.status != "ok":
+    if result.status != "ready":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return result

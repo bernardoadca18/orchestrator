@@ -11,3 +11,5 @@ cache/huggingface/*
 !cache/huggingface/.gitkeep
 frontend/*.tsbuildinfo
 backend/pronunciation-lab-results/
+*.tar.gz
+cache

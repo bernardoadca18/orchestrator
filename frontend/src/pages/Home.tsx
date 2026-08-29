@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, RoteiroDisponivel, Workflow } from "../api/client";
+import { startSerialPolling } from "../utils/serialPolling";
 
 export default function Home() {
   const navigate = useNavigate();
@@ -9,24 +10,30 @@ export default function Home() {
   const [filtroStatus, setFiltroStatus] = useState<string>("");
   const [erro, setErro] = useState<string | null>(null);
 
-  async function carregar() {
+  async function carregar(signal?: AbortSignal) {
     try {
       const [r, w] = await Promise.all([
-        api.listarRoteirosDisponiveis(),
-        api.listarWorkflows(filtroStatus || undefined),
+        api.listarRoteirosDisponiveis(signal),
+        api.listarWorkflows(filtroStatus || undefined, signal),
       ]);
       setRoteiros(r);
       setWorkflows(w);
       setErro(null);
+      return true;
     } catch (e) {
+      if (e instanceof DOMException && e.name === "AbortError") return false;
       setErro((e as Error).message);
+      return false;
     }
   }
 
   useEffect(() => {
-    carregar();
-    const interval = setInterval(carregar, 5000);
-    return () => clearInterval(interval);
+    return startSerialPolling(async (signal) => {
+      if (!await carregar(signal)) throw new Error("Falha temporária ao atualizar a fila");
+    }, {
+      intervalMs: 5000,
+      maxBackoffMs: 30_000,
+    });
   }, [filtroStatus]);
 
   const idsEmWorkflow = new Set(workflows.map((w) => w.roteiro_id));
@@ -41,6 +48,15 @@ export default function Home() {
     cancelada: "#ffc107",
   };
 
+  const productionColors: Record<string, string> = {
+    queued: "#6c757d", running: "#007bff", blocked: "#b45309", failed: "#dc3545",
+    completed: "#16803c", cancelled: "#6b7280",
+  };
+  const attention = workflows.filter((workflow) =>
+    ["blocked", "failed", "completed"].includes(workflow.production_status || "")
+    || workflow.status === "erro"
+  );
+
   return (
     <div style={{ fontFamily: "sans-serif", maxWidth: 1100, margin: "2rem auto", padding: "0 1rem" }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "2rem" }}>
@@ -52,6 +68,17 @@ export default function Home() {
 
       {erro && <p style={{ color: "crimson" }}>Erro: {erro}</p>}
 
+      <section className="attention-panel">
+        <h2>Requer atenção</h2>
+        {attention.length === 0 ? <p>Nenhum workflow exige ação.</p> : attention.map((workflow) => (
+          <button key={workflow.id} onClick={() => navigate(`/workflow/${workflow.id}`)}>
+            <strong>{workflow.id.slice(0, 8)}…</strong>
+            <span>{workflow.production_status === "completed" ? "Revisar QA/publicação" : workflow.production_error_message || workflow.erro_mensagem || workflow.production_status}</span>
+            <small>{workflow.production_phase || workflow.audio_phase}</small>
+          </button>
+        ))}
+      </section>
+
       <h2>Roteiros aprovados (ideas-hub)</h2>
       <ul style={{ listStyle: "none", padding: 0 }}>
         {roteiros
@@ -59,8 +86,8 @@ export default function Home() {
           .map((r) => (
             <li key={r.id} style={{ marginBottom: "0.5rem", padding: "0.75rem", background: "#f9f9f9", borderRadius: "4px" }}>
               <strong>{r.titulo}</strong> — {r.num_blocos} blocos, ~{r.duracao_total_segundos}s{" "}
-              <button onClick={() => api.criarWorkflow(r.id).then(carregar)} style={{ marginLeft: "1rem" }}>
-                Gerar áudio
+              <button onClick={() => api.criarWorkflow(r.id).then(() => carregar())} style={{ marginLeft: "1rem" }}>
+                Iniciar produção
               </button>
             </li>
           ))}
@@ -91,7 +118,9 @@ export default function Home() {
         <thead>
           <tr style={{ textAlign: "left", borderBottom: "1px solid #ccc" }}>
             <th style={{ padding: "8px" }}>ID</th>
-            <th style={{ padding: "8px" }}>Status</th>
+            <th style={{ padding: "8px" }}>Áudio legado</th>
+            <th style={{ padding: "8px" }}>Produção</th>
+            <th style={{ padding: "8px" }}>Fase</th>
             <th style={{ padding: "8px" }}>Duração</th>
             <th style={{ padding: "8px" }}>Tentativas</th>
             <th style={{ padding: "8px" }}>Ações</th>
@@ -106,6 +135,10 @@ export default function Home() {
                   {w.status}{w.erro_mensagem ? ` — ${w.erro_mensagem}` : ""}
                 </span>
               </td>
+              <td style={{ padding: "8px", color: productionColors[w.production_status || ""] || "#6b7280" }}>
+                {w.production_status || "legado / inativa"}
+              </td>
+              <td style={{ padding: "8px" }}>{w.production_phase || w.audio_phase}</td>
               <td style={{ padding: "8px" }}>{w.duracao_audio_segundos ? `${w.duracao_audio_segundos.toFixed(1)}s` : "—"}</td>
               <td style={{ padding: "8px" }}>{w.tentativas}</td>
               <td style={{ padding: "8px" }} onClick={(e) => e.stopPropagation()}>
@@ -113,10 +146,10 @@ export default function Home() {
                   <audio controls src={api.urlAudio(w.id)} style={{ height: 30 }} />
                 )}
                 {w.status === "erro" && (
-                  <button onClick={() => api.repetirWorkflow(w.id).then(carregar)}>Repetir</button>
+                  <button onClick={() => api.repetirWorkflow(w.id).then(() => carregar())}>Repetir</button>
                 )}
                 {(w.status === "agendada" || w.status === "gerando_audio") && (
-                  <button onClick={() => api.cancelarWorkflow(w.id).then(carregar)}>Cancelar</button>
+                  <button onClick={() => api.cancelarWorkflow(w.id).then(() => carregar())}>Cancelar</button>
                 )}
               </td>
             </tr>

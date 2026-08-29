@@ -1,17 +1,45 @@
-const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8011";
+const BASE_URL = import.meta.env?.VITE_API_URL || "http://localhost:8011";
+
+export type ApiErrorKind = "http" | "network" | "malformed_response";
+
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public readonly kind: ApiErrorKind,
+    public readonly status?: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+export function isExpectedNotFound(error: unknown): error is ApiError {
+  return error instanceof ApiError && error.status === 404;
+}
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const { headers: optionHeaders, ...rest } = options || {};
-  const resp = await fetch(`${BASE_URL}${path}`, {
-    ...rest,
-    headers: { "Content-Type": "application/json", ...(optionHeaders || {}) },
-  });
+  let resp: Response;
+  try {
+    resp = await fetch(`${BASE_URL}${path}`, {
+      ...rest,
+      headers: { "Content-Type": "application/json", ...(optionHeaders || {}) },
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") throw error;
+    throw new ApiError("Não foi possível conectar ao Orchestrator.", "network");
+  }
   if (!resp.ok) {
-    const body = await resp.json().catch(() => ({}));
-    throw new Error(body.detail || `Erro ${resp.status}`);
+    const body = await resp.json().catch(() => null) as { detail?: string | { message?: string } } | null;
+    const detail = typeof body?.detail === "string" ? body.detail : body?.detail?.message;
+    throw new ApiError(detail || `Orchestrator retornou HTTP ${resp.status}.`, "http", resp.status);
   }
   if (resp.status === 204) return undefined as T;
-  return resp.json();
+  try {
+    return await resp.json() as T;
+  } catch {
+    throw new ApiError("O Orchestrator retornou uma resposta inválida.", "malformed_response", resp.status);
+  }
 }
 
 export interface RoteiroDisponivel {
@@ -189,6 +217,40 @@ export interface WorkflowRender {
   video_url: string | null;
 }
 
+export interface NarrationTimeline {
+  narration_alignment_id: string;
+  fingerprint: string;
+  status: string;
+  resolved_visual_queries: number;
+  unresolved_visual_queries: number;
+  ambiguous_visual_queries: number;
+  blocks: Array<{ overall_coverage: number }>;
+  error_message: string | null;
+}
+
+export interface VisualPlan {
+  id: string;
+  fingerprint: string;
+  status: string;
+  total_queries: number;
+  resolved_queries: number;
+  unresolved_queries: number;
+  failed_queries: number;
+  required_gaps: number;
+  error_message: string | null;
+}
+
+export interface ProductionTimeline {
+  id: string;
+  fingerprint: string;
+  status: string;
+  visual_coverage_ratio: number;
+  gap_count: number;
+  unplaced_query_count: number;
+  required_gap_seconds: number;
+  error_message: string | null;
+}
+
 export interface ProductionQACheck {
   code: string;
   category: string;
@@ -237,21 +299,41 @@ export interface ProductionQAEnsure {
 }
 
 export interface DashboardStats {
-  fila_tamanho: number;
+  fila_nome: string;
+  fila_status: "available" | "unavailable";
+  fila_tamanho: number | null;
+  fila_error: string | null;
   workflows_ativos: number;
   blocos_concluidos_24h: number;
   blocos_erro_24h: number;
-  tempo_medio_bloco_segundos: number | null;
+  duracao_media_audio_bloco_segundos: number | null;
   taxa_erro_24h_percent: number;
+  generation_latency_p50_seconds: number | null;
+  generation_latency_p95_seconds: number | null;
+  failed_takes_24h: number;
+  quality_retries_24h: number;
+  average_attempts_per_completed_block_24h: number | null;
+  workflow_completion_time_mean_seconds_24h: number | null;
+  render_factor_mean_24h: number | null;
+  qa_success_rate_24h_percent: number | null;
+}
+
+export interface DependencyHealth {
+  status: "ready" | "degraded";
+  dependencies: Record<string, {
+    status: "healthy" | "unavailable";
+    latency_ms: number | null;
+    error: string | null;
+  }>;
 }
 
 export const api = {
-  listarRoteirosDisponiveis: () => request<RoteiroDisponivel[]>("/workflow/roteiros-disponiveis"),
-  listarWorkflows: (status?: string) => {
+  listarRoteirosDisponiveis: (signal?: AbortSignal) => request<RoteiroDisponivel[]>("/workflow/roteiros-disponiveis", { signal }),
+  listarWorkflows: (status?: string, signal?: AbortSignal) => {
     const params = status ? `?status=${status}` : "";
-    return request<Workflow[]>(`/workflow${params}`);
+    return request<Workflow[]>(`/workflow${params}`, { signal });
   },
-  obterWorkflow: (id: string) => request<Workflow>(`/workflow/${id}`),
+  obterWorkflow: (id: string, signal?: AbortSignal) => request<Workflow>(`/workflow/${id}`, { signal }),
   criarWorkflow: (roteiro_id: string) =>
     request<Workflow>("/workflow", { method: "POST", body: JSON.stringify({ roteiro_id }) }),
   repetirWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/retry`, { method: "PATCH" }),
@@ -269,9 +351,15 @@ export const api = {
     }),
   cancelarWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/cancelar`, { method: "PATCH" }),
   retomarProducao: (id: string) => request<Workflow>(`/workflow/${id}/resume-production`, { method: "POST" }),
-  obterRender: (id: string) => request<WorkflowRender>(`/workflow/${id}/render`),
-  obterQAReport: (id: string, mode: "standard" | "deep" = "standard") =>
-    request<ProductionQAReport>(`/workflow/${id}/qa-report?mode=${mode}`),
+  obterNarrationTimeline: (id: string, signal?: AbortSignal) =>
+    request<NarrationTimeline>(`/workflow/${id}/narration-timeline`, { signal }),
+  obterVisualPlan: (id: string, signal?: AbortSignal) =>
+    request<VisualPlan>(`/workflow/${id}/visual-plan`, { signal }),
+  obterProductionTimeline: (id: string, signal?: AbortSignal) =>
+    request<ProductionTimeline>(`/workflow/${id}/production-timeline`, { signal }),
+  obterRender: (id: string, signal?: AbortSignal) => request<WorkflowRender>(`/workflow/${id}/render`, { signal }),
+  obterQAReport: (id: string, mode: "standard" | "deep" = "standard", signal?: AbortSignal) =>
+    request<ProductionQAReport>(`/workflow/${id}/qa-report?mode=${mode}`, { signal }),
   executarQA: (
     id: string,
     mode: "standard" | "deep" = "standard",
@@ -281,7 +369,8 @@ export const api = {
       `/workflow/${id}/qa-report?mode=${mode}&force=${force}`,
       { method: "POST" },
     ),
-  obterDashboardStats: () => request<DashboardStats>("/dashboard/stats"),
+  obterDashboardStats: (signal?: AbortSignal) => request<DashboardStats>("/dashboard/stats", { signal }),
+  obterDependencias: (signal?: AbortSignal) => request<DependencyHealth>("/health/dependencias", { signal }),
   urlAudio: (id: string, sha256?: string | null) =>
     `${BASE_URL}/workflow/${id}/audio${sha256 ? `?artifact=${encodeURIComponent(sha256)}` : ""}`,
   urlAudioBloco: (workflowId: string, blocoId: string, sha256?: string | null) =>
