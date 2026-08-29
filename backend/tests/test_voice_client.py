@@ -83,6 +83,33 @@ async def test_create_matches_real_contract_and_sends_stable_idempotency_key() -
 
 
 @pytest.mark.asyncio
+async def test_create_reference_narration_uses_benchmark_endpoint_and_relative_reference() -> None:
+    observed: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request)
+        return httpx.Response(202, json=_job("queued", voice_profile="benchmark:ref.wav"))
+
+    async with VoiceClient(_settings(), transport=httpx.MockTransport(handler)) as client:
+        await client.create_reference_narration(
+            text="texto",
+            reference_id="nested/ref.wav",
+            generation_profile="narration_v1",
+            idempotency_key="benchmark-key",
+            seed=101,
+        )
+    assert observed[0].url.path == "/v1/benchmark/narrations"
+    assert observed[0].headers["Idempotency-Key"] == "benchmark-key"
+    assert json.loads(observed[0].content) == {
+        "text": "texto",
+        "language": "Portuguese",
+        "reference_id": "nested/ref.wav",
+        "generation_profile": "narration_v1",
+        "seed": 101,
+    }
+
+
+@pytest.mark.asyncio
 async def test_post_network_retry_reuses_identical_request_and_key() -> None:
     attempts: list[tuple[bytes, str]] = []
 

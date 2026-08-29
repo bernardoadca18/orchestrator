@@ -1,0 +1,59 @@
+schema: neovids_reference_regression_corpus_v1
+version: reference_regression_v1
+quick_cases:
+  - id: natural_ptbr
+    text: >-
+      No começo parecia uma tarefa simples. Eu só precisava atravessar a área,
+      encontrar o objetivo e continuar a missão. Naturalmente, consegui
+      transformar isso em uma pequena aventura completamente desnecessária.
+  - id: gameplay_narration
+    text: >-
+      Depois de alguns minutos andando em círculos, eu finalmente percebi que o
+      item que estava procurando estava praticamente na minha frente desde o
+      começo. Excelente demonstração de percepção espacial.
+  - id: punctuation
+    text: >-
+      A situação parecia resolvida. Só que não. Alguns segundos depois, tudo
+      começou a dar errado: inimigos apareceram, o plano desmoronou e eu precisei
+      improvisar.
+  - id: long_sentence
+    text: >-
+      Embora o caminho parecesse bastante óbvio quando eu olhei para o mapa pela
+      segunda vez, durante a primeira tentativa eu consegui ignorar completamente
+      a entrada correta, atravessar a mesma área várias vezes e ainda me perguntar
+      onde o jogo queria que eu fosse.
+  - id: controlled_intensity
+    text: >-
+      E foi exatamente nesse momento que eu percebi o tamanho do problema. Não era
+      impossível resolver, mas definitivamente seria muito mais complicado do que
+      eu tinha imaginado.
+  - id: content_skip_canary
+    text: >-
+      A primeira parte apresenta o contexto completo. A segunda explica o problema
+      sem remover nenhuma informação importante. A terceira encerra o raciocínio e
+      confirma a conclusão.
+full_cases:
+  - id: game_names
+    text: Rockstar Games transformou Grand Theft Auto e Red Dead Redemption em algumas das franquias mais reconhecidas da indústria.
+  - id: acronyms
+    text: No GTA, um NPC pode parecer completamente irrelevante até começar uma missão que muda o restante da sequência.
+  - id: mixed_english
+    text: O level design funciona bem, mas o checkpoint e o fast travel poderiam ter sido posicionados de maneira muito mais conveniente.
+  - id: technical
+    text: A API respondeu corretamente ao HTTP Range, o checksum SHA-256 permaneceu consistente e os dados foram persistidos no PostgreSQL.
+  - id: numbers
+    text: Foram três tentativas, vinte e sete minutos de gravação e aproximadamente cento e quarenta segundos de material realmente aproveitável.
+  - id: long_form
+    text: >-
+      Quando cheguei nessa parte da missão, a solução parecia bastante simples:
+      entrar na área, encontrar o personagem certo e continuar seguindo o objetivo
+      principal. O problema é que eu consegui transformar um caminho de poucos
+      minutos em uma pequena expedição. Primeiro passei direto pela entrada, depois
+      voltei pelo mesmo lugar sem perceber que já tinha estado ali e, para completar,
+      comecei a procurar um item que estava praticamente na minha frente. Depois de
+      algumas voltas desnecessárias, finalmente encontrei o caminho correto e a
+      missão voltou a andar. É um daqueles momentos em que o jogo não está
+      exatamente dificultando as coisas; sou eu mesmo criando problemas que não
+      existiam. Ainda assim, esse tipo de situação acaba sendo uma boa demonstração
+      de como exploração, interface e atenção do jogador podem mudar completamente
+      o ritmo de uma sequência que, no papel, deveria ser rápida.

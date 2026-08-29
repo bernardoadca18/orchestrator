@@ -1,0 +1,63 @@
+schema: neovids_pronunciation_reference_corpus_v1
+version: pronunciation_reference_v1
+targets:
+  - term: Rockstar Games
+    tier: proper_noun
+    contexts:
+      - "Rockstar Games transformou Grand Theft Auto em uma franquia reconhecida mundialmente."
+      - "Na análise de hoje, eu comparo o ritmo de Rockstar Games com o de outros estúdios."
+  - term: GTA
+    tier: initialism
+    contexts:
+      - "No GTA, a missão começa assim que o personagem atravessa a ponte."
+      - "Eu voltei ao GTA depois de alguns meses e precisei reaprender os controles."
+  - term: NPC
+    tier: initialism
+    contexts:
+      - "Um NPC aparentemente irrelevante acabou entregando a pista principal."
+      - "Quando o NPC mudou de rota, a missão inteira tomou outro rumo."
+  - term: Red Dead Redemption
+    tier: proper_noun
+    contexts:
+      - "Red Dead Redemption usa o silêncio para construir tensão durante a viagem."
+      - "Em Red Dead Redemption, cada cidade tem um ritmo diferente de exploração."
+  - term: Grand Theft Auto
+    tier: proper_noun
+    contexts:
+      - "Grand Theft Auto mistura exploração, perseguições e missões com objetivos bem distintos."
+      - "A série Grand Theft Auto ficou conhecida pela liberdade oferecida ao jogador."
+  - term: level design
+    tier: mixed_english
+    contexts:
+      - "O level design funciona melhor quando a rota principal permanece legível."
+      - "Um bom level design ensina a mecânica sem interromper a exploração."
+  - term: checkpoint
+    tier: mixed_english
+    contexts:
+      - "O checkpoint apareceu antes da luta e evitou repetir todo o caminho."
+      - "Depois do checkpoint, a missão ficou mais intensa e direta."
+  - term: fast travel
+    tier: mixed_english
+    contexts:
+      - "O fast travel economiza tempo, mas remove parte da descoberta do mapa."
+      - "Eu desbloqueei o fast travel antes de voltar para a região inicial."
+  - term: HTTP Range
+    tier: mixed_english
+    contexts:
+      - "A API respondeu ao HTTP Range e retomou o download sem começar do zero."
+      - "Quando o HTTP Range falha, o cliente precisa validar o conteúdo recebido."
+  - term: checksum
+    tier: mixed_english
+    contexts:
+      - "O checksum confirmou que o arquivo chegou sem alterações."
+      - "Eu comparei o checksum antes de publicar o áudio no armazenamento final."
+  - term: SHA-256
+    tier: initialism
+    contexts:
+      - "O SHA-256 permaneceu consistente depois da cópia para o volume de saída."
+      - "Usei SHA-256 para identificar o mesmo arquivo em duas execuções."
+  - term: PostgreSQL
+    tier: proper_noun
+    contexts:
+      - "Os dados foram persistidos no PostgreSQL depois da validação."
+      - "O PostgreSQL registrou o estado final da tarefa e o identificador do áudio."

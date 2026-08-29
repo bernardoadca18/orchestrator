@@ -148,6 +148,38 @@ class VoiceClient:
         )
         return self._parse_job(response)
 
+    async def create_reference_narration(
+        self,
+        *,
+        text: str,
+        reference_id: str,
+        generation_profile: str,
+        idempotency_key: str,
+        language: str = "Portuguese",
+        seed: int = 0,
+    ) -> VoiceNarrationJob:
+        """Create an ephemeral x-vector benchmark narration.
+
+        ``reference_id`` is deliberately a relative identifier understood by the
+        benchmark-only Voice Service endpoint; callers must never send host paths.
+        """
+        if not idempotency_key:
+            raise VoiceClientError("Idempotency-Key is required for narration creation")
+        response = await self._request_with_retry(
+            "POST",
+            "/v1/benchmark/narrations",
+            timeout=self.settings.voice_create_timeout_seconds,
+            headers={"Idempotency-Key": idempotency_key},
+            json={
+                "text": text,
+                "language": language,
+                "reference_id": reference_id,
+                "generation_profile": generation_profile,
+                "seed": seed,
+            },
+        )
+        return self._parse_job(response)
+
     async def get_narration(self, job_id: str) -> VoiceNarrationJob:
         response = await self._request_with_retry(
             "GET",

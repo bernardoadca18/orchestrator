@@ -60,6 +60,9 @@ services:
     volumes:
       - ./backend:/app
       - ./data/audio:/data/audio
+      # Narrow, read-only view of the canonical Qwen reference corpus used by
+      # the opt-in benchmark runner.  No other host paths are exposed.
+      - ../qwen3-tts-workshop/data/references:/data/references:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:

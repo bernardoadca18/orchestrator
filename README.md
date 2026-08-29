@@ -1,5 +1,8 @@
 # NeoVids Orchestrator
 
+The opt-in x-vector-only voice reference regression workflow is documented in
+[backend/docs/REFERENCE_REGRESSION.md](backend/docs/REFERENCE_REGRESSION.md).
+
 The Orchestrator consumes an approved Ideas Hub production script and produces one traceable,
 production-ready narration. The canonical voice dependency is `qwen3-tts-workshop`; the former
 Kokoro/Seed-VC Voice Workshop is deprecated reference code and is not an operational dependency.
