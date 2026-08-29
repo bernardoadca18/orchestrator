@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pyloudnorm as pyln
 import pytest
 import soundfile as sf
 
@@ -57,8 +58,43 @@ def test_measurement_failure_does_not_publish(tmp_path: Path, write_tone) -> Non
     source = write_tone(tmp_path / "source.wav", sample_rate=48_000, duration=2.0)
     destination = tmp_path / "final.wav"
     with (
-        patch("app.services.mastering.measure_true_peak", side_effect=MasteringError("failed")),
+        patch(
+            "app.services.mastering.measure_loudness_and_true_peak",
+            side_effect=MasteringError("failed"),
+        ),
         pytest.raises(MasteringError),
     ):
         master_narration(source, destination, MasteringConfig())
     assert not destination.exists()
+
+
+@pytest.mark.parametrize(
+    ("name", "amplitude"),
+    [("quiet", 0.02), ("narration", 0.08), ("peak_constrained", 0.7)],
+)
+def test_streaming_ebur128_is_within_declared_legacy_lufs_tolerance(
+    tmp_path: Path,
+    name: str,
+    amplitude: float,
+) -> None:
+    sample_rate = 48_000
+    time = np.arange(sample_rate * 5, dtype=np.float64) / sample_rate
+    samples = amplitude * np.sin(2 * np.pi * 220 * time)
+    samples[sample_rate * 2 : sample_rate * 2 + sample_rate // 2] = 0.0
+    source = tmp_path / f"{name}.wav"
+    sf.write(source, samples, sample_rate, format="WAV", subtype="PCM_16")
+    decoded, _ = sf.read(source, dtype="float64")
+    legacy_lufs = float(pyln.Meter(sample_rate).integrated_loudness(decoded))
+
+    result = master_narration(source, tmp_path / f"{name}-mastered.wav", MasteringConfig())
+
+    assert result.before.integrated_lufs == pytest.approx(legacy_lufs, abs=0.05)
+    assert result.metadata.frame_count == len(decoded)
+    assert result.metadata.sample_rate == sample_rate
+
+
+def test_mastering_streams_without_full_file_soundfile_read(tmp_path: Path, write_tone) -> None:
+    source = write_tone(tmp_path / "source.wav", duration=2.0, amplitude=0.04)
+    with patch("app.services.mastering.sf.read", side_effect=AssertionError("full decode")):
+        result = master_narration(source, tmp_path / "mastered.wav", MasteringConfig())
+    assert result.metadata.frame_count == inspect_wav(source).frame_count

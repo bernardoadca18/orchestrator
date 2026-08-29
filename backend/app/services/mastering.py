@@ -11,10 +11,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import pyloudnorm as pyln
 import soundfile as sf
 
-from app.services.production_audio import AudioFileMetadata, inspect_wav
+from app.services.production_audio import IO_BLOCK_FRAMES, AudioFileMetadata, inspect_wav
 
 
 class MasteringError(RuntimeError):
@@ -30,7 +29,7 @@ class LoudnessMetrics:
 
 @dataclass(frozen=True)
 class MasteringConfig:
-    version: str = "transparent_gain_v1"
+    version: str = "transparent_gain_v2_streaming_ebur128"
     target_lufs: float = -16.0
     max_true_peak_dbtp: float = -1.0
     true_peak_tolerance_db: float = 0.02
@@ -65,10 +64,12 @@ def _amplitude_to_db(value: float) -> float:
     return 20.0 * math.log10(value) if value > 0 else float("-inf")
 
 
-def measure_true_peak(path: Path) -> float:
+def measure_loudness_and_true_peak(path: Path) -> tuple[float, float]:
+    """Measure EBU R128 integrated loudness and True Peak in one FFmpeg pass."""
+
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
-        raise MasteringError("FFmpeg is required for True Peak measurement")
+        raise MasteringError("FFmpeg is required for loudness measurement")
     command = [
         ffmpeg,
         "-nostdin",
@@ -80,7 +81,7 @@ def measure_true_peak(path: Path) -> float:
         "-map",
         "0:a:0",
         "-filter:a",
-        "ebur128=metadata=1:peak=true,ametadata=mode=print:key=lavfi.r128.true_peak:file=-",
+        "ebur128=metadata=1:peak=true,ametadata=mode=print:file=-",
         "-f",
         "null",
         "-",
@@ -88,63 +89,101 @@ def measure_true_peak(path: Path) -> float:
     try:
         process = subprocess.run(command, capture_output=True, text=True, check=False)
     except OSError as exc:
-        raise MasteringError("FFmpeg True Peak measurement failed") from exc
+        raise MasteringError("FFmpeg loudness measurement failed") from exc
     if process.returncode != 0:
-        raise MasteringError("FFmpeg True Peak measurement failed")
-    prefix = "lavfi.r128.true_peak="
+        raise MasteringError("FFmpeg loudness measurement failed")
+    loudness_prefix = "lavfi.r128.I="
+    true_peak_prefix = "lavfi.r128.true_peak="
     try:
-        values = [
-            float(line.removeprefix(prefix))
+        loudness_values = [
+            float(line.removeprefix(loudness_prefix))
             for line in process.stdout.splitlines()
-            if line.startswith(prefix)
+            if line.startswith(loudness_prefix)
+        ]
+        true_peak_values = [
+            float(line.removeprefix(true_peak_prefix))
+            for line in process.stdout.splitlines()
+            if line.startswith(true_peak_prefix)
         ]
     except ValueError as exc:
-        raise MasteringError("FFmpeg returned invalid True Peak metadata") from exc
-    if not values or not all(math.isfinite(value) and value >= 0 for value in values):
+        raise MasteringError("FFmpeg returned invalid loudness metadata") from exc
+    if not loudness_values or not math.isfinite(loudness_values[-1]):
+        raise MasteringError("FFmpeg returned no valid integrated loudness measurement")
+    if not true_peak_values or not all(
+        math.isfinite(value) and value >= 0 for value in true_peak_values
+    ):
         raise MasteringError("FFmpeg returned no valid True Peak measurement")
-    return _amplitude_to_db(max(values))
+    integrated_lufs = loudness_values[-1]
+    if integrated_lufs <= -70.0:
+        raise MasteringError("Integrated LUFS is invalid for silent audio")
+    return integrated_lufs, _amplitude_to_db(max(true_peak_values))
 
 
-def analyze(path: Path) -> tuple[LoudnessMetrics, np.ndarray, sf.SoundFile]:
+def measure_true_peak(path: Path) -> float:
+    return measure_loudness_and_true_peak(path)[1]
+
+
+def analyze(
+    path: Path,
+    *,
+    sample_peak_dbfs: float | None = None,
+) -> tuple[LoudnessMetrics, sf.SoundFile]:
     try:
         info = sf.info(str(path))
-        audio, sample_rate = sf.read(str(path), dtype="float64", always_2d=False)
     except (OSError, RuntimeError) as exc:
         raise MasteringError("narration WAV is unreadable") from exc
-    if audio.size == 0 or not np.all(np.isfinite(audio)):
-        raise MasteringError("narration WAV contains invalid samples")
-    try:
-        loudness = float(pyln.Meter(sample_rate).integrated_loudness(audio))
-    except (ValueError, RuntimeError) as exc:
-        raise MasteringError("Integrated LUFS measurement failed") from exc
-    if not math.isfinite(loudness):
-        raise MasteringError("Integrated LUFS is invalid for silent audio")
-    peak = _amplitude_to_db(float(np.max(np.abs(audio))))
-    return LoudnessMetrics(loudness, peak, measure_true_peak(path)), audio, info
+    if info.frames <= 0:
+        raise MasteringError("narration WAV contains no samples")
+    loudness, true_peak = measure_loudness_and_true_peak(path)
+    peak = sample_peak_dbfs
+    if peak is None:
+        peak = inspect_wav(path).sample_peak_dbfs
+    return LoudnessMetrics(loudness, peak, true_peak), info
 
 
 def master_narration(source: Path, destination: Path, config: MasteringConfig) -> MasteringResult:
     source_metadata = inspect_wav(source)
-    before, audio, info = analyze(source)
+    before, info = analyze(source, sample_peak_dbfs=source_metadata.sample_peak_dbfs)
     gain_for_loudness = config.target_lufs - before.integrated_lufs
     gain_allowed_by_peak = (
         config.max_true_peak_dbtp - config.true_peak_safety_margin_db - before.true_peak_dbtp
     )
     applied_gain = min(gain_for_loudness, gain_allowed_by_peak)
     peak_constrained = gain_allowed_by_peak < gain_for_loudness - 1e-9
-    processed = audio * (10.0 ** (applied_gain / 20.0))
+    gain_factor = 10.0 ** (applied_gain / 20.0)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp.wav"
     try:
-        sf.write(
-            str(temporary),
-            processed,
-            info.samplerate,
-            format="WAV",
-            subtype="PCM_16",
-        )
-        after, _, after_info = analyze(temporary)
+        try:
+            with (
+                sf.SoundFile(str(source), mode="r") as input_audio,
+                sf.SoundFile(
+                    str(temporary),
+                    mode="w",
+                    samplerate=info.samplerate,
+                    channels=info.channels,
+                    format="WAV",
+                    subtype="PCM_16",
+                ) as output_audio,
+            ):
+                for samples in input_audio.blocks(
+                    blocksize=IO_BLOCK_FRAMES,
+                    dtype="float64",
+                    always_2d=True,
+                ):
+                    if not np.all(np.isfinite(samples)):
+                        raise MasteringError("narration WAV contains invalid samples")
+                    np.multiply(samples, gain_factor, out=samples)
+                    output_audio.write(samples)
+        except MasteringError:
+            raise
+        except (OSError, RuntimeError) as exc:
+            raise MasteringError("mastering gain pass failed") from exc
         metadata = inspect_wav(temporary)
+        after, after_info = analyze(
+            temporary,
+            sample_peak_dbfs=metadata.sample_peak_dbfs,
+        )
         if after_info.samplerate != info.samplerate or after_info.channels != info.channels:
             raise MasteringError("mastering changed sample rate or channels")
         if (

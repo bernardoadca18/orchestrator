@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from app.services.production_audio import (
     ProductionAudioError,
     assemble_narration,
     inspect_wav,
+    inspect_wav_metadata,
     publish_source_block,
 )
 
@@ -94,3 +96,41 @@ def test_assembly_is_48k_mono_pcm16_ordered_with_exact_pause_and_offsets(
 def test_assembly_rejects_empty_input(tmp_path: Path) -> None:
     with pytest.raises(ProductionAudioError):
         assemble_narration([], tmp_path / "none.wav", sample_rate=48_000, silence_ms=0)
+
+
+def test_metadata_inspection_never_runs_signal_decode(tmp_path: Path, write_tone) -> None:
+    source = write_tone(tmp_path / "source.wav")
+    with patch(
+        "app.services.production_audio.scan_wav_signal",
+        side_effect=AssertionError("signal scan must not run"),
+    ):
+        metadata = inspect_wav_metadata(source)
+    assert metadata.frame_count == 48_000
+
+
+def test_streaming_assembly_does_not_concatenate_complete_narration(
+    tmp_path: Path, write_tone
+) -> None:
+    source = write_tone(tmp_path / "short.wav", duration=0.02)
+    with patch(
+        "app.services.production_audio.np.concatenate",
+        side_effect=AssertionError("complete narration must not be concatenated"),
+    ):
+        result = assemble_narration(
+            [source] * 120,
+            tmp_path / "long.wav",
+            sample_rate=48_000,
+            silence_ms=10,
+        )
+    assert result.metadata.frame_count == (120 * 960) + (119 * 480)
+
+
+def test_assembly_failure_preserves_existing_destination(tmp_path: Path) -> None:
+    destination = tmp_path / "final.wav"
+    destination.write_bytes(b"existing artifact")
+    invalid = tmp_path / "invalid.wav"
+    invalid.write_bytes(b"not a wav")
+    with pytest.raises(ProductionAudioError):
+        assemble_narration([invalid], destination, sample_rate=48_000, silence_ms=0)
+    assert destination.read_bytes() == b"existing artifact"
+    assert not list(tmp_path.glob(".*.tmp.wav"))

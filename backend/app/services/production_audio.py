@@ -6,14 +6,13 @@ import hashlib
 import math
 import os
 import struct
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from math import gcd
 from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
 import soundfile as sf
-from numpy.typing import NDArray
 from scipy.signal import resample_poly
 
 
@@ -25,8 +24,11 @@ class BlockDurationQualityError(ProductionAudioError):
     """A technically valid source WAV is grossly implausible for its text."""
 
 
+IO_BLOCK_FRAMES = 262_144
+
+
 @dataclass(frozen=True)
-class AudioFileMetadata:
+class WavPhysicalMetadata:
     duration_seconds: float
     sample_rate: int
     channels: int
@@ -37,6 +39,16 @@ class AudioFileMetadata:
     format: str
     riff_declared_byte_size: int
     riff_data_byte_size: int
+
+
+@dataclass(frozen=True)
+class WavSignalMetrics:
+    sample_peak_dbfs: float
+    clipping_sample_count: int
+
+
+@dataclass(frozen=True)
+class AudioFileMetadata(WavPhysicalMetadata):
     sample_peak_dbfs: float
     clipping_sample_count: int
 
@@ -132,29 +144,24 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def inspect_wav(path: Path) -> AudioFileMetadata:
+def inspect_wav_metadata(path: Path) -> WavPhysicalMetadata:
+    """Validate RIFF/PCM metadata and hash a WAV without decoding its signal."""
+
     riff = _inspect_riff(path)
     try:
         info = sf.info(str(path))
-        samples, sample_rate = sf.read(str(path), dtype="float64", always_2d=True)
     except (OSError, RuntimeError) as exc:
         raise ProductionAudioError("WAV is unreadable") from exc
-    if info.format != "WAV" or info.subtype != "PCM_16" or samples.size == 0:
+    if info.format != "WAV" or info.subtype != "PCM_16" or info.frames <= 0:
         raise ProductionAudioError("audio result is not a non-empty PCM16 WAV")
-    if sample_rate < 8_000 or sample_rate > 192_000 or info.channels < 1 or info.channels > 8:
+    if info.samplerate < 8_000 or info.samplerate > 192_000 or info.channels < 1 or info.channels > 8:
         raise ProductionAudioError("WAV format metadata is outside safe bounds")
-    if not np.all(np.isfinite(samples)):
-        raise ProductionAudioError("WAV contains non-finite samples")
     duration = float(info.frames / info.samplerate)
     if not math.isfinite(duration) or duration <= 0:
         raise ProductionAudioError("WAV duration is invalid")
     if int(info.frames) * riff.block_align != riff.data_byte_size:
         raise ProductionAudioError("WAV sample count does not match its RIFF data size")
-    absolute = np.abs(samples)
-    peak = float(np.max(absolute))
-    clipping_count = int(np.count_nonzero(absolute >= 0.999))
-    peak_dbfs = 20.0 * math.log10(peak) if peak > 0 else float("-inf")
-    return AudioFileMetadata(
+    return WavPhysicalMetadata(
         duration_seconds=duration,
         sample_rate=int(info.samplerate),
         channels=int(info.channels),
@@ -165,8 +172,52 @@ def inspect_wav(path: Path) -> AudioFileMetadata:
         format=info.format,
         riff_declared_byte_size=riff.declared_byte_size,
         riff_data_byte_size=riff.data_byte_size,
-        sample_peak_dbfs=peak_dbfs,
+    )
+
+
+def scan_wav_signal(path: Path, *, block_frames: int = IO_BLOCK_FRAMES) -> WavSignalMetrics:
+    """Scan signal-level integrity with fixed-size decode buffers."""
+
+    if block_frames <= 0:
+        raise ValueError("block_frames must be positive")
+    peak = 0.0
+    clipping_count = 0
+    sample_count = 0
+    try:
+        with sf.SoundFile(str(path), mode="r") as source:
+            for samples in source.blocks(
+                blocksize=block_frames,
+                dtype="float64",
+                always_2d=True,
+            ):
+                if not np.all(np.isfinite(samples)):
+                    raise ProductionAudioError("WAV contains non-finite samples")
+                absolute = np.abs(samples)
+                if absolute.size:
+                    peak = max(peak, float(np.max(absolute)))
+                    clipping_count += int(np.count_nonzero(absolute >= 0.999))
+                    sample_count += int(absolute.size)
+    except ProductionAudioError:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise ProductionAudioError("WAV signal could not be decoded") from exc
+    if sample_count == 0:
+        raise ProductionAudioError("audio result contains no decodable samples")
+    return WavSignalMetrics(
+        sample_peak_dbfs=(20.0 * math.log10(peak) if peak > 0 else float("-inf")),
         clipping_sample_count=clipping_count,
+    )
+
+
+def inspect_wav(path: Path) -> AudioFileMetadata:
+    """Compatibility inspection combining physical metadata and a bounded signal scan."""
+
+    physical = inspect_wav_metadata(path)
+    signal = scan_wav_signal(path)
+    return AudioFileMetadata(
+        **asdict(physical),
+        sample_peak_dbfs=signal.sample_peak_dbfs,
+        clipping_sample_count=signal.clipping_sample_count,
     )
 
 
@@ -251,39 +302,80 @@ def assemble_narration(
     if not block_paths:
         raise ProductionAudioError("cannot assemble an empty narration")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    pieces: list[NDArray[np.float64]] = []
     offsets: list[BlockNarrationOffset] = []
     current_frame = 0
     silence_frames = round(max(silence_ms, 0) * sample_rate / 1000)
-    for order, path in enumerate(block_paths):
-        try:
-            samples, source_rate = sf.read(str(path), dtype="float64", always_2d=True)
-        except (OSError, RuntimeError) as exc:
-            raise ProductionAudioError("source block WAV is unreadable") from exc
-        if samples.size == 0 or not np.all(np.isfinite(samples)):
-            raise ProductionAudioError("source block WAV contains invalid samples")
-        mono = np.mean(samples, axis=1)
-        if source_rate != sample_rate:
-            divisor = gcd(source_rate, sample_rate)
-            mono = resample_poly(mono, sample_rate // divisor, source_rate // divisor)
-        mono = np.asarray(mono, dtype=np.float64)
-        start_frame = current_frame
-        pieces.append(mono)
-        current_frame += len(mono)
-        offsets.append(
-            BlockNarrationOffset(
-                order=order,
-                start_seconds=start_frame / sample_rate,
-                end_seconds=current_frame / sample_rate,
-            )
-        )
-        if silence_frames and order < len(block_paths) - 1:
-            pieces.append(np.zeros(silence_frames, dtype=np.float64))
-            current_frame += silence_frames
-    assembled = np.concatenate(pieces)
     temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp.wav"
     try:
-        sf.write(str(temporary), assembled, sample_rate, format="WAV", subtype="PCM_16")
+        with sf.SoundFile(
+            str(temporary),
+            mode="w",
+            samplerate=sample_rate,
+            channels=1,
+            format="WAV",
+            subtype="PCM_16",
+        ) as output:
+            for order, path in enumerate(block_paths):
+                start_frame = current_frame
+                try:
+                    with sf.SoundFile(str(path), mode="r") as source:
+                        source_rate = int(source.samplerate)
+                        if source.frames <= 0 or source.channels <= 0 or source_rate <= 0:
+                            raise ProductionAudioError("source block WAV contains invalid samples")
+                        if source_rate == sample_rate:
+                            block_frames = 0
+                            for samples in source.blocks(
+                                blocksize=IO_BLOCK_FRAMES,
+                                dtype="float64",
+                                always_2d=True,
+                            ):
+                                if not np.all(np.isfinite(samples)):
+                                    raise ProductionAudioError(
+                                        "source block WAV contains invalid samples"
+                                    )
+                                mono = np.mean(samples, axis=1, dtype=np.float64)
+                                output.write(mono)
+                                block_frames += len(mono)
+                        else:
+                            # Qwen blocks are quality-bounded. Keeping one mismatched-rate
+                            # block resident preserves scipy resample_poly's exact boundary
+                            # semantics without ever retaining the complete narration.
+                            samples = source.read(dtype="float64", always_2d=True)
+                            if samples.size == 0 or not np.all(np.isfinite(samples)):
+                                raise ProductionAudioError(
+                                    "source block WAV contains invalid samples"
+                                )
+                            mono = np.mean(samples, axis=1, dtype=np.float64)
+                            divisor = gcd(source_rate, sample_rate)
+                            resampled = resample_poly(
+                                mono,
+                                sample_rate // divisor,
+                                source_rate // divisor,
+                            )
+                            output.write(resampled)
+                            block_frames = len(resampled)
+                except ProductionAudioError:
+                    raise
+                except (OSError, RuntimeError) as exc:
+                    raise ProductionAudioError("source block WAV is unreadable") from exc
+                if block_frames <= 0:
+                    raise ProductionAudioError("source block WAV contains invalid samples")
+                current_frame += block_frames
+                offsets.append(
+                    BlockNarrationOffset(
+                        order=order,
+                        start_seconds=start_frame / sample_rate,
+                        end_seconds=current_frame / sample_rate,
+                    )
+                )
+                if silence_frames and order < len(block_paths) - 1:
+                    remaining = silence_frames
+                    silence = np.zeros(min(IO_BLOCK_FRAMES, silence_frames), dtype=np.float64)
+                    while remaining:
+                        frames = min(remaining, len(silence))
+                        output.write(silence[:frames])
+                        remaining -= frames
+                    current_frame += silence_frames
         metadata = inspect_wav(temporary)
         if (
             metadata.sample_rate != sample_rate

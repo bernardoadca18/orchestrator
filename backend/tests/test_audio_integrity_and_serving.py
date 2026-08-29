@@ -20,7 +20,7 @@ from app.services.audio_serving import (
     audio_file_response,
     verify_audio_artifact,
 )
-from app.services.production_audio import ProductionAudioError, inspect_wav
+from app.services.production_audio import IO_BLOCK_FRAMES, ProductionAudioError, inspect_wav
 
 
 def _expectation(path: Path) -> AudioArtifactExpectation:
@@ -170,6 +170,57 @@ def test_internal_pause_and_low_energy_transient_are_observable(tmp_path: Path) 
     ]
     assert internal and internal[0]["duration_seconds"] >= 0.24
     assert any(item["low_energy_context"] for item in report["transient_candidates"])
+
+
+def test_streaming_diagnostics_preserve_silence_across_buffer_boundary(tmp_path: Path) -> None:
+    sample_rate = 8_000
+    total_frames = IO_BLOCK_FRAMES + sample_rate
+    samples = np.full(total_frames, 0.05, dtype=np.float64)
+    silence_start = IO_BLOCK_FRAMES - sample_rate // 2
+    silence_end = IO_BLOCK_FRAMES + sample_rate // 2
+    samples[silence_start:silence_end] = 0.0
+    wav = tmp_path / "boundary-silence.wav"
+    sf.write(wav, samples, sample_rate, format="WAV", subtype="PCM_16")
+
+    report = analyze_audio(wav)
+
+    assert report["signal"]["silence_run_count"] == 1
+    assert report["signal"]["silence_total_seconds"] == pytest.approx(1.0, abs=1 / sample_rate)
+    assert report["pause_timeline"][0]["start_seconds"] == pytest.approx(
+        silence_start / sample_rate,
+        abs=1 / sample_rate,
+    )
+
+
+def test_streaming_diagnostics_match_legacy_signal_metrics(tmp_path: Path) -> None:
+    sample_rate = 24_000
+    time = np.arange(sample_rate * 3, dtype=np.float64) / sample_rate
+    samples = 0.03 * np.sin(2 * np.pi * 233 * time) + 0.004
+    samples[: sample_rate // 4] = 0
+    samples[sample_rate : sample_rate + sample_rate // 2] = 0
+    wav = tmp_path / "representative.wav"
+    sf.write(wav, samples, sample_rate, format="WAV", subtype="PCM_16")
+    decoded, _ = sf.read(wav, dtype="float64")
+    threshold = 10.0 ** (-45.0 / 20.0)
+    legacy_rms = 20.0 * np.log10(np.sqrt(np.mean(np.square(decoded))))
+    window_frames = round(sample_rate * 0.02)
+    windows = decoded[: len(decoded) - (len(decoded) % window_frames)].reshape(
+        -1, window_frames
+    )
+    legacy_noise = 20.0 * np.log10(
+        np.percentile(np.sqrt(np.mean(np.square(windows), axis=1)), 10)
+    )
+
+    report = analyze_audio(wav)
+    signal = report["signal"]
+
+    assert signal["dc_offset"] == pytest.approx(float(np.mean(decoded)), abs=1e-9)
+    assert signal["rms_dbfs"] == pytest.approx(float(legacy_rms), abs=0.001)
+    assert signal["noise_floor_estimate_dbfs"] == pytest.approx(float(legacy_noise), abs=0.11)
+    assert signal["near_silent_sample_ratio"] == pytest.approx(
+        float(np.mean(np.abs(decoded) <= threshold)),
+        abs=1e-6,
+    )
 
 
 def test_block_endpoint_rejects_stale_current_take_pointer(tmp_path: Path, write_tone) -> None:
