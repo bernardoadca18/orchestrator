@@ -71,6 +71,13 @@ Run commands from `orchestrator/backend`:
 `resolve` calls neither Qwen nor CUDA. It prints canonical, normalized and synthesis text, both
 identities and every rule/span that would fire.
 
+Real workflow takes also retain diagnostic-only expected/ASR token disagreements in
+`content_quality.metrics.pronunciation_or_asr_mismatches`. Workflow Detail exposes them under the
+take's quality details. These observations are a review queue, not synthesis rules: common words
+may reflect a one-off trajectory, and even a recurring brand/acronym mismatch must be reproduced in
+multiple contexts before a candidate is tested here. Copy the intended term into `resolve`, then
+use `lab-run`; no workflow diagnostic is auto-promoted or written to the production YAML.
+
 ## Controlled laboratory runs
 
 The lab is deliberately separate from production. Manual candidates are always supported.

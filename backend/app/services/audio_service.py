@@ -28,6 +28,7 @@ from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco, AudioBlocoTake
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_diagnostics import analyze_audio
+from app.services.content_chunk_diagnostics import analyze_chunk_content
 from app.services.content_coverage import (
     ContentCoverageThresholds,
     analyze_content_coverage,
@@ -344,7 +345,18 @@ class AudioWorkflowService:
                             ),
                         )
                         content_quality = self._validate_take_content(
-                            source_path, pronunciation.synthesis_text
+                            source_path,
+                            pronunciation.synthesis_text,
+                            project_id=str(workflow.ideia_id),
+                            provider_metadata=completed.metadata,
+                        )
+                        self._log_content_quality_decision(
+                            workflow_id=workflow.id,
+                            block=block,
+                            take=take,
+                            qwen_job_id=completed.id,
+                            duration_seconds=metadata.duration_seconds,
+                            content_quality=content_quality,
                         )
                         if hasattr(self.repo, "atualizar_take"):
                             await self.repo.atualizar_take(
@@ -376,10 +388,20 @@ class AudioWorkflowService:
                                 active_block = None
                                 active_take = None
                                 return
-                        if content_quality["status"] == "rejected":
+                        if content_quality["status"] == "rejected" and not bool(
+                            content_quality.get("retry_required")
+                        ):
+                            raise VoiceClientError(
+                                "content validator returned a blocking status without "
+                                "a retry decision"
+                            )
+                        if content_quality.get("retry_required") is True:
+                            classification = str(
+                                content_quality.get("classification", "content_failure")
+                            )
                             failure = VoiceJobFailedError(
                                 "content_quality_guard",
-                                "generated speech failed ASR content coverage validation",
+                                f"generated speech classified as {classification}",
                             )
                             failure.diagnostics = content_quality  # type: ignore[attr-defined]
                             take = await self._prepare_quality_retry(block, take, failure)
@@ -827,6 +849,16 @@ class AudioWorkflowService:
     ) -> AudioBlocoTake:
         if failure.category not in QUALITY_RETRY_CATEGORIES:
             raise failure
+        diagnostics = getattr(failure, "diagnostics", None)
+        if (
+            failure.category == "content_quality_guard"
+            and isinstance(diagnostics, dict)
+            and diagnostics.get("retry_required") is not True
+        ):
+            raise VoiceJobFailedError(
+                "quality_retry_not_permitted",
+                "content evidence does not justify a semantic quality retry",
+            )
         initial_seed = block.initial_resolved_seed or block.resolved_seed
         if initial_seed is None:
             raise VoiceJobFailedError(
@@ -841,6 +873,9 @@ class AudioWorkflowService:
             "error_category": failure.category,
             "error_message": failure.public_message,
         }
+        if isinstance(diagnostics, dict):
+            entry["quality_classification"] = diagnostics.get("classification")
+            entry["retry_reason"] = diagnostics.get("retry_reason")
         if not any(
             item.get("job_id") == block.job_id_voz
             and item.get("generation_attempt") == block.generation_attempt
@@ -857,7 +892,7 @@ class AudioWorkflowService:
                     error_message=failure.public_message,
                     error_diagnostics={
                         "history": history,
-                        "last_failure": getattr(failure, "diagnostics", None),
+                        "last_failure": diagnostics,
                     },
                     quality_status="rejected",
                 )
@@ -885,7 +920,7 @@ class AudioWorkflowService:
                 status="failed",
                 error_category=failure.category,
                 error_message=failure.public_message,
-                error_diagnostics=getattr(failure, "diagnostics", entry),
+                error_diagnostics=diagnostics if diagnostics is not None else entry,
                 quality_status="rejected",
             )
         if hasattr(self.repo, "criar_take"):
@@ -992,7 +1027,14 @@ class AudioWorkflowService:
         workflow = await self.repo.obter_por_id(workflow_id)
         return workflow is None or workflow.status == "cancelada"
 
-    def _validate_take_content(self, audio_path: Path, synthesis_text: str) -> dict[str, object]:
+    def _validate_take_content(
+        self,
+        audio_path: Path,
+        synthesis_text: str,
+        *,
+        project_id: str | None = None,
+        provider_metadata: dict[str, object] | None = None,
+    ) -> dict[str, object]:
         thresholds = _content_thresholds(self.config)
         if not self.config.audio_take_content_validation_enabled:
             return unavailable_content_report(
@@ -1007,11 +1049,31 @@ class AudioWorkflowService:
                 extra={"audio_sha256": inspect_wav(audio_path).sha256},
             )
             return unavailable_content_report(thresholds).to_dict()
-        report = analyze_content_coverage(
-            synthesis_text,
-            transcription.text,
-            thresholds=thresholds,
-        ).to_dict()
+        comparison_normalization = self.text_normalizer.normalize(transcription.text)
+        comparison_pronunciation = self.preprocessor.preprocess(
+            comparison_normalization.normalized_text,
+            project=project_id,
+            locale=self.config.pronunciation_locale,
+            canonical_text=transcription.text,
+        )
+        comparison_hypothesis = comparison_pronunciation.synthesis_text
+        try:
+            report = analyze_content_coverage(
+                synthesis_text,
+                comparison_hypothesis,
+                thresholds=thresholds,
+            ).to_dict()
+        except ValueError:
+            logger.warning(
+                "take content alignment exceeded its deterministic bounds",
+                extra={
+                    "audio_sha256": inspect_wav(audio_path).sha256,
+                    "synthesis_text_sha256": _sha256_text(synthesis_text),
+                },
+            )
+            report = unavailable_content_report(
+                thresholds, reason="content_alignment_limits_exceeded"
+            ).to_dict()
         known_probabilities = [
             word.probability for word in transcription.words if word.probability is not None
         ]
@@ -1048,7 +1110,85 @@ class AudioWorkflowService:
                 self.config.audio_content_minimum_asr_confidence
             ),
         }
+        report["comparison"] = {
+            "hypothesis_sha256": _sha256_text(comparison_hypothesis),
+            "text_normalizer_version": comparison_normalization.version,
+            "text_normalizer_identity": comparison_normalization.identity,
+            "pronunciation_lexicon_identity": comparison_pronunciation.lexicon_identity,
+            "pronunciation_replacements": list(
+                comparison_pronunciation.applied_replacements
+            ),
+            "scope": "diagnostic_only_does_not_modify_synthesis_text",
+        }
+        if provider_metadata is not None and confidence_status != "low_confidence":
+
+            def normalize_chunk_hypothesis(value: str) -> str:
+                normalized = self.text_normalizer.normalize(value)
+                return self.preprocessor.preprocess(
+                    normalized.normalized_text,
+                    project=project_id,
+                    locale=self.config.pronunciation_locale,
+                    canonical_text=value,
+                ).synthesis_text
+
+            report["chunk_diagnostics"] = analyze_chunk_content(
+                synthesis_text,
+                transcription.words,
+                provider_metadata,
+                thresholds=thresholds,
+                normalize_hypothesis=normalize_chunk_hypothesis,
+            )
+        else:
+            report["chunk_diagnostics"] = {
+                "status": "unavailable",
+                "reason": (
+                    "asr_low_confidence"
+                    if confidence_status == "low_confidence"
+                    else "provider_chunk_timeline_unavailable"
+                ),
+                "asr_pass_count": 1,
+                "chunks": [],
+            }
         return report
+
+    @staticmethod
+    def _log_content_quality_decision(
+        *,
+        workflow_id: uuid.UUID,
+        block: AudioBloco,
+        take: AudioBlocoTake,
+        qwen_job_id: str,
+        duration_seconds: float,
+        content_quality: dict[str, object],
+    ) -> None:
+        metrics = content_quality.get("metrics")
+        if not isinstance(metrics, dict):
+            metrics = {}
+        logger.info(
+            "narration take content quality evaluated",
+            extra={
+                "workflow_id": str(workflow_id),
+                "block_id": str(block.id),
+                "take_id": str(take.id),
+                "qwen_job_id": qwen_job_id,
+                "requested_seed": getattr(take, "requested_seed", None),
+                "resolved_seed": getattr(take, "resolved_seed", None),
+                "audio_duration_seconds": duration_seconds,
+                "content_classification": content_quality.get("classification"),
+                "content_status": content_quality.get("status"),
+                "normalized_wer": metrics.get("normalized_wer"),
+                "normalized_cer": metrics.get("normalized_cer"),
+                "coverage_ratio": metrics.get("coverage_ratio"),
+                "structural_coverage_ratio": metrics.get("structural_coverage_ratio"),
+                "largest_missing_span_tokens": metrics.get(
+                    "longest_missing_contiguous_token_count"
+                ),
+                "substitution_count": metrics.get("substitution_count"),
+                "deletion_count": metrics.get("deletion_count"),
+                "retry_required": content_quality.get("retry_required"),
+                "retry_reason": content_quality.get("retry_reason"),
+            },
+        )
 
     async def _ensure_transcription(
         self, workflow_id: uuid.UUID, final_path: Path, audio_sha256: str

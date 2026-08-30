@@ -15,12 +15,36 @@ file returns conflict instead of partial or stale audio. The frontend includes t
 the URL and remounts the player when that identity changes.
 
 Take ASR validation compares the actual synthesis text—not canonical editorial text—with the
-generated source WAV before promotion. Its versioned report separates ASR-unavailable from a
-content rejection, treats measured low-confidence ASR as inconclusive, and includes normalized
-WER/CER, deletion/insertion/repetition ratios, coverage,
-longest missing span, trailing loss and obvious reordering. A rejected take uses the existing
-bounded quality-retry path and a controlled new seed. Transport retries remain semantically
-identical and Qwen still performs no hidden synthesis retry.
+generated source WAV before promotion. Comparison-only normalization expands equivalent numeric
+representations and resolves already approved pronunciation aliases on the ASR hypothesis; it does
+not alter canonical, normalized, or synthesis text. The `narration_content_coverage_v2` report
+separates content integrity from pronunciation accuracy. WER and CER remain diagnostics, while a
+blocking decision requires structural evidence: genuine deletion runs, a structurally missing
+sentence, terminal loss, abnormal repetition, or strong reordering. Substitutions are not counted
+as missing spans.
+
+The classifications and actions are:
+
+- `content_complete`: accept;
+- `pronunciation_or_asr_disagreement`: accept with warning, record local mismatches, no retry;
+- `content_inconclusive`: preserve `quality_unvalidated` semantics, no blind semantic retry;
+- `probable_content_loss`, `premature_end`, `probable_repetition`, or
+  `probable_reordering`: reject and use the bounded quality-retry path;
+- physical/container and Qwen duration/runaway guards remain independent hard failures.
+
+Long-form takes use one timestamped ASR pass. Qwen's immutable `assembly_timeline` partitions those
+words into chunk windows for per-chunk diagnostics; the aggregate structural report remains the
+decision authority. This localizes a warning or missing span without loading/transcribing the WAV
+again. Every decision records classification, retry requirement/reason, region and sentence
+coverage, deletion/substitution metrics, local mismatch candidates, and compact chunk reports.
+Measured low-confidence or unavailable ASR stays inconclusive. Transport retries remain
+semantically identical; only blocking quality classes get a new controlled seed, and Qwen still
+performs no hidden synthesis retry.
+
+In Workflow Detail, open `Histórico` and then `Qualidade de conteúdo / ASR` for the decision,
+metrics, per-chunk evidence, local pronunciation mismatches, and raw ASR transcript. A failed take
+should be diagnosed from `classification`, `reasons`, longest missing span, sentence/region
+coverage, and retry reason—not from WER alone.
 
 ## Non-destructive reference and artifact inspection
 

@@ -12,6 +12,7 @@ import {
   WorkflowRender,
 } from "../api/client";
 import { shouldPollQA, shouldPollRender } from "./polling";
+import { presentContentQuality, qualityToneColor } from "../utils/contentQuality";
 import { startSerialPolling } from "../utils/serialPolling";
 
 const productionStages = [
@@ -36,6 +37,65 @@ function formatPronunciation(item: PronunciationReplacement) {
   const identity = item.entry_id ? ` [${item.entry_id}@${item.entry_version ?? "?"}]` : "";
   const count = item.count && item.count > 1 ? ` (${item.count}x)` : "";
   return `${original} → ${replacement}${identity}${count}`;
+}
+
+function metadataText(metadata: Record<string, unknown> | null, key: string): string {
+  const value = metadata?.[key];
+  return typeof value === "string" || typeof value === "number" ? String(value) : "—";
+}
+
+function chunkSeeds(metadata: Record<string, unknown> | null): string {
+  const chunks = metadata?.chunks;
+  if (!Array.isArray(chunks)) return "—";
+  const seeds = chunks.flatMap((item) => {
+    if (!item || typeof item !== "object" || !("seed" in item)) return [];
+    const seed = (item as { seed?: unknown }).seed;
+    return typeof seed === "number" ? [String(seed)] : [];
+  });
+  return seeds.length > 0 ? seeds.join(", ") : "—";
+}
+
+function TakeQualityDetails({ report }: { report: Record<string, unknown> | null }) {
+  const quality = presentContentQuality(report);
+  if (!quality) return null;
+  const color = qualityToneColor(quality.tone);
+  return <>
+    <span style={{ color }}> — {quality.outcomeLabel}: {quality.classificationLabel}</span>
+    <details style={{ marginTop: "0.25rem" }}>
+      <summary>Qualidade de conteúdo / ASR</summary>
+      <div><strong>Decisão:</strong> {quality.outcomeLabel}</div>
+      <div><strong>Classificação:</strong> {quality.classificationLabel}</div>
+      <div><strong>Quality retry:</strong> {quality.retryLabel}</div>
+      <dl style={{ display: "grid", gridTemplateColumns: "max-content max-content", gap: "0.15rem 0.75rem" }}>
+        {quality.metrics.map(([label, value]) => <div key={label} style={{ display: "contents" }}>
+          <dt>{label}</dt><dd style={{ margin: 0 }}>{value}</dd>
+        </div>)}
+      </dl>
+      {quality.mismatches.length > 0 && <details>
+        <summary>Divergências locais ({quality.mismatches.length})</summary>
+        <ul>
+          {quality.mismatches.map((item, index) => <li key={`${item.expected}:${item.observed}:${index}`}>
+            {item.expected} → {item.observed}{item.occurrences > 1 ? ` (${item.occurrences}x)` : ""}
+          </li>)}
+        </ul>
+        <small>Diagnóstico para revisão humana; nenhuma regra é promovida automaticamente.</small>
+      </details>}
+      {quality.chunks.length > 0 && <details>
+        <summary>Diagnóstico por chunk ({quality.chunks.length})</summary>
+        <table>
+          <thead><tr><th>#</th><th>Classificação</th><th>WER</th><th>Cobertura estrutural</th></tr></thead>
+          <tbody>{quality.chunks.map((chunk) => <tr key={chunk.index}>
+            <td>{chunk.index + 1}</td><td>{chunk.classification}</td>
+            <td>{chunk.wer}</td><td>{chunk.structuralCoverage}</td>
+          </tr>)}</tbody>
+        </table>
+      </details>}
+      {quality.asrTranscript && <details>
+        <summary>Transcrição ASR</summary>
+        <p>{quality.asrTranscript}</p>
+      </details>}
+    </details>
+  </>;
 }
 
 export default function WorkflowDetail() {
@@ -387,15 +447,25 @@ export default function WorkflowDetail() {
                           #{take.attempt_index} {take.kind} — {take.status}, seed {take.resolved_seed ?? take.requested_seed ?? "—"}
                           {take.error_category ? ` — ${take.error_category}: ${take.error_message || ""}` : ""}
                           {take.is_current ? " (atual)" : ""}
-                          {take.quality_status ? ` — cobertura: ${take.quality_status}` : ""}
+                          <TakeQualityDetails report={take.content_quality} />
                           {take.synthesis_text ? <details>
                             <summary>Proveniência do take</summary>
                             <div>Canônico: {take.canonical_text || "—"}</div>
                             <div>Normalizado: {take.normalized_text || "—"}</div>
                             <div>Síntese: {take.synthesis_text}</div>
+                            <div>Normalizador: {take.text_normalizer_version || "—"} / {take.text_normalizer_identity || "—"}</div>
+                            <div>Lexicon: {take.pronunciation_glossary_identity || "—"}</div>
                             {take.pronunciation_replacements?.length ? (
                               <div>Pronúncias: {take.pronunciation_replacements.map(formatPronunciation).join(", ")}</div>
                             ) : null}
+                            <div>Voz: {take.voice_profile || "—"} / {take.voice_profile_identity || "—"}</div>
+                            <div>Clone: {metadataText(take.provider_metadata, "voice_clone_mode")}</div>
+                            <div>Referência: {metadataText(take.provider_metadata, "voice_reference_id")} / {metadataText(take.provider_metadata, "voice_reference_sha256")}</div>
+                            <div>Geração: {take.generation_profile || "—"} / {take.generation_profile_identity || "—"}</div>
+                            <div>Modelo: {take.model_id || "—"} / {take.model_revision || "—"}</div>
+                            <div>Seeds: solicitado {take.requested_seed ?? "—"}; resolvido {take.resolved_seed ?? "—"}; chunks {chunkSeeds(take.provider_metadata)}</div>
+                            <div>Chunking: {take.voice_chunking_identity || take.chunking_identity || "—"}</div>
+                            <div>Artifact: {take.audio_sha256 || "—"}; {take.audio_duration_seconds?.toFixed(3) ?? "—"}s; {take.audio_sample_rate ?? "—"} Hz; {take.audio_channels ?? "—"} canal(is); {take.audio_subtype || "—"}</div>
                           </details> : null}
                         </li>
                       ))}

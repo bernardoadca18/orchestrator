@@ -575,6 +575,53 @@ async def test_missing_spoken_content_retries_before_take_becomes_active(
 
 
 @pytest.mark.asyncio
+async def test_local_pronunciation_disagreement_is_accepted_without_quality_retry(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = tmp_path / "glossary.yaml"
+    glossary.write_text(
+        "version: '1'\nglobal: {GTA: Gê Tê Á}\nprojects: {}\n",
+        encoding="utf-8",
+    )
+    canonical = (
+        "Em 2008, GTA IV apresentou o motor atualizado. "
+        "Depois os veículos atravessaram a cidade no Xbox 360. "
+        "No final a missão continuou normalmente e confirmou todo o objetivo."
+    )
+    asr = (
+        "Em 2008, GTA Aive apresentou o môtór atualizado. "
+        "Depois os vaículos atravessaram a cidade no ixbox trezentos e sessenta. "
+        "No final a missão continuou normalmente e confirmou todo o objetivo."
+    )
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": canonical}]},
+    )
+    repo = FakeRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    config = _config(tmp_path, glossary)
+    config.audio_take_content_validation_enabled = True
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=ScriptedTranscriptionProvider([asr]),
+        alignment_service_factory=lambda session: FakeAlignmentService(),  # type: ignore[arg-type]
+    )
+    service.repo = repo
+
+    await service.process(workflow.id)
+
+    assert workflow.status == "audio_concluido"
+    assert len(voice.created) == 1
+    assert repo.blocks[0].generation_attempt == 0
+    assert repo.blocks[0].generation_attempt_history is None
+
+
+@pytest.mark.asyncio
 async def test_content_quality_retry_is_bounded(tmp_path: Path, write_tone) -> None:
     tone = write_tone(tmp_path / "voice.wav", duration=1.0)
     glossary = _write_glossary(tmp_path)

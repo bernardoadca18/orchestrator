@@ -45,3 +45,9 @@ inspect the workflow ID before running it. Creating a workflow from an approved 
 
 Known limitations remain: speaker drift can occur, ASR is not speaker verification, pronunciation
 promotion stays a separate reviewed workflow, and post-processing is not part of this freeze.
+
+The pinned runtime deliberately uses `sdpa`; `flash-attn is not installed` is therefore an optional
+capability warning, not a readiness failure. The production artifact path uses the in-process WAV
+stack and does not invoke the SoX executable; an upstream `sox: not found` capability probe is also
+non-blocking for this path. Neither warning justifies changing attention or installing an unused
+binary merely to silence startup output.

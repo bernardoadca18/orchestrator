@@ -81,17 +81,14 @@ class NarrationSpeechQualityPolicy:
         )
         catastrophic_blocks = sum(coverage < self.hard_block_coverage for coverage in coverages)
         repeated = self._has_catastrophic_repetition(asr_words)
-        reasons: list[str] = []
+        blocking_reasons: list[str] = []
+        warning_reasons: list[str] = []
         if not block_alignments:
-            reasons.append("no_alignment_blocks")
+            blocking_reasons.append("no_alignment_blocks")
         if no_words:
-            reasons.append("non_empty_block_without_asr_words")
-        if catastrophic_blocks:
-            reasons.append("catastrophic_block_coverage")
-        if coverages and average < self.minimum_speech_coverage:
-            reasons.append("average_synthesis_asr_coverage_below_threshold")
+            blocking_reasons.append("non_empty_block_without_asr_words")
         if repeated:
-            reasons.append("catastrophic_repeated_asr_run")
+            blocking_reasons.append("catastrophic_repeated_asr_run")
         content = None
         if synthesis_text is not None and asr_text is not None:
             content = analyze_content_coverage(
@@ -100,17 +97,37 @@ class NarrationSpeechQualityPolicy:
                 thresholds=self.content_thresholds,
             )
             if content.status == "rejected":
-                reasons.append("content_coverage_rejected")
-        if reasons:
+                blocking_reasons.append("content_coverage_rejected")
+            elif content.classification != "content_complete":
+                warning_reasons.append(f"content_{content.classification}")
+        if catastrophic_blocks:
+            target = (
+                blocking_reasons
+                if content is None
+                else warning_reasons
+            )
+            target.append("catastrophic_block_coverage")
+        if coverages and average < self.minimum_speech_coverage:
+            target = (
+                blocking_reasons
+                if content is None
+                else warning_reasons
+            )
+            target.append("average_synthesis_asr_coverage_below_threshold")
+        if blocking_reasons:
             status: Literal["healthy", "warning", "invalid"] = "invalid"
-        elif any(coverage < self.minimum_speech_coverage for coverage in coverages):
+        elif warning_reasons or any(
+            coverage < self.minimum_speech_coverage for coverage in coverages
+        ):
             status = "warning"
-            reasons.append("isolated_low_coverage_block")
+            if not warning_reasons:
+                warning_reasons.append("isolated_low_coverage_block")
         else:
             status = "healthy"
+        reasons = (*blocking_reasons, *warning_reasons)
         return NarrationQualityDecision(
             status=status,
-            reasons=tuple(reasons),
+            reasons=reasons,
             metrics={
                 "block_count": len(block_alignments),
                 "average_synthesis_asr_coverage": round(average, 6),
@@ -120,6 +137,8 @@ class NarrationSpeechQualityPolicy:
                 "no_word_block_count": no_words,
                 "catastrophic_block_count": catastrophic_blocks,
                 "catastrophic_repetition": repeated,
+                "blocking_reasons": blocking_reasons,
+                "warning_reasons": warning_reasons,
                 "content_coverage": content.to_dict() if content is not None else None,
             },
             policy_version=self.version,
