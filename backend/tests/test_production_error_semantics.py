@@ -2,8 +2,15 @@ from __future__ import annotations
 
 import datetime as dt
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
-from app.repositories.workflow_repository import evolve_production_error_history
+import pytest
+
+from app.repositories.workflow_repository import (
+    WorkflowRepository,
+    evolve_production_error_history,
+)
 from app.services.production_orchestration_service import ProductionOrchestrationService
 
 
@@ -70,3 +77,31 @@ def test_quality_unvalidated_audio_with_valid_artifact_is_reusable() -> None:
         duracao_audio_segundos=359.5,
     )
     assert ProductionOrchestrationService._audio_is_reusable(workflow)
+
+
+def test_video_failure_does_not_turn_valid_audio_into_active_audio_error() -> None:
+    workflow = SimpleNamespace(
+        status="audio_concluido",
+        audio_phase="completed",
+        audio_final_path="/data/audio/final.wav",
+        audio_final_sha256="b" * 64,
+        duracao_audio_segundos=359.5,
+        production_status="failed",
+        production_phase="render",
+        production_error_category="composer:render_failure",
+    )
+    assert ProductionOrchestrationService._audio_is_reusable(workflow)
+    assert workflow.production_error_category.startswith("composer:")
+
+
+@pytest.mark.asyncio
+async def test_relationship_reload_repopulates_stale_identity_map() -> None:
+    session = AsyncMock()
+    result = AsyncMock()
+    result.scalar_one_or_none = lambda: None
+    session.execute.return_value = result
+
+    await WorkflowRepository(session).obter_por_id(uuid4(), com_blocos=True)
+
+    statement = session.execute.await_args.args[0]
+    assert statement.get_execution_options()["populate_existing"] is True

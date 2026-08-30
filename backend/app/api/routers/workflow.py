@@ -649,6 +649,16 @@ async def repetir_workflow(
         raise HTTPException(404, "Workflow não encontrado")
     if wf.production_status == "failed":
         if wf.production_phase == "audio":
+            if ProductionOrchestrationService._audio_is_reusable(wf):
+                # A Stage 17 false/stale audio error must not demote a valid final
+                # narration to the legacy `agendada` state or spend GPU time again.
+                # Queue normal orchestration; it will verify/reuse audio and resume
+                # at narration alignment.
+                await ProductionOrchestrationService(session).explicit_retry(wf)
+                processar_producao_workflow.delay(str(wf.id))
+                resumed = await repo.obter_por_id(wf.id)
+                assert resumed is not None
+                return resumed
             if wf.tentativas >= wf.max_tentativas:
                 raise HTTPException(400, f"Limite de tentativas atingido ({wf.max_tentativas})")
             await repo.incrementar_tentativa(wf.id)

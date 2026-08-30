@@ -9,7 +9,12 @@ import httpx
 import pytest
 from fastapi import HTTPException, Request
 
-from app.api.routers.workflow import baixar_video_final, obter_render, retomar_producao
+from app.api.routers.workflow import (
+    baixar_video_final,
+    obter_render,
+    repetir_workflow,
+    retomar_producao,
+)
 from app.schemas.workflow import WorkflowOut
 
 
@@ -137,3 +142,28 @@ def test_audio_availability_is_artifact_based_after_downstream_failure() -> None
         audio_final_byte_size=100,
     )
     assert workflow.audio_available is True
+
+
+@pytest.mark.asyncio
+async def test_retry_reuses_valid_final_audio_without_legacy_demotion() -> None:
+    workflow = _workflow("failed")
+    workflow.production_phase = "audio"
+    repository = MagicMock()
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    repository.incrementar_tentativa = AsyncMock()
+    service = MagicMock()
+    service.explicit_retry = AsyncMock()
+    service_class = MagicMock(return_value=service)
+    service_class._audio_is_reusable.return_value = True
+
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch("app.api.routers.workflow.ProductionOrchestrationService", service_class),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+    ):
+        result = await repetir_workflow(workflow.id, MagicMock())
+
+    assert result is workflow
+    repository.incrementar_tentativa.assert_not_awaited()
+    service.explicit_retry.assert_awaited_once_with(workflow)
+    enqueue.assert_called_once_with(str(workflow.id))

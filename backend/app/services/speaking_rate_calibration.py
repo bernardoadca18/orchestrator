@@ -46,6 +46,8 @@ class SpeakingRateCalibrationService:
                 AudioBlocoTake.is_current.is_(True),
                 AudioBlocoTake.audio_duration_seconds.is_not(None),
                 AudioBlocoTake.synthesis_text.is_not(None),
+                AudioBlocoTake.voice_profile == self.config.voice_profile,
+                AudioBlocoTake.generation_profile == self.config.voice_generation_profile,
             )
             .order_by(AudioBlocoTake.completed_at.desc())
             .limit(200)
