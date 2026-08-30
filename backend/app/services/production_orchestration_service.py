@@ -434,7 +434,12 @@ class ProductionOrchestrationService:
     def _audio_is_reusable(workflow: WorkflowExecucao) -> bool:
         return bool(
             workflow.status == "audio_concluido"
-            and getattr(workflow, "audio_phase", "completed") == "completed"
+            # A valid consolidated artifact remains reusable when alignment/ASR
+            # could not validate it. The next Stage 17 phase owns that decision;
+            # treating it as an audio-generation failure discards valid work and
+            # creates a misleading active error.
+            and getattr(workflow, "audio_phase", "completed")
+            in {"completed", "quality_unvalidated"}
             and workflow.audio_final_path
             and workflow.audio_final_sha256
             and workflow.duracao_audio_segundos

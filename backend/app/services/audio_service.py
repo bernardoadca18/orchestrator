@@ -627,6 +627,34 @@ class AudioWorkflowService:
                 "inserted_pause_count": len(inserted_final_pauses),
                 "blocks": manifest_blocks,
             }
+            script_duration_contract = (workflow.roteiro_snapshot or {}).get(
+                "duration_contract"
+            )
+            if isinstance(script_duration_contract, dict):
+                target_duration = script_duration_contract.get("target_duration_seconds")
+                predicted_duration = script_duration_contract.get(
+                    "predicted_duration_seconds"
+                )
+                diagnostics_manifest["editorial_duration_feedback"] = {
+                    "version": "actual_narration_duration_feedback_v1",
+                    "target_duration_seconds": target_duration,
+                    "predicted_duration_seconds": predicted_duration,
+                    "actual_narration_duration_seconds": final_metadata.duration_seconds,
+                    "actual_delta_seconds": (
+                        round(final_metadata.duration_seconds - float(target_duration), 3)
+                        if target_duration is not None
+                        else None
+                    ),
+                    "actual_delta_ratio": (
+                        round(final_metadata.duration_seconds / float(target_duration) - 1, 6)
+                        if target_duration
+                        else None
+                    ),
+                    "calibration_identity": (
+                        script_duration_contract.get("calibration") or {}
+                    ).get("identity"),
+                    "duration_contract_identity": script_duration_contract.get("identity"),
+                }
             await self.repo.atualizar_status(
                 workflow.id,
                 "gerando_audio",

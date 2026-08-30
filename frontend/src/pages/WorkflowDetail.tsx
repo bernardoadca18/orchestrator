@@ -268,7 +268,9 @@ export default function WorkflowDetail() {
             <span>{state === "completed" ? "✓" : index + 1}</span>
             <strong>{label}</strong>
             <small>{state.replace("_", " ")}</small>
-            <em>{index === currentStage && workflow.production_error_message
+            <em>{index === currentStage
+              && ["failed", "blocked"].includes(workflow.production_status || "")
+              && workflow.production_error_message
               ? workflow.production_error_message
               : stageDetail(index)}</em>
           </div>;
@@ -292,8 +294,22 @@ export default function WorkflowDetail() {
         {workflow.erro_mensagem && (
           <p style={{ color: "crimson" }}><strong>Erro:</strong> {workflow.erro_mensagem}</p>
         )}
-        {workflow.production_error_message && (
+        {["failed", "blocked"].includes(workflow.production_status || "")
+          && workflow.production_error_message && (
           <p style={{ color: "crimson" }}><strong>Erro de produção:</strong> {workflow.production_error_category}: {workflow.production_error_message}</p>
+        )}
+        {(workflow.production_error_history?.length || 0) > 0 && (
+          <details>
+            <summary>Histórico de erros ({workflow.production_error_history?.length})</summary>
+            <ul>
+              {workflow.production_error_history?.map((error, index) => (
+                <li key={`${error.occurred_at}-${index}`}>
+                  <strong>{error.phase} / {error.category}</strong>: {error.message}
+                  {error.recovered_at && <span> — recuperado em {error.recovery_phase}</span>}
+                </li>
+              ))}
+            </ul>
+          </details>
         )}
 
         {render && (

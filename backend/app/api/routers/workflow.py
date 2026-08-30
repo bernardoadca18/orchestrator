@@ -81,6 +81,8 @@ from app.services.production_timeline_service import (
     ProductionTimelineNotFoundError,
     ProductionTimelineService,
 )
+from app.services.pronunciation_candidates import PronunciationCandidateService
+from app.services.speaking_rate_calibration import SpeakingRateCalibrationService
 from app.services.visual_director_service import (
     VisualDirectorInputError,
     VisualDirectorNotFoundError,
@@ -90,6 +92,28 @@ from app.tasks.audio_tasks import gerar_audio_workflow
 from app.tasks.production_tasks import processar_producao_workflow
 
 router = APIRouter()
+
+
+@router.get("/calibration/speaking-rate")
+async def get_speaking_rate_calibration(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    production_profile: str | None = None,
+):
+    """Expose a reproducible accepted-take calibration; never invokes TTS."""
+
+    return await SpeakingRateCalibrationService(db).snapshot(production_profile)
+
+
+@router.get("/pronunciation/candidates")
+async def get_pronunciation_candidates(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 100,
+):
+    """Aggregate recurring real-take disagreements for manual Pronunciation Lab review."""
+
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 500")
+    return await PronunciationCandidateService(db).aggregate(limit)
 
 
 def _render_response(render: WorkflowRender) -> WorkflowRenderOut:

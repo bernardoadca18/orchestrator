@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     voice_generation_profile: str = "narration_v2"
     voice_language: str = "Portuguese"
     voice_seed: int = 303
+    speaking_rate_fallback_words_per_minute: float = 145.0
+    speaking_rate_fallback_chars_per_second: float = 14.5
     voice_poll_interval_seconds: float = 5.0
     voice_job_timeout_seconds: float = 1800.0
     voice_create_timeout_seconds: float = 30.0
@@ -89,6 +91,7 @@ class Settings(BaseSettings):
     transcription_device: str = "cpu"
     transcription_compute_type: str = "int8"
     transcription_language: str | None = None
+    transcription_local_files_only: bool = False
     transcription_model_lifetime: Literal["resident", "per_job"] = "resident"
 
     narration_alignment_strategy_version: str = "narration_alignment_v1"

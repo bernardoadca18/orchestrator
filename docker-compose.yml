@@ -52,6 +52,7 @@ services:
       VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
       MEDIA_INDEXER_API_URL: ${MEDIA_INDEXER_API_URL_DOCKER:-http://host.docker.internal:8012}
       VIDEO_COMPOSER_API_URL: ${VIDEO_COMPOSER_API_URL_DOCKER:-http://host.docker.internal:8013}
+      TRANSCRIPTION_LOCAL_FILES_ONLY: ${TRANSCRIPTION_LOCAL_FILES_ONLY:-false}
     ports:
       - "8011:8000"
     depends_on:
@@ -87,6 +88,7 @@ services:
       VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
       MEDIA_INDEXER_API_URL: ${MEDIA_INDEXER_API_URL_DOCKER:-http://host.docker.internal:8012}
       VIDEO_COMPOSER_API_URL: ${VIDEO_COMPOSER_API_URL_DOCKER:-http://host.docker.internal:8013}
+      TRANSCRIPTION_LOCAL_FILES_ONLY: ${TRANSCRIPTION_LOCAL_FILES_ONLY:-false}
     command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --concurrency=1 -l info
     depends_on:
       db:

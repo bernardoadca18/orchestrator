@@ -86,6 +86,7 @@ class FasterWhisperNarrationProvider:
             self.config.transcription_model,
             device=self.config.transcription_device,
             compute_type=self.config.transcription_compute_type,
+            local_files_only=self.config.transcription_local_files_only,
         )
         with self._state_lock:
             self._model_loads += 1
@@ -101,6 +102,7 @@ class FasterWhisperNarrationProvider:
                         self.config.transcription_model,
                         device=self.config.transcription_device,
                         compute_type=self.config.transcription_compute_type,
+                        local_files_only=self.config.transcription_local_files_only,
                     )
                     self._model_loads += 1
         return self._model
@@ -159,6 +161,7 @@ class FasterWhisperNarrationProvider:
                 "model": self.config.transcription_model,
                 "device": self.config.transcription_device,
                 "compute_type": self.config.transcription_compute_type,
+                "local_files_only": self.config.transcription_local_files_only,
                 "resident_loaded": self._model is not None,
                 "active_transcriptions": self._active_transcriptions,
                 "model_loads": self._model_loads,

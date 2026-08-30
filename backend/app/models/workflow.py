@@ -131,6 +131,7 @@ class WorkflowExecucao(Base):
     production_phase: Mapped[str | None] = mapped_column(String(32), nullable=True)
     production_error_category: Mapped[str | None] = mapped_column(String(100), nullable=True)
     production_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    production_error_history: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     production_started_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

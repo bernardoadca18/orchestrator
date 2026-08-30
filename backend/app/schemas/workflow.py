@@ -141,6 +141,7 @@ class WorkflowOut(BaseModel):
     production_phase: str | None = None
     production_error_category: str | None = None
     production_error_message: str | None = None
+    production_error_history: list[dict] | None = None
     production_started_at: dt.datetime | None = None
     production_completed_at: dt.datetime | None = None
     criado_em: dt.datetime

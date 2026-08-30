@@ -34,7 +34,9 @@ def test_faster_whisper_model_is_lazy_cached_and_words_are_preserved(tmp_path: P
     with patch("faster_whisper.WhisperModel", return_value=model) as constructor:
         first = provider.transcribe(tmp_path / "first.wav")
         provider.transcribe(tmp_path / "second.wav")
-    constructor.assert_called_once_with("tiny", device="cpu", compute_type="int8")
+    constructor.assert_called_once_with(
+        "tiny", device="cpu", compute_type="int8", local_files_only=False
+    )
     assert first.text == "Olá mundo."
     assert [word.word for word in first.words] == ["Olá", "mundo"]
     assert first.language == "pt"
@@ -114,6 +116,7 @@ def test_per_job_lifetime_releases_each_model_reference(tmp_path: Path) -> None:
         "model": "tiny",
         "device": "cpu",
         "compute_type": "int8",
+        "local_files_only": False,
         "resident_loaded": False,
         "active_transcriptions": 0,
         "model_loads": 2,

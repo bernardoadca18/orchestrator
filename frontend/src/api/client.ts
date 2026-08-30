@@ -168,6 +168,16 @@ export interface Workflow {
   production_phase: string | null;
   production_error_category: string | null;
   production_error_message: string | null;
+  production_error_history: Array<{
+    category: string;
+    message: string;
+    status: string;
+    phase: string;
+    occurred_at: string;
+    recovered_at?: string | null;
+    recovery_status?: string;
+    recovery_phase?: string;
+  }> | null;
   production_started_at: string | null;
   production_completed_at: string | null;
   criado_em: string;

@@ -12,6 +12,52 @@ from sqlalchemy.orm import selectinload
 from app.models.workflow import AudioBloco, AudioBlocoTake, TranscricaoAudio, WorkflowExecucao
 
 
+def evolve_production_error_history(
+    history_value: list[dict] | None,
+    *,
+    previous_category: str | None,
+    previous_message: str | None,
+    next_category: str | None,
+    next_message: str | None,
+    status: str,
+    phase: str,
+    now: dt.datetime,
+) -> list[dict] | None:
+    """Keep recovered failures auditable without presenting them as active."""
+
+    history = [dict(item) for item in (history_value or [])]
+    if next_category and next_message:
+        last = history[-1] if history else None
+        if not (
+            last
+            and last.get("category") == next_category
+            and last.get("message") == next_message
+            and last.get("recovered_at") is None
+        ):
+            history.append(
+                {
+                    "category": next_category,
+                    "message": next_message,
+                    "status": status,
+                    "phase": phase,
+                    "occurred_at": now.isoformat(),
+                    "recovered_at": None,
+                }
+            )
+    elif previous_category and previous_message:
+        for item in reversed(history):
+            if (
+                item.get("category") == previous_category
+                and item.get("message") == previous_message
+                and item.get("recovered_at") is None
+            ):
+                item["recovered_at"] = now.isoformat()
+                item["recovery_status"] = status
+                item["recovery_phase"] = phase
+                break
+    return history or None
+
+
 def _take_text_provenance(block: AudioBloco) -> dict[str, object]:
     """Snapshot current derivation inputs; old takes must not follow mutable block pointers."""
     return {
@@ -80,6 +126,12 @@ class WorkflowRepository:
             )
         if com_transcricao:
             stmt = stmt.options(selectinload(WorkflowExecucao.transcricao))
+        if com_blocos or com_transcricao:
+            # The audio workflow creates blocks in the same AsyncSession after an
+            # earlier load observed an empty collection. Re-populate eager
+            # relationships so the identity map cannot hide newly committed rows
+            # from alignment and consolidated-ASR stages.
+            stmt = stmt.execution_options(populate_existing=True)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def listar(self, status: str | None = None) -> Sequence[WorkflowExecucao]:
@@ -120,10 +172,24 @@ class WorkflowRepository:
         wf = await self.obter_por_id(workflow_id)
         if wf is None:
             return None
+        now = dt.datetime.now(dt.UTC)
+        previous_category = wf.production_error_category
+        previous_message = wf.production_error_message
+        history = evolve_production_error_history(
+            wf.production_error_history,
+            previous_category=previous_category,
+            previous_message=previous_message,
+            next_category=error_category,
+            next_message=error_message,
+            status=status,
+            phase=phase,
+            now=now,
+        )
         wf.production_status = status
         wf.production_phase = phase
         wf.production_error_category = error_category
         wf.production_error_message = error_message
+        wf.production_error_history = history
         if start and wf.production_started_at is None:
             wf.production_started_at = dt.datetime.now(dt.UTC)
         if complete:
