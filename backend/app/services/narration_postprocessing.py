@@ -20,6 +20,7 @@ from app.services.mastering import MasteringError, measure_loudness_and_true_pea
 from app.services.production_audio import inspect_wav
 
 POSTPROCESS_IMPLEMENTATION_VERSION = "ffmpeg_narration_stem_post_v1"
+TEMPO_IMPLEMENTATION_VERSION = "ffmpeg_atempo_candidate_v1"
 _LOUDNORM_JSON = re.compile(r'\{\s*"input_i".*?\}', re.DOTALL)
 
 
@@ -75,9 +76,7 @@ def _ffmpeg() -> str:
 
 
 def _ffmpeg_version(executable: str) -> str:
-    result = subprocess.run(
-        [executable, "-version"], capture_output=True, text=True, check=False
-    )
+    result = subprocess.run([executable, "-version"], capture_output=True, text=True, check=False)
     if result.returncode != 0 or not result.stdout:
         raise MasteringError("FFmpeg version could not be determined")
     return result.stdout.splitlines()[0]
@@ -279,6 +278,97 @@ def process_narration_stem(
             "after": output_metrics,
             "processing_seconds": round(time.monotonic() - started, 3),
             "status": "passed",
+        }
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def process_narration_tempo_candidate(
+    source: Path,
+    destination: Path,
+    *,
+    tempo_factor: float,
+) -> dict[str, object]:
+    """Create a pitch-preserving pacing candidate; never changes the raw source."""
+
+    if not 1.0 <= tempo_factor <= 1.5:
+        raise ValueError("tempo_factor must be between 1.0 and 1.5 for this conservative harness")
+    started = time.monotonic()
+    source_before = inspect_wav(source)
+    before = _metrics(source)
+    executable = _ffmpeg()
+    tool_version = _ffmpeg_version(executable)
+    identity_payload = {
+        "implementation": TEMPO_IMPLEMENTATION_VERSION,
+        "tempo_factor": round(tempo_factor, 6),
+        "input_sha256": source_before.sha256,
+        "input_sample_rate": source_before.sample_rate,
+        "tool_version": tool_version,
+    }
+    identity = hashlib.sha256(
+        json.dumps(identity_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp.wav"
+    try:
+        result = subprocess.run(
+            [
+                executable,
+                "-nostdin",
+                "-hide_banner",
+                "-y",
+                "-i",
+                str(source),
+                "-map",
+                "0:a:0",
+                "-af",
+                f"atempo={tempo_factor:.6f}",
+                "-ar",
+                str(source_before.sample_rate),
+                "-ac",
+                str(source_before.channels),
+                "-c:a",
+                "pcm_s16le",
+                str(temporary),
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise MasteringError("FFmpeg tempo candidate processing failed")
+        output = inspect_wav(temporary)
+        after = _metrics(temporary)
+        source_after = inspect_wav(source)
+        if source_after.sha256 != source_before.sha256:
+            raise MasteringError("raw narration changed during tempo processing")
+        expected_duration = source_before.duration_seconds / tempo_factor
+        if abs(output.duration_seconds - expected_duration) > max(0.08, expected_duration * 0.002):
+            raise MasteringError("tempo candidate duration ratio is outside tolerance")
+        if (
+            output.sample_rate != source_before.sample_rate
+            or output.channels != source_before.channels
+        ):
+            raise MasteringError("tempo candidate changed the audio format")
+        if output.clipping_sample_count:
+            raise MasteringError("tempo candidate introduced clipping")
+        os.replace(temporary, destination)
+        published = inspect_wav(destination)
+        return {
+            "version": TEMPO_IMPLEMENTATION_VERSION,
+            "identity": identity,
+            "tempo_factor": tempo_factor,
+            "tool_version": tool_version,
+            "input_sha256": source_before.sha256,
+            "output_sha256": published.sha256,
+            "raw_tts_duration_seconds": None,
+            "assembled_raw_duration_seconds": source_before.duration_seconds,
+            "mastered_narration_duration_seconds": published.duration_seconds,
+            "before": before,
+            "after": after,
+            "processing_seconds": round(time.monotonic() - started, 3),
+            "status": "passed",
+            "experimental_not_promoted": True,
         }
     finally:
         temporary.unlink(missing_ok=True)

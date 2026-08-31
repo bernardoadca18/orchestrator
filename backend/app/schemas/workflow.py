@@ -147,7 +147,7 @@ class WorkflowOut(BaseModel):
     criado_em: dt.datetime
     atualizado_em: dt.datetime
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def audio_available(self) -> bool:
         return bool(
@@ -161,27 +161,27 @@ class WorkflowOut(BaseModel):
 class WorkflowDetailOut(WorkflowOut):
     blocos: list[AudioBlocoOut] = Field(default_factory=list)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def total_blocos(self) -> int:
         return len(self.blocos)
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def blocos_concluidos(self) -> int:
         return sum(1 for b in self.blocos if b.status == "concluido")
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def blocos_pendentes(self) -> int:
         return sum(1 for b in self.blocos if b.status == "pendente")
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def blocos_gerando(self) -> int:
         return sum(1 for b in self.blocos if b.status == "gerando")
 
-    @computed_field
+    @computed_field  # type: ignore[prop-decorator]
     @property
     def blocos_erro(self) -> int:
         return sum(1 for b in self.blocos if b.status == "erro")

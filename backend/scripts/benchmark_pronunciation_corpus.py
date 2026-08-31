@@ -37,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", type=Path, default=DEFAULT_PRONUNCIATION_CORPUS_PATH)
     parser.add_argument("--voice-profile", required=True)
-    parser.add_argument("--generation-profile", default="narration_v1")
+    parser.add_argument("--generation-profile", default="narration_v2")
     parser.add_argument(
         "--output", type=Path, default=Path("/data/audio/benchmarks/pronunciation-lab")
     )
@@ -72,16 +72,20 @@ def main(argv: list[str] | None = None) -> int:
             gateway = VoiceClientLabGateway(client)
             runner = PronunciationLabRunner(gateway)
             for target in targets:
-                candidate = LabCandidate(
-                    id="manual.reference-term",
-                    text=target["term"],
-                    strategy="manual",
-                    strategy_version="manual_v1",
+                values = target.get("candidates") or (target["term"],)
+                candidates = tuple(
+                    LabCandidate(
+                        id=f"manual.corpus-{index:02d}",
+                        text=value,
+                        strategy="versioned_corpus",
+                        strategy_version=corpus["version"],
+                    )
+                    for index, value in enumerate(values, start=1)
                 )
                 spec = LabSpec(
                     target_term=target["term"],
                     contexts=tuple(target["contexts"]),
-                    candidates=(candidate,),
+                    candidates=candidates,
                     language="Portuguese",
                     locale="pt-BR",
                     voice_profile=args.voice_profile,

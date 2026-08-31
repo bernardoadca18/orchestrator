@@ -20,6 +20,7 @@ from app.services.pronunciation import (
     PronunciationConfigurationError,
     PronunciationMatchMode,
     PronunciationPreprocessor,
+    pronunciation_preflight,
 )
 from app.services.pronunciation_lab import (
     InitialismCandidateSource,
@@ -64,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("--project")
     resolve.add_argument("--locale", default=DEFAULT_LOCALE)
 
+    preflight = commands.add_parser("preflight", help="inspect risky terms without changing text")
+    preflight.add_argument("--text", required=True)
+    preflight.add_argument("--project")
+    preflight.add_argument("--locale", default=DEFAULT_LOCALE)
+
     lab = commands.add_parser("lab-run", help="run a controlled Qwen candidate matrix")
     lab.add_argument("--target", required=True)
     lab.add_argument("--context", action="append", required=True)
@@ -71,8 +77,8 @@ def build_parser() -> argparse.ArgumentParser:
     lab.add_argument("--initialism-candidates", action="store_true")
     lab.add_argument("--language", default="Portuguese")
     lab.add_argument("--locale", default=DEFAULT_LOCALE)
-    lab.add_argument("--voice", default="bernardo_v1")
-    lab.add_argument("--generation", default="narration_temp080")
+    lab.add_argument("--voice", default="bernardo_xvec_v2")
+    lab.add_argument("--generation", default="narration_v2")
     lab.add_argument("--seeds", nargs="+", type=int, default=[101])
     lab.add_argument("--base-url", default=settings.voice_api_url)
     lab.add_argument("--output", type=Path, default=Path("pronunciation-lab-results"))
@@ -181,6 +187,17 @@ def _dispatch(args: argparse.Namespace) -> int:
                 "lexicon_identity": result.lexicon_identity,
                 "replacements": result.applied_replacements,
             }
+        )
+        return 0
+    if args.command == "preflight":
+        resolver = PronunciationPreprocessor.load(args.lexicon)
+        _print_json(
+            pronunciation_preflight(
+                args.text,
+                resolver,
+                project=args.project,
+                locale=args.locale,
+            )
         )
         return 0
     if args.command == "lab-run":

@@ -30,6 +30,7 @@ from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
     AudioActionIn,
+    MediaScopeOut,
     NarrationAlignmentEnsureOut,
     NarrationBlockAlignmentOut,
     NarrationTimelineAudioOut,
@@ -276,7 +277,7 @@ def _visual_plan_response(plan: VisualPlan) -> VisualPlanOut:
         request_fingerprint=plan.request_fingerprint,
         fingerprint=plan.fingerprint,
         status=plan.status,
-        media_scope=plan.media_scope,
+        media_scope=(MediaScopeOut.model_validate(plan.media_scope) if plan.media_scope else None),
         media_index_provenance=plan.media_index_provenance,
         total_queries=plan.total_queries,
         resolved_queries=plan.resolved_queries,
@@ -452,7 +453,7 @@ async def listar_roteiros_disponiveis():
 async def criar_workflow(
     payload: WorkflowCreateIn, session: Annotated[AsyncSession, Depends(get_db)]
 ):
-    from psycopg2.errors import UniqueViolation
+    from psycopg2.errors import UniqueViolation  # type: ignore[import-untyped]
     from sqlalchemy.exc import IntegrityError
 
     repo = WorkflowRepository(session)

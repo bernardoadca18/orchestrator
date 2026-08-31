@@ -82,17 +82,17 @@ async def dashboard_stats() -> DashboardStats:
         )
         completed_blocks = (
             await session.scalar(
-                select(func.count()).select_from(AudioBloco).where(
-                    AudioBloco.status == "concluido", AudioBloco.atualizado_em >= since
-                )
+                select(func.count())
+                .select_from(AudioBloco)
+                .where(AudioBloco.status == "concluido", AudioBloco.atualizado_em >= since)
             )
             or 0
         )
         failed_blocks = (
             await session.scalar(
-                select(func.count()).select_from(AudioBloco).where(
-                    AudioBloco.status == "erro", AudioBloco.atualizado_em >= since
-                )
+                select(func.count())
+                .select_from(AudioBloco)
+                .where(AudioBloco.status == "erro", AudioBloco.atualizado_em >= since)
             )
             or 0
         )
@@ -118,17 +118,17 @@ async def dashboard_stats() -> DashboardStats:
         )
         failed_takes = (
             await session.scalar(
-                select(func.count()).select_from(AudioBlocoTake).where(
-                    AudioBlocoTake.status == "failed", AudioBlocoTake.completed_at >= since
-                )
+                select(func.count())
+                .select_from(AudioBlocoTake)
+                .where(AudioBlocoTake.status == "failed", AudioBlocoTake.completed_at >= since)
             )
             or 0
         )
         quality_retries = (
             await session.scalar(
-                select(func.count()).select_from(AudioBlocoTake).where(
-                    AudioBlocoTake.kind == "quality_retry", AudioBlocoTake.created_at >= since
-                )
+                select(func.count())
+                .select_from(AudioBlocoTake)
+                .where(AudioBlocoTake.kind == "quality_retry", AudioBlocoTake.created_at >= since)
             )
             or 0
         )
@@ -167,7 +167,9 @@ async def dashboard_stats() -> DashboardStats:
         )
         qa_total = (
             await session.scalar(
-                select(func.count()).select_from(ProductionQAReport).where(
+                select(func.count())
+                .select_from(ProductionQAReport)
+                .where(
                     ProductionQAReport.completed_at >= since,
                     ProductionQAReport.status.in_(
                         ["passed", "passed_with_warnings", "failed", "blocked"]
@@ -178,7 +180,9 @@ async def dashboard_stats() -> DashboardStats:
         )
         qa_success = (
             await session.scalar(
-                select(func.count()).select_from(ProductionQAReport).where(
+                select(func.count())
+                .select_from(ProductionQAReport)
+                .where(
                     ProductionQAReport.completed_at >= since,
                     ProductionQAReport.status.in_(["passed", "passed_with_warnings"]),
                 )
@@ -218,7 +222,5 @@ async def dashboard_stats() -> DashboardStats:
         render_factor_mean_24h=(
             round(float(render_factor), 3) if render_factor is not None else None
         ),
-        qa_success_rate_24h_percent=(
-            round(qa_success / qa_total * 100, 2) if qa_total else None
-        ),
+        qa_success_rate_24h_percent=(round(qa_success / qa_total * 100, 2) if qa_total else None),
     )

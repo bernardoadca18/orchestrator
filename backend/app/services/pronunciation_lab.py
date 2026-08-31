@@ -16,7 +16,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-import soundfile as sf
+import soundfile as sf  # type: ignore[import-untyped]
 
 from app.clients.voice_client import (
     VoiceClient,

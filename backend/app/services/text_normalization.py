@@ -8,7 +8,7 @@ import json
 import re
 from dataclasses import dataclass
 
-from num2words import num2words
+from num2words import num2words  # type: ignore[import-untyped]
 
 TEXT_NORMALIZER_VERSION = "pt_br_text_normalizer_v1"
 

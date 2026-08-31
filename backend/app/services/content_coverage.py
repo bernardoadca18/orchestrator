@@ -20,9 +20,7 @@ from app.services.text_normalization import PortugueseTextNormalizer
 
 CONTENT_COVERAGE_VERSION = "narration_content_coverage_v2"
 CONTENT_COMPARISON_NORMALIZATION_VERSION = "narration_content_comparison_pt_br_v1"
-_COMPARISON_NORMALIZER = PortugueseTextNormalizer(
-    version=CONTENT_COMPARISON_NORMALIZATION_VERSION
-)
+_COMPARISON_NORMALIZER = PortugueseTextNormalizer(version=CONTENT_COMPARISON_NORMALIZATION_VERSION)
 _SENTENCE_PATTERN = re.compile(r"[^.!?]+(?:[.!?]+|$)", re.UNICODE)
 
 ContentClassification = Literal[
@@ -50,9 +48,7 @@ class ContentCoverageThresholds:
         payload = json.dumps(
             {
                 "version": CONTENT_COVERAGE_VERSION,
-                "comparison_normalization_version": (
-                    CONTENT_COMPARISON_NORMALIZATION_VERSION
-                ),
+                "comparison_normalization_version": (CONTENT_COMPARISON_NORMALIZATION_VERSION),
                 "comparison_normalization_identity": _COMPARISON_NORMALIZER.identity,
                 **asdict(self),
             },
@@ -285,9 +281,7 @@ def _repetition_diagnostics(tokens: tuple[TextToken, ...]) -> tuple[float, list[
     return len(involved) / len(tokens) if tokens else 0.0, phrases[:10]
 
 
-def _out_of_order_count(
-    reference: tuple[TextToken, ...], hypothesis: tuple[TextToken, ...]
-) -> int:
+def _out_of_order_count(reference: tuple[TextToken, ...], hypothesis: tuple[TextToken, ...]) -> int:
     if len(reference) < 6 or len(hypothesis) < 6:
         return 0
     ref_values = [token.accentless for token in reference]
@@ -297,9 +291,7 @@ def _out_of_order_count(
     ref_counts = Counter(ref_ngrams)
     hyp_counts = Counter(hyp_ngrams)
     hypothesis_positions = {
-        phrase: index
-        for index, phrase in enumerate(hyp_ngrams)
-        if hyp_counts[phrase] == 1
+        phrase: index for index, phrase in enumerate(hyp_ngrams) if hyp_counts[phrase] == 1
     }
     ordered_hypothesis_positions = [
         hypothesis_positions[phrase]
@@ -402,9 +394,7 @@ def analyze_content_coverage(
     sentence_coverage, missing_sentences = _sentence_diagnostics(
         normalized_reference_text, reference, deleted_indexes
     )
-    disagreement_diagnostics = _disagreement_diagnostics(
-        operations, reference, hypothesis
-    )
+    disagreement_diagnostics = _disagreement_diagnostics(operations, reference, hypothesis)
 
     reasons: list[str] = []
     if deletion_ratio > policy.maximum_deletion_ratio:
@@ -454,11 +444,7 @@ def analyze_content_coverage(
         "rejected" if blocking else "unavailable" if inconclusive else "passed"
     )
     severity: Literal["none", "warning", "blocking"] = (
-        "blocking"
-        if blocking
-        else "none"
-        if classification == "content_complete"
-        else "warning"
+        "blocking" if blocking else "none" if classification == "content_complete" else "warning"
     )
     return ContentCoverageReport(
         status=status,

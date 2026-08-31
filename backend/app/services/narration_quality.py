@@ -101,18 +101,10 @@ class NarrationSpeechQualityPolicy:
             elif content.classification != "content_complete":
                 warning_reasons.append(f"content_{content.classification}")
         if catastrophic_blocks:
-            target = (
-                blocking_reasons
-                if content is None
-                else warning_reasons
-            )
+            target = blocking_reasons if content is None else warning_reasons
             target.append("catastrophic_block_coverage")
         if coverages and average < self.minimum_speech_coverage:
-            target = (
-                blocking_reasons
-                if content is None
-                else warning_reasons
-            )
+            target = blocking_reasons if content is None else warning_reasons
             target.append("average_synthesis_asr_coverage_below_threshold")
         if blocking_reasons:
             status: Literal["healthy", "warning", "invalid"] = "invalid"

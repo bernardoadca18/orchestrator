@@ -420,9 +420,7 @@ class AudioWorkflowService:
                             model_id=completed.model_id,
                             model_revision=completed.model_revision,
                             voice_profile=completed.voice_profile,
-                            voice_profile_identity=getattr(
-                                block, "voice_profile_identity", None
-                            ),
+                            voice_profile_identity=getattr(block, "voice_profile_identity", None),
                             generation_profile=completed.generation_profile,
                             generation_profile_identity=getattr(
                                 block, "generation_profile_identity", None
@@ -627,14 +625,10 @@ class AudioWorkflowService:
                 "inserted_pause_count": len(inserted_final_pauses),
                 "blocks": manifest_blocks,
             }
-            script_duration_contract = (workflow.roteiro_snapshot or {}).get(
-                "duration_contract"
-            )
+            script_duration_contract = (workflow.roteiro_snapshot or {}).get("duration_contract")
             if isinstance(script_duration_contract, dict):
                 target_duration = script_duration_contract.get("target_duration_seconds")
-                predicted_duration = script_duration_contract.get(
-                    "predicted_duration_seconds"
-                )
+                predicted_duration = script_duration_contract.get("predicted_duration_seconds")
                 diagnostics_manifest["editorial_duration_feedback"] = {
                     "version": "actual_narration_duration_feedback_v1",
                     "target_duration_seconds": target_duration,
@@ -650,9 +644,9 @@ class AudioWorkflowService:
                         if target_duration
                         else None
                     ),
-                    "calibration_identity": (
-                        script_duration_contract.get("calibration") or {}
-                    ).get("identity"),
+                    "calibration_identity": (script_duration_contract.get("calibration") or {}).get(
+                        "identity"
+                    ),
                     "duration_contract_identity": script_duration_contract.get("identity"),
                 }
             await self.repo.atualizar_status(
@@ -1013,9 +1007,7 @@ class AudioWorkflowService:
                 voice_profile=job.voice_profile,
                 voice_profile_identity=getattr(block, "voice_profile_identity", None),
                 generation_profile=job.generation_profile,
-                generation_profile_identity=getattr(
-                    block, "generation_profile_identity", None
-                ),
+                generation_profile_identity=getattr(block, "generation_profile_identity", None),
                 chunking_identity=getattr(block, "voice_chunking_identity", None),
                 voice_chunking_identity=job.metadata.get("chunking_identity")
                 or getattr(block, "voice_chunking_identity", None),
@@ -1143,9 +1135,7 @@ class AudioWorkflowService:
             "text_normalizer_version": comparison_normalization.version,
             "text_normalizer_identity": comparison_normalization.identity,
             "pronunciation_lexicon_identity": comparison_pronunciation.lexicon_identity,
-            "pronunciation_replacements": list(
-                comparison_pronunciation.applied_replacements
-            ),
+            "pronunciation_replacements": list(comparison_pronunciation.applied_replacements),
             "scope": "diagnostic_only_does_not_modify_synthesis_text",
         }
         if provider_metadata is not None and confidence_status != "low_confidence":

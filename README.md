@@ -82,6 +82,9 @@ cd backend
   --initialism-candidates --generation narration_temp080 --seeds 101
 ```
 
+Phrase-aware title numerals, diagnostic candidates and the opt-in pacing A/B contract are described
+in [`docs/PRONUNCIATION_AND_PACING_V2.md`](docs/PRONUNCIATION_AND_PACING_V2.md).
+
 See `backend/docs/PRONUNCIATION_LAB.md` for the lexicon schema, approval workflow, all CLI
 commands, controlled real-Qwen progression and ownership constraints. Pronunciation rewriting is
 never performed inside `qwen3-tts-workshop`.

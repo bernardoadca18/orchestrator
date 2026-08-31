@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import soundfile as sf
+import soundfile as sf  # type: ignore[import-untyped]
 import yaml
 
 from app.services.content_coverage import ContentCoverageReport
@@ -272,10 +272,7 @@ def _inspect_source_wav(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     def db(value: float) -> float:
         return 20.0 * math.log10(value) if value > 0 else -120.0
 
-    spans = [
-        ((end - start) / sample_rate, start, end)
-        for start, end in spans_frames
-    ]
+    spans = [((end - start) / sample_rate, start, end) for start, end in spans_frames]
     silence_total = sum(item[0] for item in spans)
     diagnostics = {
         "signal": {
@@ -450,6 +447,7 @@ def load_pronunciation_corpus(path: Path = DEFAULT_PRONUNCIATION_CORPUS_PATH) ->
         term = str(target.get("term", "")).strip()
         tier = str(target.get("tier", "")).strip()
         contexts = target.get("contexts")
+        candidates = target.get("candidates", [])
         if (
             not term
             or not tier
@@ -457,11 +455,18 @@ def load_pronunciation_corpus(path: Path = DEFAULT_PRONUNCIATION_CORPUS_PATH) ->
             or not isinstance(contexts, list)
             or not contexts
             or any(not str(item).strip() for item in contexts)
+            or not isinstance(candidates, list)
+            or any(not str(item).strip() for item in candidates)
         ):
             raise ValueError("pronunciation corpus targets require unique terms and contexts")
         seen.add(term.casefold())
         parsed.append(
-            {"term": term, "tier": tier, "contexts": tuple(str(item).strip() for item in contexts)}
+            {
+                "term": term,
+                "tier": tier,
+                "contexts": tuple(str(item).strip() for item in contexts),
+                "candidates": tuple(str(item).strip() for item in candidates),
+            }
         )
     return {"schema": raw["schema"], "version": version, "targets": tuple(parsed)}
 

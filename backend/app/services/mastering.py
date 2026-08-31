@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import soundfile as sf
+import soundfile as sf  # type: ignore[import-untyped]
 
 from app.services.production_audio import IO_BLOCK_FRAMES, AudioFileMetadata, inspect_wav
 

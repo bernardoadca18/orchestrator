@@ -6,7 +6,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from app.services.pronunciation import PronunciationConfigurationError, PronunciationPreprocessor
+from app.core.config import settings
+from app.services.pronunciation import (
+    PronunciationConfigurationError,
+    PronunciationPreprocessor,
+    pronunciation_preflight,
+)
 from app.services.text_normalization import PortugueseTextNormalizer
 
 
@@ -264,3 +269,79 @@ def test_ambiguous_equal_priority_collision_is_rejected(tmp_path: Path) -> None:
                 _entry("term.second", "gpu", "Gu Pú"),
             ],
         )
+
+
+def test_title_numerals_are_phrase_aware_and_preserve_canonical_text(tmp_path: Path) -> None:
+    generic = _entry("initialism.gta", "GTA", "Gê Tê Á", category="initialism")
+    exact_entries = []
+    for numeral, spoken in (("IV", "quatro"), ("V", "cinco"), ("VI", "seis")):
+        entry = _entry(
+            f"title.gta-{numeral.casefold()}",
+            f"GTA {numeral}",
+            f"Gê Tê Á {spoken}",
+            category="title_numeral",
+            priority=300,
+        )
+        entry["match"] = {"mode": "title_numeral", "case_sensitive": False}
+        exact_entries.append(entry)
+    resolver = _load(tmp_path, [generic, *exact_entries])
+    canonical = "GTA IV, gta v: GTA VI! GTA Vice City e capítulo VI."
+    result = resolver.preprocess(canonical, canonical_text=canonical)
+    assert result.canonical_text == canonical
+    assert result.synthesis_text == (
+        "Gê Tê Á quatro, Gê Tê Á cinco: Gê Tê Á seis! Gê Tê Á Vice City e capítulo VI."
+    )
+    assert [item["entry_id"] for item in result.applied_replacements[:3]] == [
+        "title.gta-iv",
+        "title.gta-v",
+        "title.gta-vi",
+    ]
+
+
+def test_exact_title_number_precedes_generic_token(tmp_path: Path) -> None:
+    exact = _entry("title.gta-6", "GTA 6", "Gê Tê Á seis", priority=300)
+    exact["match"] = {"mode": "exact_phrase", "case_sensitive": False}
+    resolver = _load(
+        tmp_path,
+        [_entry("initialism.gta", "GTA", "Gê Tê Á"), exact],
+    )
+    result = resolver.preprocess("GTA 6 e GTA 5.")
+    assert result.synthesis_text == "Gê Tê Á seis e Gê Tê Á 5."
+    assert result.applied_replacements[0]["match_mode"] == "exact_phrase"
+
+
+def test_preflight_warns_without_mutating_unknown_risky_terms(tmp_path: Path) -> None:
+    resolver = _load(tmp_path, [_entry("initialism.npc", "NPC", "Êne Pê Cê")])
+    canonical = "GTA VI terá NPCs e hardware novo."
+    report = pronunciation_preflight(canonical, resolver)
+    assert report["canonical_text_unchanged"] is True
+    terms = {item["canonical_term"] for item in report["candidates"]}
+    assert "GTA VI" in terms
+    assert all("synthesis_text" not in item for item in report["candidates"])
+
+
+def test_duplicate_and_overly_broad_rules_are_rejected(tmp_path: Path) -> None:
+    duplicate = _entry("term.duplicate", "NPC", "Êne Pê Cê")
+    with pytest.raises(PronunciationConfigurationError, match="unreachable duplicate"):
+        _load(tmp_path, [_entry("term.original", "NPC", "Êne Pê Cê"), duplicate])
+
+    broad = _entry("literal.v", "V", "cinco")
+    broad["match"] = {"mode": "literal", "case_sensitive": False}
+    with pytest.raises(PronunciationConfigurationError, match="overly broad"):
+        _load(tmp_path, [broad])
+
+
+def test_new_title_numeral_candidates_are_not_auto_promoted() -> None:
+    configured = settings.pronunciation_glossary_path
+    glossary = configured if configured.is_absolute() else Path(__file__).parents[1] / configured
+    resolver = PronunciationPreprocessor.load(glossary)
+    candidates = {
+        entry.canonical_term: entry
+        for entry in resolver.entries()
+        if entry.category.value == "title_numeral"
+    }
+    assert set(candidates) >= {"GTA IV", "GTA V", "GTA VI"}
+    assert all(not entry.production_active for entry in candidates.values())
+    result = resolver.preprocess("GTA VI", canonical_text="GTA VI")
+    assert result.canonical_text == "GTA VI"
+    assert result.synthesis_text != "Gê Tê Á seis"

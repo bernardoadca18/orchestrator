@@ -85,8 +85,21 @@ def test_quick_and_full_matrix_counts_and_stable_identity() -> None:
 
 def test_pronunciation_corpus_is_independently_versioned() -> None:
     corpus = load_pronunciation_corpus(DEFAULT_PRONUNCIATION_CORPUS_PATH)
-    assert corpus["version"] == "pronunciation_reference_v1"
+    assert corpus["version"] == "pronunciation_reference_v2"
     assert len(corpus["targets"]) >= 10
+    terms = {item["term"] for item in corpus["targets"]}
+    assert {
+        "GTA IV",
+        "GTA V",
+        "GTA VI",
+        "GTA 5",
+        "GTA 6",
+        "trailer",
+        "hardware",
+        "Xbox 360",
+        "NPC",
+        "Rockstar Games",
+    }.issubset(terms)
     assert not hasattr(corpus, "quick_cases")
 
 
@@ -137,22 +150,13 @@ def test_blank_benchmark_asr_language_resolves_to_autodetect() -> None:
 
 def test_reference_benchmark_failures_are_nonzero_unless_explicitly_allowed() -> None:
     assert (
-        benchmark_voice_references._benchmark_exit_status(
-            failed_total=1, allow_failures=False
-        )
-        == 1
+        benchmark_voice_references._benchmark_exit_status(failed_total=1, allow_failures=False) == 1
     )
     assert (
-        benchmark_voice_references._benchmark_exit_status(
-            failed_total=5, allow_failures=True
-        )
-        == 0
+        benchmark_voice_references._benchmark_exit_status(failed_total=5, allow_failures=True) == 0
     )
     assert (
-        benchmark_voice_references._benchmark_exit_status(
-            failed_total=0, allow_failures=False
-        )
-        == 0
+        benchmark_voice_references._benchmark_exit_status(failed_total=0, allow_failures=False) == 0
     )
 
 

@@ -30,6 +30,7 @@ class PronunciationCategory(StrEnum):
     TECHNICAL_TERM = "technical_term"
     ACRONYM = "acronym"
     INITIALISM = "initialism"
+    TITLE_NUMERAL = "title_numeral"
     ABBREVIATION = "abbreviation"
     CUSTOM = "custom"
 
@@ -37,6 +38,8 @@ class PronunciationCategory(StrEnum):
 class PronunciationMatchMode(StrEnum):
     TOKEN = "token"
     LITERAL = "literal"
+    EXACT_PHRASE = "exact_phrase"
+    TITLE_NUMERAL = "title_numeral"
 
 
 class PronunciationApprovalStatus(StrEnum):
@@ -437,6 +440,12 @@ class PronunciationPreprocessor:
                 self.entries(production_only=True, project=project, locale=locale),
                 key=lambda entry: (
                     0 if entry.projects else 1,
+                    {
+                        PronunciationMatchMode.TITLE_NUMERAL: 0,
+                        PronunciationMatchMode.EXACT_PHRASE: 1,
+                        PronunciationMatchMode.TOKEN: 2,
+                        PronunciationMatchMode.LITERAL: 3,
+                    }[entry.match_mode],
                     -entry.priority,
                     -len(entry.canonical_term),
                     entry.id,
@@ -451,7 +460,7 @@ class PronunciationPreprocessor:
         for index, entry in enumerate(active):
             escaped = re.escape(entry.canonical_term)
             body = escaped if entry.case_sensitive else f"(?i:{escaped})"
-            if entry.match_mode is PronunciationMatchMode.TOKEN:
+            if entry.match_mode is not PronunciationMatchMode.LITERAL:
                 if self._is_word_character(entry.canonical_term[0]):
                     body = rf"(?<!\w){body}"
                 if self._is_word_character(entry.canonical_term[-1]):
@@ -504,6 +513,15 @@ class PronunciationPreprocessor:
                     raise PronunciationConfigurationError(
                         f"ambiguous pronunciation entries: {left.id} and {right.id}"
                     )
+                if self._unreachable_duplicate(left, right):
+                    raise PronunciationConfigurationError(
+                        f"unreachable duplicate pronunciation entries: {left.id} and {right.id}"
+                    )
+        for entry in active:
+            if entry.match_mode is PronunciationMatchMode.LITERAL and len(entry.canonical_term) < 2:
+                raise PronunciationConfigurationError(
+                    f"entry {entry.id} uses an overly broad literal match"
+                )
 
     def _validate_idempotence(self) -> None:
         projects = {project for entry in self._entries for project in entry.projects}
@@ -565,6 +583,21 @@ class PronunciationPreprocessor:
         return same_term and left.synthesis_representation != right.synthesis_representation
 
     @staticmethod
+    def _unreachable_duplicate(left: PronunciationEntry, right: PronunciationEntry) -> bool:
+        if left.locale.casefold() != right.locale.casefold():
+            return False
+        if left.projects != right.projects or left.match_mode is not right.match_mode:
+            return False
+        left_term = left.canonical_term if left.case_sensitive else left.canonical_term.casefold()
+        right_term = (
+            right.canonical_term if right.case_sensitive else right.canonical_term.casefold()
+        )
+        return (
+            left_term == right_term
+            and left.synthesis_representation == right.synthesis_representation
+        )
+
+    @staticmethod
     def _is_word_character(character: str) -> bool:
         return bool(re.match(r"\w", character, flags=re.UNICODE))
 
@@ -595,3 +628,62 @@ class PronunciationPreprocessor:
         if not isinstance(value, str):
             raise PronunciationConfigurationError(f"entry {key} must be a string")
         return value.strip()
+
+
+_TITLE_NUMERAL_RISK_RE = re.compile(
+    r"(?<!\w)(?P<title>[A-Za-zÀ-ÖØ-öø-ÿ0-9][\wÀ-ÖØ-öø-ÿ&'\u2019-]*"
+    r"(?:\s+[A-Za-zÀ-ÖØ-öø-ÿ0-9][\wÀ-ÖØ-öø-ÿ&'\u2019-]*){0,3})"
+    r"\s+(?P<numeral>[IVXLCDM]{1,7})(?!\w)"
+)
+_INITIALISM_RISK_RE = re.compile(r"(?<!\w)[A-Z]{2,10}(?!\w)")
+
+
+def pronunciation_preflight(
+    text: str,
+    resolver: PronunciationPreprocessor,
+    *,
+    project: str | None = None,
+    locale: str = DEFAULT_LOCALE,
+) -> dict[str, Any]:
+    """Find review candidates without changing canonical or synthesis text."""
+
+    candidates: dict[tuple[int, int], dict[str, Any]] = {}
+    for match in _TITLE_NUMERAL_RISK_RE.finditer(text):
+        candidates[(match.start(), match.end())] = {
+            "canonical_term": match.group(0),
+            "kind": "title_numeral",
+            "start": match.start(),
+            "end": match.end(),
+        }
+    for match in _INITIALISM_RISK_RE.finditer(text):
+        candidates.setdefault(
+            (match.start(), match.end()),
+            {
+                "canonical_term": match.group(0),
+                "kind": "initialism",
+                "start": match.start(),
+                "end": match.end(),
+            },
+        )
+    values = []
+    for candidate in candidates.values():
+        resolved = resolver.preprocess(
+            candidate["canonical_term"],
+            project=project,
+            locale=locale,
+            canonical_text=candidate["canonical_term"],
+        )
+        values.append(
+            {
+                **candidate,
+                "active_lexicon_match": bool(resolved.applied_replacements),
+                "active_replacements": list(resolved.applied_replacements),
+                "review_status": "pending" if not resolved.applied_replacements else "covered",
+            }
+        )
+    return {
+        "version": "pronunciation_preflight_v1",
+        "canonical_text_unchanged": True,
+        "lexicon_identity": resolver.identity(project=project, locale=locale),
+        "candidates": values,
+    }

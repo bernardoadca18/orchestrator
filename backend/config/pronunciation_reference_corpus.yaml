@@ -1,5 +1,5 @@
 schema: neovids_pronunciation_reference_corpus_v1
-version: pronunciation_reference_v1
+version: pronunciation_reference_v2
 targets:
   - term: Rockstar Games
     tier: proper_noun
@@ -11,11 +11,56 @@ targets:
     contexts:
       - "No GTA, a missão começa assim que o personagem atravessa a ponte."
       - "Eu voltei ao GTA depois de alguns meses e precisei reaprender os controles."
+  - term: GTA IV
+    tier: title_numeral
+    candidates: ["GTA IV", "GTA quatro", "Gê Tê Á quatro"]
+    contexts:
+      - "GTA IV apostou em uma física mais pesada e em uma cidade mais contida."
+      - "A comparação entre GTA IV e os títulos seguintes exige contexto histórico."
+  - term: GTA V
+    tier: title_numeral
+    candidates: ["GTA V", "GTA cinco", "Gê Tê Á cinco"]
+    contexts:
+      - "GTA V ampliou a escala e alternou entre três protagonistas."
+      - "No trailer, GTA V serve como referência para a comparação técnica."
+  - term: GTA VI
+    tier: title_numeral
+    candidates: ["GTA VI", "GTA seis", "Gê Tê Á seis"]
+    contexts:
+      - "GTA VI ainda está em desenvolvimento e detalhes podem mudar até o lançamento."
+      - "O material oficial de GTA VI permite observações, não certezas sobre toda mecânica."
+  - term: GTA 5
+    tier: title_number
+    candidates: ["GTA 5", "GTA cinco", "Gê Tê Á cinco"]
+    contexts:
+      - "GTA 5 continua sendo uma referência útil para comparar densidade urbana."
+  - term: GTA 6
+    tier: title_number
+    candidates: ["GTA 6", "GTA seis", "Gê Tê Á seis"]
+    contexts:
+      - "GTA 6 é uma forma editorial alternativa ao numeral romano no título."
   - term: NPC
     tier: initialism
     contexts:
       - "Um NPC aparentemente irrelevante acabou entregando a pista principal."
       - "Quando o NPC mudou de rota, a missão inteira tomou outro rumo."
+  - term: trailer
+    tier: mixed_english
+    candidates: ["trailer", "trêiler", "tréiler"]
+    contexts:
+      - "O trailer oficial mostra uma cidade movimentada, mas não confirma todas as mecânicas."
+      - "Cada quadro do trailer precisa ser descrito sem transformar inferência em fato."
+  - term: hardware
+    tier: mixed_english
+    candidates: ["hardware", "rárduér", "hárd-uér"]
+    contexts:
+      - "O hardware atual reduz gargalos, mas não elimina decisões de otimização."
+      - "Uma conclusão sobre hardware precisa separar evidência técnica de especulação."
+  - term: Xbox 360
+    tier: proper_noun
+    candidates: ["Xbox 360", "Équis bóquis trezentos e sessenta"]
+    contexts:
+      - "O Xbox 360 marcou uma geração importante para jogos de mundo aberto."
   - term: Red Dead Redemption
     tier: proper_noun
     contexts:

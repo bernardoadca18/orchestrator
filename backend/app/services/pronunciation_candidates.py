@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -33,7 +34,15 @@ class PronunciationCandidateService:
             )
         ).all()
         grouped: dict[tuple[str, str], dict[str, Any]] = defaultdict(
-            lambda: {"occurrences": 0, "workflow_ids": set(), "take_ids": set()}
+            lambda: {
+                "occurrences": 0,
+                "workflow_ids": set(),
+                "take_ids": set(),
+                "block_ids": set(),
+                "examples": [],
+                "first_seen": None,
+                "last_seen": None,
+            }
         )
         for take, workflow_id in rows:
             report = take.content_quality or {}
@@ -49,6 +58,31 @@ class PronunciationCandidateService:
                 entry["occurrences"] += int(item.get("occurrences") or 1)
                 entry["workflow_ids"].add(str(workflow_id))
                 entry["take_ids"].add(str(take.id))
+                entry["block_ids"].add(str(take.audio_bloco_id))
+                timestamp = take.completed_at or take.created_at
+                if entry["first_seen"] is None or timestamp < entry["first_seen"]:
+                    entry["first_seen"] = timestamp
+                if entry["last_seen"] is None or timestamp > entry["last_seen"]:
+                    entry["last_seen"] = timestamp
+                if len(entry["examples"]) < 5:
+                    canonical = take.canonical_text or ""
+                    location = canonical.casefold().find(expected.casefold())
+                    start = max(0, location - 80) if location >= 0 else 0
+                    end = min(
+                        len(canonical), (location + len(expected) + 80) if location >= 0 else 180
+                    )
+                    entry["examples"].append(
+                        {
+                            "workflow_id": str(workflow_id),
+                            "take_id": str(take.id),
+                            "block_id": str(take.audio_bloco_id),
+                            "context": canonical[start:end],
+                            "audio_preview_url": (
+                                f"/workflow/{workflow_id}/blocos/{take.audio_bloco_id}/audio"
+                            ),
+                            "timestamp_precision": "block_only",
+                        }
+                    )
 
         candidates: list[dict[str, Any]] = []
         for entry in grouped.values():
@@ -63,6 +97,14 @@ class PronunciationCandidateService:
                     "workflow_count": len(entry["workflow_ids"]),
                     "workflow_ids": sorted(entry["workflow_ids"]),
                     "take_ids": sorted(entry["take_ids"]),
+                    "block_ids": sorted(entry["block_ids"]),
+                    "examples": entry["examples"],
+                    "first_seen": entry["first_seen"].isoformat()
+                    if isinstance(entry["first_seen"], datetime)
+                    else None,
+                    "last_seen": entry["last_seen"].isoformat()
+                    if isinstance(entry["last_seen"], datetime)
+                    else None,
                     "active_lexicon_match": bool(resolved.applied_replacements),
                     "active_replacements": list(resolved.applied_replacements),
                     "review_status": "pending",
@@ -73,7 +115,7 @@ class PronunciationCandidateService:
             key=lambda item: (-item["workflow_count"], -item["occurrences"], item["expected"])
         )
         return {
-            "version": "pronunciation_candidate_aggregation_v1",
+            "version": "pronunciation_candidate_aggregation_v2",
             "lexicon_identity": self.resolver.identity(),
             "candidate_count": len(candidates),
             "candidates": candidates[:limit],

@@ -11,6 +11,7 @@ from app.services.mastering import MasteringError
 from app.services.narration_postprocessing import (
     CONSERVATIVE,
     process_narration_stem,
+    process_narration_tempo_candidate,
 )
 from app.services.production_audio import inspect_wav
 
@@ -20,8 +21,7 @@ def _voice_like(path: Path) -> Path:
     time = np.arange(sample_rate * 6, dtype=np.float64) / sample_rate
     envelope = 0.35 + 0.65 * np.square(np.sin(2 * np.pi * 0.7 * time))
     samples = envelope * (
-        0.16 * np.sin(2 * np.pi * 180 * time)
-        + 0.04 * np.sin(2 * np.pi * 360 * time)
+        0.16 * np.sin(2 * np.pi * 180 * time) + 0.04 * np.sin(2 * np.pi * 360 * time)
     )
     sf.write(path, samples, sample_rate, format="WAV", subtype="PCM_16")
     return path
@@ -43,9 +43,7 @@ def test_postprocessing_is_deterministic_preserves_raw_and_duration(tmp_path: Pa
     assert output.channels == 1
     assert output.clipping_sample_count == 0
     assert first["after"]["true_peak_dbtp"] <= CONSERVATIVE.true_peak_dbtp + 0.1
-    assert first["after"]["integrated_lufs"] == pytest.approx(
-        CONSERVATIVE.target_lufs, abs=0.5
-    )
+    assert first["after"]["integrated_lufs"] == pytest.approx(CONSERVATIVE.target_lufs, abs=0.5)
 
 
 def test_failed_postprocessing_preserves_raw_and_existing_destination(tmp_path: Path) -> None:
@@ -63,3 +61,26 @@ def test_failed_postprocessing_preserves_raw_and_existing_destination(tmp_path: 
         process_narration_stem(source, destination, CONSERVATIVE)
     assert inspect_wav(source).sha256 == raw_sha
     assert destination.read_bytes() == b"existing"
+
+
+def test_tempo_candidate_is_deterministic_pitch_preserving_and_keeps_raw(tmp_path: Path) -> None:
+    source = _voice_like(tmp_path / "raw.wav")
+    raw = inspect_wav(source)
+    first = process_narration_tempo_candidate(source, tmp_path / "tempo-a.wav", tempo_factor=1.10)
+    second = process_narration_tempo_candidate(source, tmp_path / "tempo-b.wav", tempo_factor=1.10)
+    output = inspect_wav(tmp_path / "tempo-a.wav")
+    assert inspect_wav(source).sha256 == raw.sha256
+    assert first["identity"] == second["identity"]
+    assert first["output_sha256"] == second["output_sha256"]
+    assert output.duration_seconds == pytest.approx(raw.duration_seconds / 1.10, abs=0.08)
+    assert output.sample_rate == raw.sample_rate
+    assert output.channels == raw.channels
+    assert output.clipping_sample_count == 0
+    assert first["tempo_factor"] == 1.10
+    assert first["experimental_not_promoted"] is True
+
+    original, sample_rate = sf.read(source)
+    processed, _ = sf.read(tmp_path / "tempo-a.wav")
+    original_peak = np.argmax(np.abs(np.fft.rfft(original[:sample_rate])))
+    processed_peak = np.argmax(np.abs(np.fft.rfft(processed[:sample_rate])))
+    assert processed_peak == pytest.approx(original_peak, abs=3)
