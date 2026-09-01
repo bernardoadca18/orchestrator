@@ -185,8 +185,8 @@ class FakeProvider:
                 },
             ),
             strategy="media_search_v1",
-            embedding_provider="ninerouter",
-            embedding_model="neovids-embedding",
+            embedding_provider="ollama",
+            embedding_model="mxbai-embed-large:latest",
             embedding_dimensions=1024,
         )
 

@@ -86,8 +86,8 @@ def _search_payload(scope: str = "session") -> dict:
             }
         ],
         "strategy": "media_search_v1",
-        "embedding_provider": "ninerouter",
-        "embedding_model": "neovids-embedding",
+        "embedding_provider": "ollama",
+        "embedding_model": "mxbai-embed-large:latest",
         "embedding_dimensions": 1024,
         "created_at": "2026-08-25T00:00:00Z",
     }
