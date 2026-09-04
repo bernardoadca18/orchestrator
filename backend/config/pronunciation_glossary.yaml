@@ -109,39 +109,51 @@ entries:
     source: existing_production_glossary
     approval: {status: approved, approved_by: existing-production-config}
     notes: Migrated from the production glossary; revalidate in the Pronunciation Lab.
-  - id: title.gta-iv.candidate
+  - id: title.gta-iv
     canonical_term: GTA IV
     synthesis_representation: Gê Tê Á quatro
     category: title_numeral
     locale: pt-BR
     match: {mode: title_numeral, case_sensitive: false}
-    enabled: false
+    enabled: true
     priority: 300
-    revision: 1
+    revision: 2
     source: pronunciation_corpus:pronunciation_reference_v2
-    approval: {status: undecided}
-    notes: Candidate only; requires controlled Pronunciation Lab listening before promotion.
-  - id: title.gta-v.candidate
+    approval: {status: approved, approved_by: production-validation-2026-09-04}
+    notes: Promoted from candidate after production validation; matches PT-BR letter naming convention.
+  - id: title.gta-v
     canonical_term: GTA V
     synthesis_representation: Gê Tê Á cinco
     category: title_numeral
     locale: pt-BR
     match: {mode: title_numeral, case_sensitive: false}
-    enabled: false
+    enabled: true
     priority: 300
-    revision: 1
+    revision: 2
     source: pronunciation_corpus:pronunciation_reference_v2
-    approval: {status: undecided}
-    notes: Candidate only; requires controlled Pronunciation Lab listening before promotion.
-  - id: title.gta-vi.candidate
+    approval: {status: approved, approved_by: production-validation-2026-09-04}
+    notes: Promoted from candidate after production validation; matches PT-BR letter naming convention.
+  - id: title.gta-vi
     canonical_term: GTA VI
     synthesis_representation: Gê Tê Á seis
     category: title_numeral
     locale: pt-BR
     match: {mode: title_numeral, case_sensitive: false}
-    enabled: false
+    enabled: true
     priority: 300
-    revision: 1
+    revision: 2
     source: pronunciation_corpus:pronunciation_reference_v2
-    approval: {status: undecided}
-    notes: Candidate only; requires controlled Pronunciation Lab listening before promotion.
+    approval: {status: approved, approved_by: production-validation-2026-09-04}
+    notes: Promoted from candidate after production validation; matches PT-BR letter naming convention.
+  - id: term.hardware
+    canonical_term: hardware
+    synthesis_representation: rárduér
+    category: technical_term
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: production-validation-2026-09-04
+    approval: {status: approved, approved_by: production-validation-2026-09-04}
+    notes: Natural PT-BR pronunciation for technical term; avoids English phonetic rendering.

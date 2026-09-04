@@ -331,7 +331,12 @@ def test_duplicate_and_overly_broad_rules_are_rejected(tmp_path: Path) -> None:
         _load(tmp_path, [broad])
 
 
-def test_new_title_numeral_candidates_are_not_auto_promoted() -> None:
+def test_gta_title_numerals_are_promoted_to_production() -> None:
+    """Verify GTA IV/V/VI entries are now production-active after validation.
+
+    These were previously candidates but were promoted after production validation
+    confirmed the PT-BR letter naming convention (Gê Tê Á + number).
+    """
     configured = settings.pronunciation_glossary_path
     glossary = configured if configured.is_absolute() else Path(__file__).parents[1] / configured
     resolver = PronunciationPreprocessor.load(glossary)
@@ -341,7 +346,10 @@ def test_new_title_numeral_candidates_are_not_auto_promoted() -> None:
         if entry.category.value == "title_numeral"
     }
     assert set(candidates) >= {"GTA IV", "GTA V", "GTA VI"}
-    assert all(not entry.production_active for entry in candidates.values())
+    # GTA entries are now production-active after validation on 2026-09-04
+    for term in ["GTA IV", "GTA V", "GTA VI"]:
+        assert candidates[term].production_active, f"{term} should be production-active"
+    # Verify correct PT-BR pronunciation is applied
     result = resolver.preprocess("GTA VI", canonical_text="GTA VI")
     assert result.canonical_text == "GTA VI"
-    assert result.synthesis_text != "Gê Tê Á seis"
+    assert result.synthesis_text == "Gê Tê Á seis"

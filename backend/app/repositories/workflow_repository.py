@@ -203,7 +203,11 @@ class WorkflowRepository:
     async def invalidar_derivados_de_audio(
         self, workflow: WorkflowExecucao, blocks: Sequence[AudioBloco] | None = None
     ) -> None:
-        """Drop only current pointers; immutable historical rows/files remain available."""
+        """Drop only current pointers; immutable historical rows/files remain available.
+
+        Also invalidates downstream derived artifacts (transcription, narration alignment,
+        visual plan, production timeline) to ensure they are recomputed when audio changes.
+        """
         workflow.audio_final_path = None
         workflow.audio_final_sha256 = None
         workflow.audio_final_sample_rate = None
@@ -219,6 +223,19 @@ class WorkflowRepository:
         for block in blocks or ():
             block.narration_start_seconds = None
             block.narration_end_seconds = None
+
+        # Invalidate transcription to force re-transcription when audio is re-consolidated.
+        # The narration alignment fingerprint depends on transcription + audio SHA256,
+        # and alignment requires valid palavras_timestamps matching the new audio.
+        if workflow.transcricao is not None:
+            workflow.transcricao.audio_sha256 = None
+            workflow.transcricao.palavras_timestamps = None
+            workflow.transcricao.texto_completo = None
+
+        # Reset production phase to audio to force re-derivation of all downstream stages
+        # (narration_alignment -> visual_plan -> production_timeline -> render)
+        workflow.production_phase = "audio"
+
         await self.session.flush()
 
     async def recoverable_productions(self) -> Sequence[WorkflowExecucao]:
