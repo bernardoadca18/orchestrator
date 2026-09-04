@@ -157,3 +157,27 @@ entries:
     source: production-validation-2026-09-04
     approval: {status: approved, approved_by: production-validation-2026-09-04}
     notes: Natural PT-BR pronunciation for technical term; avoids English phonetic rendering.
+  - id: term.trailer
+    canonical_term: trailer
+    synthesis_representation: trêiler
+    category: technical_term
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: pronunciation-expansion-2026-09-04
+    approval: {status: undecided, approved_by: null}
+    notes: Candidate pronunciation for video game trailer context; follows PT-BR phonetic adaptation of English term.
+  - id: term.motor
+    canonical_term: motor
+    synthesis_representation: motor
+    category: technical_term
+    locale: pt-BR
+    match: {mode: token, case_sensitive: false}
+    enabled: true
+    priority: 100
+    revision: 1
+    source: pronunciation-expansion-2026-09-04
+    approval: {status: undecided, approved_by: null}
+    notes: Native PT-BR pronunciation; no phonetic transformation needed. Ensures consistent rendering in game hardware context.

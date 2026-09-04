@@ -524,7 +524,9 @@ async def test_narration_alignment_recovery_after_retranscription(
     # Step 4: Verify Alignment B completed
     assert alignment_b.status == "completed", "Alignment B should be completed"
     assert alignment_b.final_audio_sha256 == sha_b, "Alignment B audio SHA should be B"
-    assert alignment_b.transcription_id == transcription.id, "Alignment B should link to current transcription"
+    assert (
+        alignment_b.transcription_id == transcription.id
+    ), "Alignment B should link to current transcription"
 
     # Step 5: Verify Alignment A remains as historical record
     await session.refresh(alignment_a)
@@ -532,8 +534,12 @@ async def test_narration_alignment_recovery_after_retranscription(
     assert alignment_a.final_audio_sha256 == sha_a, "Alignment A should still reference SHA A"
 
     # Step 6: Verify Alignment B fingerprint is different (new inputs)
-    assert alignment_b.fingerprint != alignment_a.fingerprint, "Alignment B should have different fingerprint"
-    assert alignment_b.script_fingerprint != alignment_a.script_fingerprint, "Script fingerprint should differ"
+    assert (
+        alignment_b.fingerprint != alignment_a.fingerprint
+    ), "Alignment B should have different fingerprint"
+    assert (
+        alignment_b.script_fingerprint != alignment_a.script_fingerprint
+    ), "Script fingerprint should differ"
 
     # Step 7: Verify both alignments exist for the same workflow
     from app.repositories.narration_alignment_repository import NarrationAlignmentRepository
