@@ -14,3 +14,4 @@ backend/pronunciation-lab-results/
 *.tar.gz
 cache
 benchmark_exports
+repomix-output.xml
