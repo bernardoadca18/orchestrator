@@ -50,7 +50,11 @@ from app.services.transcription_service import (
 )
 
 logger = logging.getLogger(__name__)
-QUALITY_RETRY_CATEGORIES = frozenset({"chunk_quality_guard", "content_quality_guard"})
+QUALITY_RETRY_CATEGORIES = frozenset({
+    "chunk_quality_guard",
+    "content_quality_guard",
+    "speaker_similarity_guard",
+})
 QUALITY_RETRY_SEED_STRATEGY = "qwen-orchestrator-quality-retry-v1"
 MANUAL_TAKE_SEED_STRATEGY = "qwen-orchestrator-manual-take-v1"
 
