@@ -328,10 +328,6 @@ class AudioWorkflowService:
                             expected_subtype=completed.result_subtype,
                             expected_frame_count=completed.result_frame_count,
                             expected_riff_data_byte_size=(completed.result_riff_data_byte_size),
-                            text_length_chars=len(pronunciation.synthesis_text),
-                            max_duration_seconds=self.config.audio_block_max_duration_seconds,
-                            max_seconds_per_char=self.config.audio_block_max_seconds_per_char,
-                            duration_grace_seconds=self.config.audio_block_duration_grace_seconds,
                         )
                         provider_pauses = _provider_inserted_pauses(completed.metadata)
                         pause_diagnostics = analyze_audio(
