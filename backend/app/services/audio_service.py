@@ -406,9 +406,11 @@ class AudioWorkflowService:
                                 await self.repo.atualizar_take(take.id, status="running")
                             continue
 
-                        # Validate voice identity to detect voice drift.
-                        # The Voice Service returns the actual voice_identity in metadata.
-                        # If it doesn't match the expected identity, trigger a quality retry.
+                        # Voice profile provenance guard.
+                        # The Voice Service returns the voice_identity in metadata, representing
+                        # the resolved voice profile identity (not acoustic speaker verification).
+                        # If the returned identity doesn't match the requested profile identity,
+                        # it indicates a configuration/provenance mismatch, not acoustic drift.
                         expected_identity = getattr(block, "voice_profile_identity", None)
                         actual_identity = completed.metadata.get("voice_identity")
                         if (
@@ -417,7 +419,8 @@ class AudioWorkflowService:
                             and actual_identity != expected_identity
                         ):
                             logger.warning(
-                                "voice identity mismatch: expected=%s actual=%s block_id=%s job_id=%s",
+                                "voice profile provenance mismatch: "
+                                "expected=%s actual=%s block_id=%s job_id=%s",
                                 expected_identity,
                                 actual_identity,
                                 str(block.id),
@@ -432,7 +435,7 @@ class AudioWorkflowService:
                                 "expected_identity": expected_identity,
                                 "actual_identity": actual_identity,
                                 "retry_required": True,
-                                "classification": "voice_drift",
+                                "classification": "voice_profile_provenance_mismatch",
                             }
                             take = await self._prepare_quality_retry(block, take, failure)
                             active_take = take
@@ -441,10 +444,10 @@ class AudioWorkflowService:
                             continue
 
                         break
-                    # Use actual identity from Voice Service if available, otherwise fall back to expected
-                    actual_voice_identity = completed.metadata.get("voice_identity") or getattr(
-                        block, "voice_profile_identity", None
-                    )
+                    # Use actual identity from Voice Service if available
+                    actual_voice_identity = completed.metadata.get(
+                        "voice_identity"
+                    ) or getattr(block, "voice_profile_identity", None)
                     if hasattr(self.repo, "promover_take"):
                         promoted = await self.repo.promover_take(
                             block.id,

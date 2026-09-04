@@ -1,9 +1,15 @@
 """Regression tests for voice identity validation and retry-after-completion fixes.
 
 These tests verify:
-1. Voice identity mismatch detection triggers quality retry (Problem A - Voice Drift)
-2. Retry-after-completion properly invalidates transcription (Problem D)
+1. Voice profile provenance guard detects configuration mismatches
+   (not acoustic speaker drift)
+2. Retry-after-completion preserves transcription (NOT NULL fields intact,
+   uses SHA for re-transcription)
 3. Pronunciation entries for GTA IV/V/VI and hardware are applied (Problem B)
+
+NOTE: voice_identity is a provenance guard, NOT acoustic speaker verification.
+It validates that the Voice Service returned the requested voice profile identity.
+It does NOT analyze waveforms to detect voice characteristics.
 """
 
 from __future__ import annotations
@@ -15,18 +21,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from app.clients.voice_client import (
-    GenerationProfileDescriptor,
-    VoiceNarrationJob,
-    VoiceProfileDescriptor,
-    VoiceProfileProvenance,
-    VoiceJobFailedError,
-)
-from app.core.config import Settings
-from app.services.audio_service import AudioWorkflowService
 from app.services.pronunciation import PronunciationPreprocessor
-from app.services.transcription_service import NarrationTranscription, NarrationWord
-
 
 # =============================================================================
 # Test fixtures and helpers
@@ -53,7 +48,10 @@ class FakeRepository:
     async def ensure_bloco(self, **values):
         order = values["ordem"]
         block = self.blocks.get(order)
-        unchanged = block is not None and block.synthesis_identity == values.get("synthesis_identity")
+        unchanged = (
+        block is not None
+        and block.synthesis_identity == values.get("synthesis_identity")
+    )
         if block is None:
             block = SimpleNamespace(
                 id=uuid.uuid4(),
@@ -140,13 +138,18 @@ class FakeRepository:
         return []
 
     async def invalidar_derivados_de_audio(self, workflow, blocks=None):
-        """Simulate the fix for Problem D: clear transcription fields."""
+        """Audio derivatives invalidation.
+
+        The transcription is NOT invalidated by setting fields to NULL.
+        Instead, the system uses audio_sha256 to detect when re-transcription is needed.
+        The _ensure_transcription() path checks if existing transcription.audio_sha256
+        matches the new audio SHA and triggers re-transcription when they differ.
+        """
         workflow.audio_final_path = None
         workflow.audio_final_sha256 = None
-        if workflow.transcricao is not None:
-            workflow.transcricao.audio_sha256 = None
-            workflow.transcricao.palavras_timestamps = None
-            workflow.transcricao.texto_completo = None
+        # NOTE: transcription fields are NOT set to NULL.
+        # texto_completo and palavras_timestamps are NOT NULL in the schema.
+        # Re-transcription is triggered by audio_sha256 mismatch in _ensure_transcription().
         workflow.production_phase = "audio"
 
 
@@ -156,14 +159,16 @@ class FakeRepository:
 
 
 def test_voice_identity_validation_logic() -> None:
-    """Verify the voice identity validation logic detects mismatches.
+    """Verify the voice profile provenance guard detects mismatches.
 
-    This tests the core validation that was added to audio_service.py:
+    This tests the core validation in audio_service.py:
     - If expected_identity != actual_identity, trigger retry
+    - This is a PROVENANCE guard, not acoustic speaker verification
+    - It validates that the Voice Service returned the requested voice profile
     - The validation happens after wait_for_narration completes
     """
     expected_identity = "a" * 64  # Expected bernardo_xvec_v2 identity
-    drift_identity = "b" * 64  # Wrong/drifted identity (e.g., feminine PT-PT voice)
+    drift_identity = "b" * 64  # Wrong profile identity (provenance mismatch)
 
     # Simulate the validation logic from audio_service.py
     # Lines 409-437: voice identity mismatch check
@@ -223,12 +228,18 @@ def test_voice_identity_validation_handles_missing_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_retry_after_completion_invalidates_transcription(tmp_path) -> None:
-    """Verify that invalidar_derivados_de_audio clears transcription fields.
+async def test_retry_after_completion_preserves_transcription(tmp_path) -> None:
+    """Verify that invalidar_derivados_de_audio clears audio SHA but preserves transcription.
 
-    This ensures that when audio is regenerated, the old transcription
-    (which was for different audio) is invalidated, allowing narration
-    alignment to succeed.
+    The transcription fields texto_completo and palavras_timestamps are NOT NULL
+    in the PostgreSQL schema, so they cannot be set to NULL. Instead, the system
+    uses audio_sha256 mismatch detection to trigger re-transcription when needed.
+
+    When audio is regenerated:
+    1. audio_final_sha256 is cleared (reset to None)
+    2. Transcription is preserved (NOT NULL fields intact)
+    3. _ensure_transcription() detects audio_sha256 mismatch
+    4. Re-transcription occurs automatically via SHA comparison
     """
     workflow = SimpleNamespace(
         id=uuid.uuid4(),
@@ -251,10 +262,12 @@ async def test_retry_after_completion_invalidates_transcription(tmp_path) -> Non
     assert workflow.audio_final_path is None
     assert workflow.audio_final_sha256 is None
 
-    # Verify transcription fields are cleared (the fix for Problem D)
-    assert workflow.transcricao.audio_sha256 is None
-    assert workflow.transcricao.palavras_timestamps is None
-    assert workflow.transcricao.texto_completo is None
+    # Verify transcription fields are PRESERVED (NOT NULL constraint)
+    # The old transcription remains valid until re-transcription occurs.
+    # Re-transcription is triggered by audio_sha256 mismatch in _ensure_transcription().
+    assert workflow.transcricao.audio_sha256 == "old_transcription_sha256"
+    assert workflow.transcricao.palavras_timestamps == [{"word": "old", "start": 0.0, "end": 0.5}]
+    assert workflow.transcricao.texto_completo == "old transcription"
 
     # Verify production phase is reset to audio
     assert workflow.production_phase == "audio"
@@ -361,7 +374,10 @@ def test_pronunciation_gta_vi_v_iv_and_hardware(tmp_path: Path) -> None:
 def test_pronunciation_production_glossary_loaded_correctly(tmp_path: Path) -> None:
     """Verify that the production glossary entries are correctly loaded and applied."""
     # Load the actual production glossary
-    production_glossary_path = Path("/home/bernardo/workspaces/neovids/orchestrator/backend/config/pronunciation_glossary.yaml")
+    production_glossary_path = Path(
+        "/home/bernardo/workspaces/neovids/orchestrator/backend"
+        "/config/pronunciation_glossary.yaml"
+    )
     if not production_glossary_path.exists():
         pytest.skip("Production glossary not found")
 

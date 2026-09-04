@@ -224,13 +224,11 @@ class WorkflowRepository:
             block.narration_start_seconds = None
             block.narration_end_seconds = None
 
-        # Invalidate transcription to force re-transcription when audio is re-consolidated.
-        # The narration alignment fingerprint depends on transcription + audio SHA256,
-        # and alignment requires valid palavras_timestamps matching the new audio.
-        if workflow.transcricao is not None:
-            workflow.transcricao.audio_sha256 = None
-            workflow.transcricao.palavras_timestamps = None
-            workflow.transcricao.texto_completo = None
+        # The transcription is NOT invalidated here. The schema requires texto_completo
+        # and palavras_timestamps to be NOT NULL. Instead, the transcription is
+        # re-computed when audio_sha256 changes. The _ensure_transcription() path
+        # checks if existing transcription.audio_sha256 matches the new audio SHA
+        # and triggers re-transcription when they differ.
 
         # Reset production phase to audio to force re-derivation of all downstream stages
         # (narration_alignment -> visual_plan -> production_timeline -> render)
