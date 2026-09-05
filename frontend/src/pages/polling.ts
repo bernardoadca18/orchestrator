@@ -11,3 +11,8 @@ export function shouldPollRender(workflow: ArtifactPollingState): boolean {
 export function shouldPollQA(workflow: ArtifactPollingState): boolean {
   return workflow.production_status === "completed";
 }
+
+export function shouldPollAudioEditUpdate(status: AudioEditUpdateStatus): boolean {
+  return status === "pending" || status === "running";
+}
+import type { AudioEditUpdateStatus } from "../api/client";

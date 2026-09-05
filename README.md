@@ -79,6 +79,14 @@ only after the replacement validates. Pre-publication failure or a newer concurr
 leaves the old narration current and the edits pending. After publication, SHA-based transcription
 compatibility and the existing Stage 17 identity chain recover only timing-dependent artifacts.
 
+In `WorkflowDetail`, creators expand an audio block to inspect and preview its physical chunks,
+regenerate one chunk, then either select the candidate with **Usar este take** or preserve it as
+rejected history with **Descartar**. Selections accumulate as pending narration edits; the single
+workflow-level **Atualizar Pipeline** action starts the durable batch operation and polls its
+`pending | running | completed | failed` state. Published block/final players remain on their
+previous SHA until that operation completes, while downstream production blockers remain visible
+as an independent state.
+
 Alembic lineage is linear: revision `014` adds production-error history, revision `015` adds the
 chunk/take tables, and revision `016` adds exact pause provenance plus durable edit revisions and
 batch update operations.

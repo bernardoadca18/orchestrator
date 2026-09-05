@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   api,
@@ -10,9 +10,10 @@ import {
   VisualPlan,
   Workflow,
   WorkflowRender,
-  AudioChunk,
-  AudioChunkTake,
 } from "../api/client";
+import { BlockChunks } from "../components/audio-edit/BlockChunks";
+import { PendingAudioEdits } from "../components/audio-edit/PendingAudioEdits";
+import { useAudioEditUpdate } from "../components/audio-edit/useAudioEditUpdate";
 import { shouldPollQA, shouldPollRender } from "./polling";
 import { presentContentQuality, qualityToneColor } from "../utils/contentQuality";
 import { startSerialPolling } from "../utils/serialPolling";
@@ -55,195 +56,6 @@ function chunkSeeds(metadata: Record<string, unknown> | null): string {
     return typeof seed === "number" ? [String(seed)] : [];
   });
   return seeds.length > 0 ? seeds.join(", ") : "—";
-}
-
-function ChunkEditor({
-  workflowId,
-  blocoId,
-  chunkIndex,
-  chunk,
-  onRefresh,
-}: {
-  workflowId: string;
-  blocoId: string;
-  chunkIndex: number;
-  chunk: AudioChunk;
-  onRefresh: () => void;
-}) {
-  const [regenerating, setRegenerating] = useState(false);
-  const [promoting, setPromoting] = useState<string | null>(null);
-  const activeTake = chunk.takes.find((t) => t.status === "active");
-  const candidateTakes = chunk.takes.filter((t) => t.status === "candidate");
-  const historyTakes = chunk.takes.filter((t) => ["superseded", "rejected", "failed"].includes(t.status));
-
-  async function handleRegenerate() {
-    if (regenerating) return;
-    const seed = Math.floor(Math.random() * 2 ** 31);
-    setRegenerating(true);
-    try {
-      await api.regenerarChunk(workflowId, blocoId, chunkIndex, seed, `regen-${chunk.id}-${Date.now()}`);
-      onRefresh();
-    } catch (e) {
-      console.error("Failed to regenerate chunk:", e);
-    } finally {
-      setRegenerating(false);
-    }
-  }
-
-  async function handlePromote(takeId: string) {
-    if (promoting) return;
-    setPromoting(takeId);
-    try {
-      await api.promoverChunkTake(workflowId, takeId, `promote-${takeId}-${Date.now()}`);
-      onRefresh();
-    } catch (e) {
-      console.error("Failed to promote take:", e);
-    } finally {
-      setPromoting(null);
-    }
-  }
-
-  async function handleDiscard(takeId: string) {
-    if (!window.confirm("Descartar este take candidato?")) return;
-    try {
-      await api.descartarChunkTake(workflowId, takeId, `discard-${takeId}-${Date.now()}`);
-      onRefresh();
-    } catch (e) {
-      console.error("Failed to discard take:", e);
-    }
-  }
-
-  return (
-    <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "#fafafa", borderRadius: "4px" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
-        <span>
-          <strong>Chunk {chunkIndex + 1}</strong> — seed {chunk.seed}
-          {chunk.duration_seconds != null && ` · ${chunk.duration_seconds.toFixed(2)}s`}
-        </span>
-        <button disabled={regenerating} onClick={handleRegenerate}>
-          {regenerating ? "Regenerando..." : "Regenerar"}
-        </button>
-      </div>
-      <div style={{ fontSize: "0.85rem", color: "#666" }}>
-        {chunk.text && <div><strong>Canônico:</strong> {chunk.text}</div>}
-        {chunk.synthesis_text && <div><strong>Síntese:</strong> {chunk.synthesis_text}</div>}
-      </div>
-      {activeTake && (
-        <div style={{ marginTop: "0.25rem" }}>
-          <strong>Take ativo:</strong>{" "}
-          <audio
-            controls
-            preload="metadata"
-            src={api.urlChunkTakeAudio(workflowId, activeTake.id, activeTake.audio_sha256)}
-            style={{ height: 24, verticalAlign: "middle" }}
-          />
-        </div>
-      )}
-      {candidateTakes.length > 0 && (
-        <div style={{ marginTop: "0.5rem" }}>
-          <strong>Takes candidatos:</strong>
-          {candidateTakes.map((take) => (
-            <div key={take.id} style={{ marginTop: "0.25rem", padding: "0.25rem", background: "#fff3cd", borderRadius: "4px" }}>
-              <audio
-                controls
-                preload="metadata"
-                src={api.urlChunkTakeAudio(workflowId, take.id, take.audio_sha256)}
-                style={{ height: 24, verticalAlign: "middle" }}
-              />
-              <button
-                disabled={promoting === take.id}
-                onClick={() => handlePromote(take.id)}
-                style={{ marginLeft: "0.5rem" }}
-              >
-                {promoting === take.id ? "Promovendo..." : "Promover"}
-              </button>
-              <button onClick={() => handleDiscard(take.id)} style={{ marginLeft: "0.25rem" }}>Descartar</button>
-            </div>
-          ))}
-        </div>
-      )}
-      {historyTakes.length > 0 && (
-        <details style={{ marginTop: "0.25rem" }}>
-          <summary>Histórico ({historyTakes.length})</summary>
-          <ul style={{ margin: 0, paddingLeft: "1.5rem" }}>
-            {historyTakes.map((take) => (
-              <li key={take.id}>
-                {take.kind} — {take.status}, seed {take.seed}
-                {take.error_message && <span style={{ color: "crimson" }}> — {take.error_message}</span>}
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-    </div>
-  );
-}
-
-function BlockChunks({
-  workflowId,
-  blocoId,
-  blocoStatus,
-  onRefresh,
-}: {
-  workflowId: string;
-  blocoId: string;
-  blocoStatus: string;
-  onRefresh: () => void;
-}) {
-  const [chunks, setChunks] = useState<AudioChunk[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-
-  useEffect(() => {
-    if (!expanded || chunks) return;
-    setLoading(true);
-    api.listarChunks(workflowId, blocoId)
-      .then(setChunks)
-      .catch((e) => console.error("Failed to load chunks:", e))
-      .finally(() => setLoading(false));
-  }, [expanded, workflowId, blocoId, chunks]);
-
-  if (blocoStatus !== "concluido") return null;
-
-  return (
-    <details style={{ marginTop: "0.25rem" }} onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)}>
-      <summary>Chunks ({chunks?.length ?? "—"})</summary>
-      {loading ? (
-        <div style={{ padding: "0.5rem" }}>Carregando chunks...</div>
-      ) : chunks && chunks.length > 0 ? (
-        <div style={{ marginTop: "0.25rem" }}>
-          {chunks.map((chunk) => (
-            <ChunkEditor
-              key={chunk.id}
-              workflowId={workflowId}
-              blocoId={blocoId}
-              chunkIndex={chunk.chunk_index}
-              chunk={chunk}
-              onRefresh={() => {
-                setChunks(null);
-                onRefresh();
-              }}
-            />
-          ))}
-          <button
-            style={{ marginTop: "0.5rem" }}
-            onClick={async () => {
-              try {
-                await api.remontarBloco(workflowId, blocoId, `reassemble-${blocoId}-${Date.now()}`);
-                onRefresh();
-              } catch (e) {
-                console.error("Failed to reassemble block:", e);
-              }
-            }}
-          >
-            Remontar bloco
-          </button>
-        </div>
-      ) : (
-        <div style={{ padding: "0.5rem" }}>Nenhum chunk persistido.</div>
-      )}
-    </details>
-  );
 }
 
 function TakeQualityDetails({ report }: { report: Record<string, unknown> | null }) {
@@ -291,6 +103,7 @@ function TakeQualityDetails({ report }: { report: Record<string, unknown> | null
 
 export default function WorkflowDetail() {
   const { id } = useParams<{ id: string }>();
+  const workflowId = id ?? "";
   const navigate = useNavigate();
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [erro, setErro] = useState<string | null>(null);
@@ -300,8 +113,9 @@ export default function WorkflowDetail() {
   const [render, setRender] = useState<WorkflowRender | null>(null);
   const [qa, setQa] = useState<ProductionQAReport | null>(null);
   const [qaExecutando, setQaExecutando] = useState(false);
+  const [chunkRefreshRevision, setChunkRefreshRevision] = useState(0);
 
-  async function carregar(signal?: AbortSignal): Promise<boolean | void> {
+  const carregar = useCallback(async (signal?: AbortSignal): Promise<boolean | void> => {
     if (!id) return;
     try {
       const wf = await api.obterWorkflow(id, signal);
@@ -346,7 +160,22 @@ export default function WorkflowDetail() {
       setErro((e as Error).message);
       throw e;
     }
-  }
+  }, [id]);
+
+  const refreshWorkflow = useCallback(async () => {
+    await carregar();
+  }, [carregar]);
+
+  const refreshPublishedChunks = useCallback(() => {
+    setChunkRefreshRevision((value) => value + 1);
+  }, []);
+
+  const audioEdit = useAudioEditUpdate({
+    workflowId,
+    editRevision: workflow?.audio_edit_revision ?? 0,
+    onRefresh: refreshWorkflow,
+    onPublished: refreshPublishedChunks,
+  });
 
   useEffect(() => {
     if (!id) return;
@@ -354,7 +183,7 @@ export default function WorkflowDetail() {
       intervalMs: 3000,
       maxBackoffMs: 30_000,
     });
-  }, [id]);
+  }, [id, carregar]);
 
   if (erro) return <div style={{ color: "crimson", padding: "2rem" }}>Erro: {erro}</div>;
   if (!workflow) return <div style={{ padding: "2rem" }}>Carregando...</div>;
@@ -470,6 +299,15 @@ export default function WorkflowDetail() {
           <span>{qa?.publication_ready ? "✓" : 6}</span><strong>QA</strong><small>{qa?.status || "not started"}</small>
         </div>
       </section>
+
+      <PendingAudioEdits
+        workflow={workflow}
+        update={audioEdit.update}
+        submitting={audioEdit.submitting}
+        error={audioEdit.error}
+        notice={audioEdit.notice}
+        onApply={() => { void audioEdit.apply(workflow.audio_edit_revision); }}
+      />
 
       <div style={{ marginBottom: "2rem", padding: "1rem", background: "#f5f5f5", borderRadius: "8px" }}>
         <p><strong>Status:</strong> <span style={{ color: statusColors[workflow.status] }}>{workflow.status}</span></p>
@@ -608,6 +446,7 @@ export default function WorkflowDetail() {
 
       <h2>Blocos de Áudio</h2>
       {workflow.blocos && workflow.blocos.length > 0 ? (
+        <div className="audio-block-table-wrapper">
         <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
             <tr style={{ textAlign: "left", borderBottom: "2px solid #ccc" }}>
@@ -703,13 +542,16 @@ export default function WorkflowDetail() {
                     workflowId={workflow.id}
                     blocoId={bloco.id}
                     blocoStatus={bloco.status}
-                    onRefresh={() => carregar()}
+                    dirty={bloco.audio_edit_dirty}
+                    refreshRevision={chunkRefreshRevision}
+                    onWorkflowRefresh={refreshWorkflow}
                   />
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
+        </div>
       ) : (
         <p>Nenhum bloco encontrado.</p>
       )}
