@@ -404,3 +404,118 @@ def assemble_narration(
         offsets=tuple(offsets),
         expected_frame_count=current_frame,
     )
+
+
+def reassemble_block_from_chunks(
+    chunk_paths: list[Path],
+    destination: Path,
+    *,
+    sample_rate: int,
+    pause_frames: list[int] | None = None,
+) -> AssemblyResult:
+    """Reassemble a block WAV from its active chunk takes in order.
+
+    Args:
+        chunk_paths: Ordered list of chunk WAV paths (active takes)
+        destination: Output block WAV path
+        sample_rate: Target sample rate
+        pause_frames: Optional list of pause frames to insert between chunks
+
+    Returns:
+        AssemblyResult with metadata and chunk offsets
+    """
+    if not chunk_paths:
+        raise ProductionAudioError("cannot reassemble from empty chunk list")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    offsets: list[BlockNarrationOffset] = []
+    current_frame = 0
+    temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp.wav"
+    try:
+        with sf.SoundFile(
+            str(temporary),
+            mode="w",
+            samplerate=sample_rate,
+            channels=1,
+            format="WAV",
+            subtype="PCM_16",
+        ) as output:
+            for idx, path in enumerate(chunk_paths):
+                start_frame = current_frame
+                try:
+                    with sf.SoundFile(str(path), mode="r") as source:
+                        source_rate = int(source.samplerate)
+                        if source.frames <= 0 or source.channels <= 0 or source_rate <= 0:
+                            raise ProductionAudioError("chunk WAV contains invalid samples")
+                        if source_rate == sample_rate:
+                            chunk_frames = 0
+                            for samples in source.blocks(
+                                blocksize=IO_BLOCK_FRAMES,
+                                dtype="float64",
+                                always_2d=True,
+                            ):
+                                if not np.all(np.isfinite(samples)):
+                                    raise ProductionAudioError(
+                                        "chunk WAV contains invalid samples"
+                                    )
+                                mono = np.mean(samples, axis=1, dtype=np.float64)
+                                output.write(mono)
+                                chunk_frames += len(mono)
+                        else:
+                            samples = source.read(dtype="float64", always_2d=True)
+                            if samples.size == 0 or not np.all(np.isfinite(samples)):
+                                raise ProductionAudioError(
+                                    "chunk WAV contains invalid samples"
+                                )
+                            mono = np.mean(samples, axis=1, dtype=np.float64)
+                            divisor = gcd(source_rate, sample_rate)
+                            resampled = resample_poly(
+                                mono,
+                                sample_rate // divisor,
+                                source_rate // divisor,
+                            )
+                            output.write(resampled)
+                            chunk_frames = len(resampled)
+                except ProductionAudioError:
+                    raise
+                except (OSError, RuntimeError) as exc:
+                    raise ProductionAudioError("chunk WAV is unreadable") from exc
+                if chunk_frames <= 0:
+                    raise ProductionAudioError("chunk WAV contains invalid samples")
+                current_frame += chunk_frames
+                offsets.append(
+                    BlockNarrationOffset(
+                        order=idx,
+                        start_seconds=start_frame / sample_rate,
+                        end_seconds=current_frame / sample_rate,
+                    )
+                )
+                # Insert pause between chunks if specified
+                if pause_frames and idx < len(chunk_paths) - 1:
+                    pause = pause_frames[idx] if idx < len(pause_frames) else 0
+                    if pause > 0:
+                        silence = np.zeros(pause, dtype=np.float64)
+                        output.write(silence)
+                        current_frame += pause
+        metadata = inspect_wav(temporary)
+        if (
+            metadata.sample_rate != sample_rate
+            or metadata.channels != 1
+            or metadata.subtype != "PCM_16"
+        ):
+            raise ProductionAudioError("reassembled block format is not canonical")
+        if metadata.frame_count != current_frame:
+            raise ProductionAudioError(
+                "reassembled WAV sample count differs from expected timeline"
+            )
+        os.replace(temporary, destination)
+        published = inspect_wav(destination)
+        if published != metadata:
+            destination.unlink(missing_ok=True)
+            raise ProductionAudioError("reassembled WAV changed during atomic publication")
+    finally:
+        temporary.unlink(missing_ok=True)
+    return AssemblyResult(
+        metadata=published,
+        offsets=tuple(offsets),
+        expected_frame_count=current_frame,
+    )

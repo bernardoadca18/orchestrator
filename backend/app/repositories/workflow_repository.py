@@ -9,7 +9,14 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.workflow import AudioBloco, AudioBlocoTake, TranscricaoAudio, WorkflowExecucao
+from app.models.workflow import (
+    AudioBloco,
+    AudioBlocoTake,
+    AudioChunk,
+    AudioChunkTake,
+    TranscricaoAudio,
+    WorkflowExecucao,
+)
 
 
 def evolve_production_error_history(
@@ -712,3 +719,219 @@ class WorkflowRepository:
     async def obter_transcricao(self, workflow_id: uuid.UUID) -> TranscricaoAudio | None:
         stmt = select(TranscricaoAudio).where(TranscricaoAudio.workflow_execucao_id == workflow_id)
         return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    # --- AudioChunk / AudioChunkTake ----------------------------------------
+
+    async def persistir_chunks(
+        self,
+        bloco_id: uuid.UUID,
+        chunks_data: list[dict],
+    ) -> list[AudioChunk]:
+        """Persist physical chunks with their initial active takes.
+
+        Args:
+            bloco_id: The audio block these chunks belong to
+            chunks_data: List of chunk metadata from Voice Service, each containing:
+                - chunk_index: Physical index within the block
+                - chunk_id: Stable identifier (job_id_chunk_index format)
+                - text: Canonical text from the script
+                - synthesis_text: Text sent to TTS provider
+                - seed: Deterministic seed used for synthesis
+                - duration_seconds: Audio duration
+                - sample_rate: Audio sample rate
+                - audio_path: Local path to the chunk WAV file
+                - audio_sha256: SHA256 hash of the audio file
+                - audio_byte_size: Size in bytes
+
+        Returns:
+            List of persisted AudioChunk objects with their initial takes
+        """
+        bloco = await self.obter_bloco_por_id(bloco_id)
+        if bloco is None:
+            raise LookupError("audio block not found")
+
+        # Check if chunks already exist for this block
+        existing = await self.listar_chunks(bloco_id)
+        if existing:
+            return list(existing)
+
+        persisted: list[AudioChunk] = []
+        for chunk_meta in chunks_data:
+            chunk_index = chunk_meta["chunk_index"]
+            chunk_id = chunk_meta["chunk_id"]
+            canonical_text = chunk_meta.get("text", "")
+            synthesis_text = chunk_meta.get("synthesis_text", canonical_text)
+            seed = chunk_meta["seed"]
+            duration_seconds = chunk_meta.get("duration_seconds")
+            sample_rate = chunk_meta.get("sample_rate")
+
+            chunk = AudioChunk(
+                audio_bloco_id=bloco_id,
+                chunk_index=chunk_index,
+                chunk_id=chunk_id,
+                canonical_text=canonical_text,
+                synthesis_text_snapshot=synthesis_text,
+                seed=seed,
+                duration_seconds=duration_seconds,
+                sample_rate=sample_rate,
+                status="pending",
+            )
+            self.session.add(chunk)
+            await self.session.flush()
+
+            # Create initial take
+            take = AudioChunkTake(
+                audio_chunk_id=chunk.id,
+                take_number=1,
+                kind="initial",
+                status="completed",
+                seed=seed,
+                audio_path=chunk_meta.get("audio_path"),
+                audio_sha256=chunk_meta.get("audio_sha256"),
+                audio_byte_size=chunk_meta.get("audio_byte_size"),
+                audio_sample_rate=sample_rate,
+                audio_duration_seconds=duration_seconds,
+                audio_frame_count=chunk_meta.get("audio_frame_count"),
+                completed_at=dt.datetime.now(dt.UTC),
+            )
+            self.session.add(take)
+            await self.session.flush()
+
+            # Set current take and activate chunk
+            chunk.current_take_id = take.id
+            chunk.status = "active"
+
+            persisted.append(chunk)
+
+        await self.session.commit()
+        for chunk in persisted:
+            await self.session.refresh(chunk)
+        return persisted
+
+    async def listar_chunks(self, bloco_id: uuid.UUID) -> Sequence[AudioChunk]:
+        """List all chunks for a block, ordered by chunk_index."""
+        stmt = (
+            select(AudioChunk)
+            .where(AudioChunk.audio_bloco_id == bloco_id)
+            .order_by(AudioChunk.chunk_index)
+            .options(selectinload(AudioChunk.takes))
+        )
+        return (await self.session.execute(stmt)).scalars().all()
+
+    async def obter_chunk(self, chunk_id: uuid.UUID) -> AudioChunk | None:
+        """Get a single chunk by ID with its takes loaded."""
+        stmt = (
+            select(AudioChunk)
+            .where(AudioChunk.id == chunk_id)
+            .options(selectinload(AudioChunk.takes))
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def obter_chunk_por_indice(
+        self, bloco_id: uuid.UUID, chunk_index: int
+    ) -> AudioChunk | None:
+        """Get a chunk by its block and index."""
+        stmt = select(AudioChunk).where(
+            AudioChunk.audio_bloco_id == bloco_id,
+            AudioChunk.chunk_index == chunk_index,
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def criar_chunk_take(
+        self,
+        chunk_id: uuid.UUID,
+        seed: int,
+        kind: str = "regeneration",
+    ) -> AudioChunkTake:
+        """Create a new candidate take for a chunk.
+
+        The take starts in 'queued' status and must be updated after
+        regeneration completes.
+        """
+        chunk = await self.obter_chunk(chunk_id)
+        if chunk is None:
+            raise LookupError("chunk not found")
+
+        # Determine next take number
+        max_take = (
+            await self.session.execute(
+                select(func.max(AudioChunkTake.take_number)).where(
+                    AudioChunkTake.audio_chunk_id == chunk_id
+                )
+            )
+        ).scalar_one()
+        take_number = (max_take or 0) + 1
+
+        take = AudioChunkTake(
+            audio_chunk_id=chunk_id,
+            take_number=take_number,
+            kind=kind,
+            status="queued",
+            seed=seed,
+        )
+        self.session.add(take)
+        await self.session.commit()
+        await self.session.refresh(take)
+        return take
+
+    async def atualizar_chunk_take(self, take_id: uuid.UUID, **campos) -> None:
+        """Update a chunk take's fields."""
+        take = await self.session.get(AudioChunkTake, take_id)
+        if take is None:
+            return
+        for chave, valor in campos.items():
+            setattr(take, chave, valor)
+        await self.session.commit()
+
+    async def promover_chunk_take(self, take_id: uuid.UUID) -> bool:
+        """Promote a candidate take to active.
+
+        Atomically:
+        - Mark the current active take as superseded
+        - Set the candidate take as completed
+        - Update the chunk's current_take_id
+        - Mark the chunk as stale (triggers downstream invalidation)
+
+        Returns True if promotion succeeded, False if take was already superseded.
+        """
+        take = await self.session.get(AudioChunkTake, take_id)
+        if take is None:
+            raise LookupError("take not found")
+
+        if take.status in {"superseded", "rejected", "failed"}:
+            return False
+
+        chunk = await self.obter_chunk(take.audio_chunk_id)
+        if chunk is None:
+            raise LookupError("chunk not found")
+
+        # Supersede current active take if exists
+        if chunk.current_take_id is not None and chunk.current_take_id != take_id:
+            current_take = await self.session.get(AudioChunkTake, chunk.current_take_id)
+            if current_take is not None:
+                current_take.status = "superseded"
+
+        # Promote the candidate
+        take.status = "completed"
+        take.completed_at = dt.datetime.now(dt.UTC)
+        chunk.current_take_id = take.id
+        chunk.status = "stale"  # Triggers downstream invalidation
+        chunk.updated_at = dt.datetime.now(dt.UTC)
+
+        await self.session.commit()
+        await self.session.refresh(chunk)
+        await self.session.refresh(take)
+        return True
+
+    async def descartar_chunk_take(self, take_id: uuid.UUID) -> bool:
+        """Mark a candidate take as rejected."""
+        take = await self.session.get(AudioChunkTake, take_id)
+        if take is None:
+            raise LookupError("take not found")
+
+        if take.status in {"completed", "superseded"}:
+            return False
+
+        take.status = "rejected"
+        await self.session.commit()
+        return True

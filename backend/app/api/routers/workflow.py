@@ -3,7 +3,9 @@ Endpoints de workflow: listar roteiros aprovados disponíveis no ideas-hub,
 enfileirar geração de áudio, acompanhar progresso e baixar o resultado.
 """
 
+import datetime as dt
 import uuid
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
@@ -19,6 +21,9 @@ from app.clients.video_composer_client import (
 )
 from app.core.database import get_db
 from app.models.workflow import (
+    AudioBloco,
+    AudioChunk,
+    AudioChunkTake,
     NarrationAlignment,
     ProductionQAReport,
     ProductionTimeline,
@@ -1044,6 +1049,374 @@ async def baixar_audio_bloco(
             409, "Áudio do take ativo falhou na verificação de integridade"
         ) from exc
     return audio_file_response(path, metadata, filename=f"bloco_{bloco.ordem:02d}.wav")
+
+
+@router.get("/{workflow_id}/blocos/{bloco_id}/chunks")
+async def listar_chunks_bloco(
+    workflow_id: uuid.UUID,
+    bloco_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """List all chunks for a block with their takes."""
+    repo = WorkflowRepository(session)
+    bloco = await repo.obter_bloco_por_id(bloco_id)
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    chunks = await repo.listar_chunks(bloco_id)
+    return [
+        {
+            "id": str(chunk.id),
+            "chunk_index": chunk.chunk_index,
+            "chunk_id": chunk.chunk_id,
+            "canonical_text": chunk.canonical_text,
+            "synthesis_text_snapshot": chunk.synthesis_text_snapshot,
+            "seed": chunk.seed,
+            "duration_seconds": chunk.duration_seconds,
+            "sample_rate": chunk.sample_rate,
+            "status": chunk.status,
+            "current_take_id": str(chunk.current_take_id) if chunk.current_take_id else None,
+            "takes": [
+                {
+                    "id": str(take.id),
+                    "take_number": take.take_number,
+                    "kind": take.kind,
+                    "status": take.status,
+                    "seed": take.seed,
+                    "audio_url": f"/workflow/{workflow_id}/chunks/{take.id}/audio"
+                    if take.audio_path and take.status == "completed"
+                    else None,
+                    "audio_sha256": take.audio_sha256,
+                    "audio_duration_seconds": take.audio_duration_seconds,
+                    "created_at": take.created_at.isoformat() if take.created_at else None,
+                    "completed_at": take.completed_at.isoformat() if take.completed_at else None,
+                    "error_message": take.error_message,
+                }
+                for take in chunk.takes
+            ],
+        }
+        for chunk in chunks
+    ]
+
+
+@router.post("/{workflow_id}/blocos/{bloco_id}/chunks/{chunk_index}/regenerate")
+async def regenerar_chunk(
+    workflow_id: uuid.UUID,
+    bloco_id: uuid.UUID,
+    chunk_index: int,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    """Regenerate a single chunk with a new seed.
+
+    Creates a candidate take that must be explicitly promoted.
+    Does NOT modify the active audio.
+    """
+    from app.clients.voice_client import VoiceClient
+    from app.core.config import settings
+    from app.services.audio_service import derive_manual_take_seed
+
+    repo = WorkflowRepository(session)
+    bloco = await repo.obter_bloco_por_id(bloco_id)
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    if bloco.status != "concluido":
+        raise HTTPException(400, "Bloco ainda não foi gerado")
+
+    chunk = await repo.obter_chunk_por_indice(bloco_id, chunk_index)
+    if chunk is None:
+        raise HTTPException(404, "Chunk não encontrado")
+
+    # Derive deterministic seed for regeneration using the audio_service function
+    next_take_number = (len(chunk.takes) + 1) if chunk.takes else 1
+    new_seed = derive_manual_take_seed(
+        block_id=bloco.id,
+        synthesis_identity=chunk.synthesis_text_snapshot,
+        attempt_index=next_take_number,
+        kind="regenerate",
+    )
+
+    # Create candidate take record
+    take = await repo.criar_chunk_take(chunk.id, new_seed, kind="regeneration")
+
+    try:
+        # Call Voice Service to regenerate
+        async with VoiceClient(settings) as voice:
+            if not bloco.voice_job_id:
+                raise HTTPException(500, "Bloco não possui job de voz remoto")
+
+            result = await voice.regenerate_chunk(
+                bloco.voice_job_id,
+                chunk_index,
+                new_seed,
+                idempotency_key=idempotency_key,
+            )
+
+            # Download the regenerated audio
+            audio_bytes = await voice.download_chunk_audio(bloco.voice_job_id, chunk_index)
+
+            # Save to disk
+            source_dir = settings.audio_output_dir / str(workflow_id)
+            chunks_dir = source_dir / "chunks"
+            chunks_dir.mkdir(parents=True, exist_ok=True)
+            chunk_path = chunks_dir / f"chunk_{chunk_index:04d}_take_{take.take_number}.wav"
+            chunk_path.write_bytes(audio_bytes)
+
+            # Update take with completed status
+            await repo.atualizar_chunk_take(
+                take.id,
+                status="completed",
+                audio_path=str(chunk_path),
+                audio_sha256=result.get("sha256"),
+                audio_byte_size=result.get("byte_size"),
+                audio_sample_rate=result.get("sample_rate"),
+                audio_duration_seconds=result.get("duration_seconds"),
+                audio_frame_count=result.get("frame_count"),
+                completed_at=dt.datetime.now(dt.UTC),
+            )
+
+        await session.refresh(take)
+        await session.refresh(chunk)
+
+        return {
+            "take_id": str(take.id),
+            "chunk_id": str(chunk.id),
+            "chunk_index": chunk.chunk_index,
+            "take_number": take.take_number,
+            "seed": take.seed,
+            "status": "candidate",
+            "audio_url": f"/workflow/{workflow_id}/chunks/{take.id}/audio",
+            "duration_seconds": take.audio_duration_seconds,
+        }
+
+    except Exception as exc:
+        await repo.atualizar_chunk_take(take.id, status="failed", error_message=str(exc))
+        raise HTTPException(500, f"Falha na regeneração do chunk: {exc}") from exc
+
+
+@router.post("/{workflow_id}/chunk-takes/{take_id}/promote")
+async def promover_chunk_take(
+    workflow_id: uuid.UUID,
+    take_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Promote a candidate take to active.
+
+    Atomically:
+    - Marks current active take as superseded
+    - Sets candidate as completed and active
+    - Marks chunk as stale (triggers downstream invalidation)
+
+    The block audio is NOT automatically reassembled.
+    """
+    import datetime as dt
+
+    repo = WorkflowRepository(session)
+
+    take = await session.get(AudioChunkTake, take_id)
+    if take is None:
+        raise HTTPException(404, "Take não encontrado")
+
+    chunk = await repo.obter_chunk(take.audio_chunk_id)
+    if chunk is None:
+        raise HTTPException(404, "Chunk não encontrado")
+
+    bloco = await repo.obter_bloco_por_id(chunk.audio_bloco_id)
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    if take.status != "completed":
+        raise HTTPException(400, "Take não está pronto para promoção")
+
+    success = await repo.promover_chunk_take(take_id)
+    if not success:
+        raise HTTPException(409, "Take já foi superado ou rejeitado")
+
+    # Trigger downstream invalidation
+    workflow = await repo.obter(workflow_id)
+    if workflow:
+        await repo.invalidar_derivados_de_audio(workflow, [bloco])
+
+    return {
+        "take_id": str(take_id),
+        "status": "promoted",
+        "chunk_status": "stale",
+        "message": "Take promovido. O bloco deve ser remontado.",
+    }
+
+
+@router.post("/{workflow_id}/blocos/{bloco_id}/reassemble")
+async def remontar_bloco(
+    workflow_id: uuid.UUID,
+    bloco_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Reassemble a block from its active chunk takes.
+
+    Reads the active take for each chunk in order and concatenates them
+    to produce a new block audio file. Invalidates downstream artifacts.
+    """
+    from app.core.config import settings
+    from app.services.production_audio import (
+        ProductionAudioError,
+        inspect_wav,
+        reassemble_block_from_chunks,
+    )
+
+    repo = WorkflowRepository(session)
+    bloco = await repo.obter_bloco_por_id(bloco_id)
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    if bloco.status != "concluido":
+        raise HTTPException(400, "Bloco ainda não foi gerado")
+
+    # Get all chunks with their active takes
+    chunks = await repo.listar_chunks(bloco_id)
+    if not chunks:
+        raise HTTPException(400, "Bloco não possui chunks persistidos")
+
+    # Verify all chunks have active takes
+    for chunk in chunks:
+        if chunk.status != "active" and chunk.status != "stale":
+            raise HTTPException(
+                400, f"Chunk {chunk.chunk_index} não possui take ativo"
+            )
+
+    # Collect active take audio paths in order
+    chunk_paths: list[Path] = []
+    for chunk in sorted(chunks, key=lambda c: c.chunk_index):
+        active_take = next(
+            (t for t in chunk.takes if t.id == chunk.current_take_id), None
+        )
+        if active_take is None or not active_take.audio_path:
+            raise HTTPException(
+                400, f"Chunk {chunk.chunk_index} não possui take ativo"
+            )
+        chunk_paths.append(Path(active_take.audio_path))
+
+    # Reassemble the block
+    source_dir = settings.audio_output_dir / str(workflow_id)
+    reassembled_path = source_dir / f"bloco_{bloco.ordem:02d}_reassembled.wav"
+
+    try:
+        result = reassemble_block_from_chunks(
+            chunk_paths,
+            reassembled_path,
+            sample_rate=24000,  # Qwen native sample rate
+        )
+    except ProductionAudioError as exc:
+        raise HTTPException(500, f"Falha na remontagem do bloco: {exc}") from exc
+
+    # Verify the reassembled audio
+    metadata = inspect_wav(reassembled_path)
+
+    # Update the block with the new audio
+    old_path = source_dir / f"bloco_{bloco.ordem:02d}.wav"
+    if old_path.exists():
+        backup_path = source_dir / f"bloco_{bloco.ordem:02d}_backup_{uuid.uuid4().hex[:8]}.wav"
+        old_path.rename(backup_path)
+
+    reassembled_path.rename(old_path)
+
+    # Update block metadata
+    bloco.audio_sha256 = metadata.sha256
+    bloco.audio_byte_size = metadata.byte_size
+    bloco.audio_sample_rate = metadata.sample_rate
+    bloco.audio_duration_seconds = metadata.duration_seconds
+    bloco.audio_frame_count = metadata.frame_count
+    bloco.audio_channels = metadata.channels
+    bloco.audio_subtype = metadata.subtype
+    bloco.status = "concluido"
+
+    # Mark all chunks as active (no longer stale)
+    for chunk in chunks:
+        if chunk.status == "stale":
+            chunk.status = "active"
+
+    await session.commit()
+
+    # Invalidate downstream artifacts
+    workflow = await repo.obter(workflow_id)
+    if workflow:
+        await repo.invalidar_derivados_de_audio(workflow, [bloco])
+
+    return {
+        "bloco_id": str(bloco_id),
+        "status": "reassembled",
+        "duration_seconds": metadata.duration_seconds,
+        "sha256": metadata.sha256,
+        "chunks_used": len(chunk_paths),
+    }
+
+
+@router.post("/{workflow_id}/chunk-takes/{take_id}/discard")
+async def descartar_chunk_take(
+    workflow_id: uuid.UUID,
+    take_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Discard a candidate take (mark as rejected)."""
+    repo = WorkflowRepository(session)
+
+    take = await session.get(AudioChunkTake, take_id)
+    if take is None:
+        raise HTTPException(404, "Take não encontrado")
+
+    chunk = await repo.obter_chunk(take.audio_chunk_id)
+    if chunk is None:
+        raise HTTPException(404, "Chunk não encontrado")
+
+    bloco = await repo.obter_bloco_por_id(chunk.audio_bloco_id)
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    success = await repo.descartar_chunk_take(take_id)
+    if not success:
+        raise HTTPException(409, "Take não pode ser descartado")
+
+    return {"take_id": str(take_id), "status": "rejected"}
+
+
+@router.api_route("/{workflow_id}/chunks/{take_id}/audio", methods=["GET", "HEAD"])
+async def baixar_chunk_audio(
+    workflow_id: uuid.UUID,
+    take_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Download audio for a specific chunk take."""
+    take = await session.get(AudioChunkTake, take_id)
+    if take is None:
+        raise HTTPException(404, "Take não encontrado")
+
+    chunk = await session.get(AudioChunk, take.audio_chunk_id)
+    if chunk is None:
+        raise HTTPException(404, "Chunk não encontrado")
+
+    bloco = await session.get(AudioBloco, chunk.audio_bloco_id)
+    if bloco is None or bloco.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Bloco não encontrado")
+
+    if take.status != "completed" or not take.audio_path:
+        raise HTTPException(404, "Áudio do take não disponível")
+
+    try:
+        path, metadata = verify_audio_artifact(
+            take.audio_path,
+            AudioArtifactExpectation(
+                sha256=take.audio_sha256,
+                byte_size=take.audio_byte_size,
+                duration_seconds=take.audio_duration_seconds,
+                sample_rate=take.audio_sample_rate,
+            ),
+        )
+    except AudioServingIntegrityError as exc:
+        raise HTTPException(409, "Áudio do take falhou na verificação de integridade") from exc
+
+    return audio_file_response(
+        path, metadata, filename=f"chunk_{chunk.chunk_index:04d}_take_{take.take_number:02d}.wav"
+    )
 
 
 @router.get("/{workflow_id}/pacote-producao", response_model=PacoteProducaoOut)

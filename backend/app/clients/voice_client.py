@@ -227,6 +227,45 @@ class VoiceClient:
             raise VoiceClientError("Voice Service returned an empty audio result")
         return response.content
 
+    async def list_chunks(self, job_id: str) -> list[dict[str, Any]]:
+        """List all persisted chunk artifacts for a narration job."""
+        response = await self._request_with_retry(
+            "GET",
+            f"/v1/narrations/{job_id}/chunks",
+            timeout=self.settings.voice_status_timeout_seconds,
+        )
+        return response.json()
+
+    async def download_chunk_audio(self, job_id: str, chunk_index: int) -> bytes:
+        """Download a specific chunk's WAV audio file."""
+        response = await self._request_with_retry(
+            "GET",
+            f"/v1/narrations/{job_id}/chunks/{chunk_index}/audio",
+            timeout=self.settings.voice_download_timeout_seconds,
+        )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"audio/wav", "audio/x-wav", "audio/wave"}:
+            raise VoiceClientError("Voice Service returned an unexpected audio content type")
+        if not response.content:
+            raise VoiceClientError("Voice Service returned an empty chunk audio result")
+        return response.content
+
+    async def regenerate_chunk(
+        self, job_id: str, chunk_index: int, seed: int, *, idempotency_key: str | None = None
+    ) -> dict[str, Any]:
+        """Regenerate a single chunk with a new seed."""
+        headers = {}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        response = await self._request_with_retry(
+            "POST",
+            f"/v1/narrations/{job_id}/chunks/{chunk_index}/regenerate",
+            timeout=self.settings.voice_create_timeout_seconds,
+            headers=headers if headers else None,
+            json={"seed": seed},
+        )
+        return response.json()
+
     async def resolve_profiles(
         self, voice_profile: str, generation_profile: str
     ) -> VoiceProfileProvenance:

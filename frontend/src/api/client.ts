@@ -100,6 +100,38 @@ export interface PronunciationReplacement {
   count?: number;
 }
 
+export interface AudioChunk {
+  id: string;
+  bloco_id: string;
+  chunk_index: number;
+  chunk_id: string;
+  text: string | null;
+  synthesis_text: string | null;
+  seed: number;
+  duration_seconds: number | null;
+  sample_rate: number | null;
+  current_take_id: string | null;
+  takes: AudioChunkTake[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AudioChunkTake {
+  id: string;
+  chunk_id: string;
+  kind: "initial" | "regeneration";
+  status: "candidate" | "active" | "superseded" | "rejected" | "failed";
+  seed: number;
+  audio_sha256: string | null;
+  audio_byte_size: number | null;
+  audio_duration_seconds: number | null;
+  audio_sample_rate: number | null;
+  audio_frame_count: number | null;
+  error_message: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
 export interface AudioBlocoTake {
   id: string;
   attempt_index: number;
@@ -386,4 +418,29 @@ export const api = {
   urlAudioBloco: (workflowId: string, blocoId: string, sha256?: string | null) =>
     `${BASE_URL}/workflow/${workflowId}/blocos/${blocoId}/audio${sha256 ? `?artifact=${encodeURIComponent(sha256)}` : ""}`,
   urlVideo: (id: string) => `${BASE_URL}/workflow/${id}/video`,
+  urlChunkTakeAudio: (workflowId: string, takeId: string, sha256?: string | null) =>
+    `${BASE_URL}/workflow/${workflowId}/chunks/${takeId}/audio${sha256 ? `?artifact=${encodeURIComponent(sha256)}` : ""}`,
+  listarChunks: (workflowId: string, blocoId: string, signal?: AbortSignal) =>
+    request<AudioChunk[]>(`/workflow/${workflowId}/blocos/${blocoId}/chunks`, { signal }),
+  regenerarChunk: (workflowId: string, blocoId: string, chunkIndex: number, seed: number, key: string) =>
+    request<AudioChunkTake>(`/workflow/${workflowId}/blocos/${blocoId}/chunks/${chunkIndex}/regenerate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+      body: JSON.stringify({ seed }),
+    }),
+  promoverChunkTake: (workflowId: string, takeId: string, key: string) =>
+    request<{ success: boolean; chunk: AudioChunk }>(`/workflow/${workflowId}/chunk-takes/${takeId}/promote`, {
+      method: "POST",
+      headers: { "Idempotency-Key": key },
+    }),
+  descartarChunkTake: (workflowId: string, takeId: string, key: string) =>
+    request<{ success: boolean }>(`/workflow/${workflowId}/chunk-takes/${takeId}/discard`, {
+      method: "POST",
+      headers: { "Idempotency-Key": key },
+    }),
+  remontarBloco: (workflowId: string, blocoId: string, key: string) =>
+    request<{ success: boolean; audio_sha256: string; duration_seconds: number }>(`/workflow/${workflowId}/blocos/${blocoId}/reassemble`, {
+      method: "POST",
+      headers: { "Idempotency-Key": key },
+    }),
 };

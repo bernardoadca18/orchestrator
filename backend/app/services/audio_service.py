@@ -517,6 +517,47 @@ class AudioWorkflowService:
                             pause_diagnostics=pause_diagnostics,
                             erro_mensagem=None,
                         )
+                    # Persist chunk artifacts from Voice Service
+                    if hasattr(self.repo, "persistir_chunks"):
+                        try:
+                            chunks_metadata = completed.metadata.get("chunks", [])
+                            if chunks_metadata:
+                                chunk_artifacts = await voice.list_chunks(completed.id)
+                                chunks_root = source_dir / "chunks"
+                                chunks_root.mkdir(parents=True, exist_ok=True)
+                                chunks_data = []
+                                for artifact in chunk_artifacts:
+                                    chunk_index = artifact["chunk_index"]
+                                    chunk_audio = await voice.download_chunk_audio(
+                                        completed.id, chunk_index
+                                    )
+                                    chunk_path = (
+                                        chunks_root
+                                        / f"chunk_{chunk_index:04d}_{take.id}.wav"
+                                    )
+                                    chunk_path.write_bytes(chunk_audio)
+                                    chunks_data.append({
+                                        "chunk_index": chunk_index,
+                                        "chunk_id": artifact["chunk_id"],
+                                        "text": artifact.get("text", ""),
+                                        "synthesis_text": artifact.get("synthesis_text", ""),
+                                        "seed": artifact["seed"],
+                                        "duration_seconds": artifact.get("duration_seconds"),
+                                        "sample_rate": artifact.get("sample_rate"),
+                                        "audio_path": str(chunk_path),
+                                        "audio_sha256": artifact.get("sha256"),
+                                        "audio_byte_size": artifact.get("byte_size"),
+                                        "audio_frame_count": artifact.get("frame_count"),
+                                    })
+                                if chunks_data:
+                                    await self.repo.persistir_chunks(block.id, chunks_data)
+                        except Exception:
+                            logger.exception(
+                                "failed to persist chunk artifacts",
+                                extra={"block_id": str(block.id), "job_id": completed.id},
+                            )
+                            # Continue without chunks - block is still valid
+
                     source_paths.append(source_path)
                     block_pause_timelines[order] = [
                         item

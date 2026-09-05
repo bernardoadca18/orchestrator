@@ -10,6 +10,8 @@ import {
   VisualPlan,
   Workflow,
   WorkflowRender,
+  AudioChunk,
+  AudioChunkTake,
 } from "../api/client";
 import { shouldPollQA, shouldPollRender } from "./polling";
 import { presentContentQuality, qualityToneColor } from "../utils/contentQuality";
@@ -53,6 +55,195 @@ function chunkSeeds(metadata: Record<string, unknown> | null): string {
     return typeof seed === "number" ? [String(seed)] : [];
   });
   return seeds.length > 0 ? seeds.join(", ") : "—";
+}
+
+function ChunkEditor({
+  workflowId,
+  blocoId,
+  chunkIndex,
+  chunk,
+  onRefresh,
+}: {
+  workflowId: string;
+  blocoId: string;
+  chunkIndex: number;
+  chunk: AudioChunk;
+  onRefresh: () => void;
+}) {
+  const [regenerating, setRegenerating] = useState(false);
+  const [promoting, setPromoting] = useState<string | null>(null);
+  const activeTake = chunk.takes.find((t) => t.status === "active");
+  const candidateTakes = chunk.takes.filter((t) => t.status === "candidate");
+  const historyTakes = chunk.takes.filter((t) => ["superseded", "rejected", "failed"].includes(t.status));
+
+  async function handleRegenerate() {
+    if (regenerating) return;
+    const seed = Math.floor(Math.random() * 2 ** 31);
+    setRegenerating(true);
+    try {
+      await api.regenerarChunk(workflowId, blocoId, chunkIndex, seed, `regen-${chunk.id}-${Date.now()}`);
+      onRefresh();
+    } catch (e) {
+      console.error("Failed to regenerate chunk:", e);
+    } finally {
+      setRegenerating(false);
+    }
+  }
+
+  async function handlePromote(takeId: string) {
+    if (promoting) return;
+    setPromoting(takeId);
+    try {
+      await api.promoverChunkTake(workflowId, takeId, `promote-${takeId}-${Date.now()}`);
+      onRefresh();
+    } catch (e) {
+      console.error("Failed to promote take:", e);
+    } finally {
+      setPromoting(null);
+    }
+  }
+
+  async function handleDiscard(takeId: string) {
+    if (!window.confirm("Descartar este take candidato?")) return;
+    try {
+      await api.descartarChunkTake(workflowId, takeId, `discard-${takeId}-${Date.now()}`);
+      onRefresh();
+    } catch (e) {
+      console.error("Failed to discard take:", e);
+    }
+  }
+
+  return (
+    <div style={{ marginTop: "0.5rem", padding: "0.5rem", background: "#fafafa", borderRadius: "4px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+        <span>
+          <strong>Chunk {chunkIndex + 1}</strong> — seed {chunk.seed}
+          {chunk.duration_seconds != null && ` · ${chunk.duration_seconds.toFixed(2)}s`}
+        </span>
+        <button disabled={regenerating} onClick={handleRegenerate}>
+          {regenerating ? "Regenerando..." : "Regenerar"}
+        </button>
+      </div>
+      <div style={{ fontSize: "0.85rem", color: "#666" }}>
+        {chunk.text && <div><strong>Canônico:</strong> {chunk.text}</div>}
+        {chunk.synthesis_text && <div><strong>Síntese:</strong> {chunk.synthesis_text}</div>}
+      </div>
+      {activeTake && (
+        <div style={{ marginTop: "0.25rem" }}>
+          <strong>Take ativo:</strong>{" "}
+          <audio
+            controls
+            preload="metadata"
+            src={api.urlChunkTakeAudio(workflowId, activeTake.id, activeTake.audio_sha256)}
+            style={{ height: 24, verticalAlign: "middle" }}
+          />
+        </div>
+      )}
+      {candidateTakes.length > 0 && (
+        <div style={{ marginTop: "0.5rem" }}>
+          <strong>Takes candidatos:</strong>
+          {candidateTakes.map((take) => (
+            <div key={take.id} style={{ marginTop: "0.25rem", padding: "0.25rem", background: "#fff3cd", borderRadius: "4px" }}>
+              <audio
+                controls
+                preload="metadata"
+                src={api.urlChunkTakeAudio(workflowId, take.id, take.audio_sha256)}
+                style={{ height: 24, verticalAlign: "middle" }}
+              />
+              <button
+                disabled={promoting === take.id}
+                onClick={() => handlePromote(take.id)}
+                style={{ marginLeft: "0.5rem" }}
+              >
+                {promoting === take.id ? "Promovendo..." : "Promover"}
+              </button>
+              <button onClick={() => handleDiscard(take.id)} style={{ marginLeft: "0.25rem" }}>Descartar</button>
+            </div>
+          ))}
+        </div>
+      )}
+      {historyTakes.length > 0 && (
+        <details style={{ marginTop: "0.25rem" }}>
+          <summary>Histórico ({historyTakes.length})</summary>
+          <ul style={{ margin: 0, paddingLeft: "1.5rem" }}>
+            {historyTakes.map((take) => (
+              <li key={take.id}>
+                {take.kind} — {take.status}, seed {take.seed}
+                {take.error_message && <span style={{ color: "crimson" }}> — {take.error_message}</span>}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function BlockChunks({
+  workflowId,
+  blocoId,
+  blocoStatus,
+  onRefresh,
+}: {
+  workflowId: string;
+  blocoId: string;
+  blocoStatus: string;
+  onRefresh: () => void;
+}) {
+  const [chunks, setChunks] = useState<AudioChunk[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    if (!expanded || chunks) return;
+    setLoading(true);
+    api.listarChunks(workflowId, blocoId)
+      .then(setChunks)
+      .catch((e) => console.error("Failed to load chunks:", e))
+      .finally(() => setLoading(false));
+  }, [expanded, workflowId, blocoId, chunks]);
+
+  if (blocoStatus !== "concluido") return null;
+
+  return (
+    <details style={{ marginTop: "0.25rem" }} onToggle={(e) => setExpanded((e.target as HTMLDetailsElement).open)}>
+      <summary>Chunks ({chunks?.length ?? "—"})</summary>
+      {loading ? (
+        <div style={{ padding: "0.5rem" }}>Carregando chunks...</div>
+      ) : chunks && chunks.length > 0 ? (
+        <div style={{ marginTop: "0.25rem" }}>
+          {chunks.map((chunk) => (
+            <ChunkEditor
+              key={chunk.id}
+              workflowId={workflowId}
+              blocoId={blocoId}
+              chunkIndex={chunk.chunk_index}
+              chunk={chunk}
+              onRefresh={() => {
+                setChunks(null);
+                onRefresh();
+              }}
+            />
+          ))}
+          <button
+            style={{ marginTop: "0.5rem" }}
+            onClick={async () => {
+              try {
+                await api.remontarBloco(workflowId, blocoId, `reassemble-${blocoId}-${Date.now()}`);
+                onRefresh();
+              } catch (e) {
+                console.error("Failed to reassemble block:", e);
+              }
+            }}
+          >
+            Remontar bloco
+          </button>
+        </div>
+      ) : (
+        <div style={{ padding: "0.5rem" }}>Nenhum chunk persistido.</div>
+      )}
+    </details>
+  );
 }
 
 function TakeQualityDetails({ report }: { report: Record<string, unknown> | null }) {
@@ -430,6 +621,7 @@ export default function WorkflowDetail() {
               <th style={{ padding: "8px" }}>Texto</th>
               <th style={{ padding: "8px" }}>Erro</th>
               <th style={{ padding: "8px" }}>Áudio</th>
+              <th style={{ padding: "8px" }}>Chunks</th>
             </tr>
           </thead>
           <tbody>
@@ -505,6 +697,14 @@ export default function WorkflowDetail() {
                   {bloco.status === "concluido" && bloco.audio_sha256 && (
                     <audio key={`${bloco.id}:${bloco.audio_sha256}`} controls preload="metadata" src={api.urlAudioBloco(workflow.id, bloco.id, bloco.audio_sha256)} style={{ height: 30 }} />
                   )}
+                </td>
+                <td style={{ padding: "8px" }}>
+                  <BlockChunks
+                    workflowId={workflow.id}
+                    blocoId={bloco.id}
+                    blocoStatus={bloco.status}
+                    onRefresh={() => carregar()}
+                  />
                 </td>
               </tr>
             ))}
