@@ -57,6 +57,7 @@ QUALITY_RETRY_CATEGORIES = frozenset({
 })
 QUALITY_RETRY_SEED_STRATEGY = "qwen-orchestrator-quality-retry-v1"
 MANUAL_TAKE_SEED_STRATEGY = "qwen-orchestrator-manual-take-v1"
+MANUAL_CHUNK_SEED_STRATEGY = "qwen-orchestrator-manual-chunk-v1"
 
 
 def _sha256_text(value: str) -> str:
@@ -81,6 +82,22 @@ def derive_manual_take_seed(
 ) -> int:
     payload = (
         f"{MANUAL_TAKE_SEED_STRATEGY}:{block_id}:{synthesis_identity}:{attempt_index}:{kind}"
+    ).encode()
+    value = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+    return value % (2**31 - 1) + 1
+
+
+def derive_manual_chunk_seed(
+    *,
+    block_id: uuid.UUID,
+    chunk_id: uuid.UUID,
+    synthesis_text_snapshot: str,
+    idempotency_key: str,
+) -> int:
+    """Resolve one stable explicit seed per semantic manual chunk operation."""
+    payload = (
+        f"{MANUAL_CHUNK_SEED_STRATEGY}:{block_id}:{chunk_id}:"
+        f"{synthesis_text_snapshot}:{idempotency_key}"
     ).encode()
     value = int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
     return value % (2**31 - 1) + 1
@@ -523,6 +540,10 @@ class AudioWorkflowService:
                             chunks_metadata = completed.metadata.get("chunks", [])
                             if chunks_metadata:
                                 chunk_artifacts = await voice.list_chunks(completed.id)
+                                if len(chunk_artifacts) != len(chunks_metadata):
+                                    raise ProductionAudioError(
+                                        "Voice Service did not return every physical chunk"
+                                    )
                                 chunks_root = source_dir / "chunks"
                                 chunks_root.mkdir(parents=True, exist_ok=True)
                                 chunks_data = []
@@ -535,19 +556,43 @@ class AudioWorkflowService:
                                         chunks_root
                                         / f"chunk_{chunk_index:04d}_{take.id}.wav"
                                     )
-                                    chunk_path.write_bytes(chunk_audio)
+                                    chunk_metadata = publish_source_block(
+                                        chunk_audio,
+                                        chunk_path,
+                                        expected_sha256=artifact.get("sha256"),
+                                        expected_byte_size=artifact.get("byte_size"),
+                                        expected_duration_seconds=artifact.get(
+                                            "duration_seconds"
+                                        ),
+                                        expected_sample_rate=artifact.get("sample_rate"),
+                                        expected_frame_count=artifact.get("frame_count"),
+                                    )
                                     chunks_data.append({
                                         "chunk_index": chunk_index,
                                         "chunk_id": artifact["chunk_id"],
                                         "text": artifact.get("text", ""),
                                         "synthesis_text": artifact.get("synthesis_text", ""),
+                                        "start_char": artifact["start_char"],
+                                        "end_char": artifact["end_char"],
+                                        "boundary": artifact["boundary"],
+                                        "chunking_identity": artifact["chunking_identity"],
+                                        "chunking_strategy_version": artifact[
+                                            "chunking_strategy_version"
+                                        ],
+                                        "voice_profile_identity": artifact[
+                                            "voice_identity"
+                                        ],
+                                        "generation_profile_identity": artifact[
+                                            "generation_identity"
+                                        ],
+                                        "source_job_id": completed.id,
                                         "seed": artifact["seed"],
-                                        "duration_seconds": artifact.get("duration_seconds"),
-                                        "sample_rate": artifact.get("sample_rate"),
+                                        "duration_seconds": chunk_metadata.duration_seconds,
+                                        "sample_rate": chunk_metadata.sample_rate,
                                         "audio_path": str(chunk_path),
-                                        "audio_sha256": artifact.get("sha256"),
-                                        "audio_byte_size": artifact.get("byte_size"),
-                                        "audio_frame_count": artifact.get("frame_count"),
+                                        "audio_sha256": chunk_metadata.sha256,
+                                        "audio_byte_size": chunk_metadata.byte_size,
+                                        "audio_frame_count": chunk_metadata.frame_count,
                                     })
                                 if chunks_data:
                                     await self.repo.persistir_chunks(block.id, chunks_data)
@@ -556,7 +601,7 @@ class AudioWorkflowService:
                                 "failed to persist chunk artifacts",
                                 extra={"block_id": str(block.id), "job_id": completed.id},
                             )
-                            # Continue without chunks - block is still valid
+                            raise
 
                     source_paths.append(source_path)
                     block_pause_timelines[order] = [

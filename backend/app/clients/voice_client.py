@@ -254,17 +254,32 @@ class VoiceClient:
         self, job_id: str, chunk_index: int, seed: int, *, idempotency_key: str | None = None
     ) -> dict[str, Any]:
         """Regenerate a single chunk with a new seed."""
-        headers = {}
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key
+        if not idempotency_key:
+            raise VoiceClientError("Idempotency-Key is required for chunk regeneration")
         response = await self._request_with_retry(
             "POST",
             f"/v1/narrations/{job_id}/chunks/{chunk_index}/regenerate",
             timeout=self.settings.voice_create_timeout_seconds,
-            headers=headers if headers else None,
+            headers={"Idempotency-Key": idempotency_key},
             json={"seed": seed},
         )
         return response.json()
+
+    async def download_chunk_candidate_audio(
+        self, job_id: str, candidate_id: str
+    ) -> bytes:
+        """Download one exact immutable candidate artifact."""
+        response = await self._request_with_retry(
+            "GET",
+            f"/v1/narrations/{job_id}/chunk-candidates/{candidate_id}/audio",
+            timeout=self.settings.voice_download_timeout_seconds,
+        )
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        if content_type not in {"audio/wav", "audio/x-wav", "audio/wave"}:
+            raise VoiceClientError("Voice Service returned an unexpected audio content type")
+        if not response.content:
+            raise VoiceClientError("Voice Service returned an empty chunk candidate")
+        return response.content
 
     async def resolve_profiles(
         self, voice_profile: str, generation_profile: str

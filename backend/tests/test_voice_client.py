@@ -133,6 +133,48 @@ async def test_post_network_retry_reuses_identical_request_and_key() -> None:
 
 
 @pytest.mark.asyncio
+async def test_chunk_regeneration_uses_stable_key_and_exact_candidate_route() -> None:
+    observed: list[httpx.Request] = []
+    candidate_id = "c" * 32
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        observed.append(request)
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "candidate_id": candidate_id,
+                    "job_id": "job-1",
+                    "chunk_index": 3,
+                    "seed": 901,
+                },
+            )
+        return httpx.Response(
+            200,
+            content=b"RIFFcandidate",
+            headers={"content-type": "audio/wav"},
+        )
+
+    async with VoiceClient(_settings(), transport=httpx.MockTransport(handler)) as client:
+        result = await client.regenerate_chunk(
+            "job-1", 3, 901, idempotency_key="stable-chunk-key"
+        )
+        audio = await client.download_chunk_candidate_audio(
+            "job-1", result["candidate_id"]
+        )
+        with pytest.raises(VoiceClientError, match="Idempotency-Key"):
+            await client.regenerate_chunk("job-1", 3, 901)
+
+    assert observed[0].url.path == "/v1/narrations/job-1/chunks/3/regenerate"
+    assert observed[0].headers["Idempotency-Key"] == "stable-chunk-key"
+    assert json.loads(observed[0].content) == {"seed": 901}
+    assert observed[1].url.path == (
+        f"/v1/narrations/job-1/chunk-candidates/{candidate_id}/audio"
+    )
+    assert audio == b"RIFFcandidate"
+
+
+@pytest.mark.asyncio
 async def test_poll_queued_running_completed() -> None:
     states = deque([_job("queued"), _job("running"), _job("completed")])
 

@@ -1081,10 +1081,17 @@ async def listar_chunks_bloco(
                     "id": str(take.id),
                     "take_number": take.take_number,
                     "kind": take.kind,
-                    "status": take.status,
+                    "status": (
+                        "active"
+                        if take.id == chunk.current_take_id
+                        else "candidate"
+                        if take.kind == "regeneration" and take.status == "completed"
+                        else take.status
+                    ),
                     "seed": take.seed,
                     "audio_url": f"/workflow/{workflow_id}/chunks/{take.id}/audio"
-                    if take.audio_path and take.status == "completed"
+                    if take.audio_path
+                    and take.status in {"completed", "superseded", "rejected"}
                     else None,
                     "audio_sha256": take.audio_sha256,
                     "audio_duration_seconds": take.audio_duration_seconds,
@@ -1114,7 +1121,16 @@ async def regenerar_chunk(
     """
     from app.clients.voice_client import VoiceClient
     from app.core.config import settings
-    from app.services.audio_service import derive_manual_take_seed
+    from app.services.audio_service import derive_manual_chunk_seed
+    from app.services.production_audio import (
+        ProductionAudioError,
+        publish_immutable_source_audio,
+    )
+
+    if idempotency_key is None or not (1 <= len(idempotency_key) <= 200):
+        raise HTTPException(
+            400, "Idempotency-Key válido é obrigatório para regenerar um chunk"
+        )
 
     repo = WorkflowRepository(session)
     bloco = await repo.obter_bloco_por_id(bloco_id)
@@ -1127,52 +1143,118 @@ async def regenerar_chunk(
     chunk = await repo.obter_chunk_por_indice(bloco_id, chunk_index)
     if chunk is None:
         raise HTTPException(404, "Chunk não encontrado")
+    loaded_chunk = await repo.obter_chunk(chunk.id)
+    assert loaded_chunk is not None
+    chunk = loaded_chunk
 
-    # Derive deterministic seed for regeneration using the audio_service function
-    next_take_number = (len(chunk.takes) + 1) if chunk.takes else 1
-    new_seed = derive_manual_take_seed(
-        block_id=bloco.id,
-        synthesis_identity=chunk.synthesis_text_snapshot,
-        attempt_index=next_take_number,
-        kind="regenerate",
-    )
-
-    # Create candidate take record
-    take = await repo.criar_chunk_take(chunk.id, new_seed, kind="regeneration")
-
-    try:
-        # Call Voice Service to regenerate
-        async with VoiceClient(settings) as voice:
-            if not bloco.voice_job_id:
-                raise HTTPException(500, "Bloco não possui job de voz remoto")
-
-            result = await voice.regenerate_chunk(
-                bloco.voice_job_id,
-                chunk_index,
+    existing = await repo.obter_chunk_take_por_idempotency(idempotency_key)
+    if existing is not None:
+        if existing.audio_chunk_id != chunk.id:
+            raise HTTPException(
+                409, "Idempotency-Key já foi usado para outro chunk"
+            )
+        take = existing
+        new_seed = take.seed
+    else:
+        new_seed = derive_manual_chunk_seed(
+            block_id=bloco.id,
+            chunk_id=chunk.id,
+            synthesis_text_snapshot=chunk.synthesis_text_snapshot,
+            idempotency_key=idempotency_key,
+        )
+        try:
+            take = await repo.criar_chunk_take(
+                chunk.id,
                 new_seed,
+                kind="regeneration",
                 idempotency_key=idempotency_key,
             )
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
-            # Download the regenerated audio
-            audio_bytes = await voice.download_chunk_audio(bloco.voice_job_id, chunk_index)
+    if take.status == "rejected":
+        raise HTTPException(409, "A operação idempotente já foi rejeitada")
 
-            # Save to disk
-            source_dir = settings.audio_output_dir / str(workflow_id)
+    try:
+        if take.status != "completed":
+            await repo.atualizar_chunk_take(
+                take.id, status="running", error_message=None
+            )
+            async with VoiceClient(settings) as voice:
+                result = await voice.regenerate_chunk(
+                    chunk.source_job_id,
+                    chunk_index,
+                    new_seed,
+                    idempotency_key=idempotency_key,
+                )
+                if result.get("synthesis_text") != chunk.synthesis_text_snapshot:
+                    raise ProductionAudioError(
+                        "Voice Service candidate changed the frozen synthesis text"
+                    )
+                if result.get("seed") != new_seed:
+                    raise ProductionAudioError(
+                        "Voice Service candidate returned a different seed"
+                    )
+                if (
+                    result.get("job_id") != chunk.source_job_id
+                    or result.get("chunk_index") != chunk_index
+                    or result.get("status") != "completed"
+                ):
+                    raise ProductionAudioError(
+                        "Voice Service candidate identity is inconsistent"
+                    )
+                candidate_id = result.get("candidate_id")
+                if not isinstance(candidate_id, str) or not candidate_id:
+                    raise ProductionAudioError(
+                        "Voice Service candidate identity is missing"
+                    )
+                if (
+                    take.provider_candidate_id is not None
+                    and take.provider_candidate_id != candidate_id
+                ):
+                    raise ProductionAudioError(
+                        "Voice Service changed an idempotent candidate identity"
+                    )
+
+                audio_bytes = await voice.download_chunk_candidate_audio(
+                    chunk.source_job_id, candidate_id
+                )
+
+            source_dir = Path(settings.audio_storage_path) / str(workflow_id) / "blocks"
             chunks_dir = source_dir / "chunks"
             chunks_dir.mkdir(parents=True, exist_ok=True)
-            chunk_path = chunks_dir / f"chunk_{chunk_index:04d}_take_{take.take_number}.wav"
-            chunk_path.write_bytes(audio_bytes)
+            chunk_path = chunks_dir / f"chunk_{chunk_index:04d}_take_{take.id}.wav"
+            expectation = AudioArtifactExpectation(
+                sha256=result.get("sha256"),
+                byte_size=result.get("byte_size"),
+                duration_seconds=result.get("duration_seconds"),
+                sample_rate=result.get("sample_rate"),
+                channels=None,
+                frame_count=result.get("frame_count"),
+            )
+            if chunk_path.exists():
+                _, local_metadata = verify_audio_artifact(chunk_path, expectation)
+            else:
+                local_metadata = publish_immutable_source_audio(
+                    audio_bytes,
+                    chunk_path,
+                    expected_sha256=result.get("sha256"),
+                    expected_byte_size=result.get("byte_size"),
+                    expected_duration_seconds=result.get("duration_seconds"),
+                    expected_sample_rate=result.get("sample_rate"),
+                    expected_frame_count=result.get("frame_count"),
+                )
 
-            # Update take with completed status
             await repo.atualizar_chunk_take(
                 take.id,
                 status="completed",
                 audio_path=str(chunk_path),
-                audio_sha256=result.get("sha256"),
-                audio_byte_size=result.get("byte_size"),
-                audio_sample_rate=result.get("sample_rate"),
-                audio_duration_seconds=result.get("duration_seconds"),
-                audio_frame_count=result.get("frame_count"),
+                audio_sha256=local_metadata.sha256,
+                audio_byte_size=local_metadata.byte_size,
+                audio_sample_rate=local_metadata.sample_rate,
+                audio_duration_seconds=local_metadata.duration_seconds,
+                audio_frame_count=local_metadata.frame_count,
+                provider_candidate_id=candidate_id,
                 completed_at=dt.datetime.now(dt.UTC),
             )
 
@@ -1192,6 +1274,8 @@ async def regenerar_chunk(
 
     except Exception as exc:
         await repo.atualizar_chunk_take(take.id, status="failed", error_message=str(exc))
+        if isinstance(exc, HTTPException):
+            raise
         raise HTTPException(500, f"Falha na regeneração do chunk: {exc}") from exc
 
 
@@ -1210,8 +1294,6 @@ async def promover_chunk_take(
 
     The block audio is NOT automatically reassembled.
     """
-    import datetime as dt
-
     repo = WorkflowRepository(session)
 
     take = await session.get(AudioChunkTake, take_id)
@@ -1297,11 +1379,11 @@ async def remontar_bloco(
         chunk_paths.append(Path(active_take.audio_path))
 
     # Reassemble the block
-    source_dir = settings.audio_output_dir / str(workflow_id)
+    source_dir = Path(settings.audio_storage_path) / str(workflow_id) / "blocks"
     reassembled_path = source_dir / f"bloco_{bloco.ordem:02d}_reassembled.wav"
 
     try:
-        result = reassemble_block_from_chunks(
+        reassemble_block_from_chunks(
             chunk_paths,
             reassembled_path,
             sample_rate=24000,  # Qwen native sample rate
@@ -1398,7 +1480,7 @@ async def baixar_chunk_audio(
     if bloco is None or bloco.workflow_execucao_id != workflow_id:
         raise HTTPException(404, "Bloco não encontrado")
 
-    if take.status != "completed" or not take.audio_path:
+    if take.status not in {"completed", "superseded", "rejected"} or not take.audio_path:
         raise HTTPException(404, "Áudio do take não disponível")
 
     try:
@@ -1409,6 +1491,8 @@ async def baixar_chunk_audio(
                 byte_size=take.audio_byte_size,
                 duration_seconds=take.audio_duration_seconds,
                 sample_rate=take.audio_sample_rate,
+                channels=None,
+                frame_count=take.audio_frame_count,
             ),
         )
     except AudioServingIntegrityError as exc:

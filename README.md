@@ -23,9 +23,13 @@ canonical script block
   -> versioned narration speech-quality gate
 ```
 
-The Orchestrator's `AudioBloco` is an editorial block. Qwen inference chunks remain private to the
-Voice Service. Independent speech blocks are never crossfaded. Qwen-native WAVs under
-`data/audio/<workflow>/blocks/` are preserved; resampling occurs once at final assembly.
+The Orchestrator's `AudioBloco` is an editorial block. Qwen still owns physical chunking and
+synthesis, but completed physical chunks are downloaded, validated and persisted as durable
+`AudioChunk` / initial `AudioChunkTake` children under
+`data/audio/<workflow>/blocks/chunks/`. Their frozen plan records character span, boundary,
+chunker/profile identities, exact synthesis text and original seed so a later assembler can
+reproduce Qwen's deterministic boundary pauses. Independent speech blocks are never crossfaded;
+resampling still occurs once at final assembly.
 
 The final mastering policy measures Integrated LUFS, sample peak and real True Peak (FFmpeg EBU
 R128), applies constant gain toward -16 LUFS constrained by -1 dBTP, reopens/reanalyses a temporary
@@ -40,6 +44,9 @@ The provider-neutral client uses the actual Voice Service contract:
 - `POST /v1/narrations` creates an async job with `Idempotency-Key`;
 - `GET /v1/narrations/{id}` polls `queued | running | completed | failed`;
 - `GET /v1/narrations/{id}/audio` downloads the completed WAV.
+- `GET /v1/narrations/{id}/chunks` exposes immutable original physical artifacts;
+- `POST /v1/narrations/{id}/chunks/{index}/regenerate` creates one idempotent UUID candidate;
+- `GET /v1/narrations/{id}/chunk-candidates/{candidate_id}/audio` retrieves that exact candidate.
 
 The stable creation key includes workflow, block order and synthesis identity. A lost POST response
 is retried with the identical request/key. Remote job ID and resolved seed are committed before
@@ -54,6 +61,17 @@ A completed block is reused only when its synthesis identity is current and the 
 with the persisted checksum, size, rate, channels, sample count and subtype. Serving performs the
 same reconciliation and uses SHA-addressed cache revalidation plus byte ranges. Thus a failure in block 8 does not replace
 valid takes 1–7. Missing local output is redownloaded from the same remote job when available.
+
+Chunk regeneration requires an idempotency key and derives one explicit manual seed from the
+stable operation identity. The Orchestrator stores the exact returned candidate WAV under its own
+take UUID and records the Qwen candidate UUID. Candidate completion does not move
+`AudioChunk.current_take_id` and does not invalidate any downstream artifact. Preview addresses
+the durable Orchestrator take UUID; rejection changes only that historical take. Activity is
+derived from `current_take_id`, not a second persisted `active` status.
+
+Alembic lineage is linear: revision `014` adds production-error history and revision `015` adds
+the chunk/take tables, frozen plan provenance, idempotency identity and the
+`audio_chunks.current_take_id` foreign key.
 
 The take-level content gate compares Faster-Whisper against the actual synthesis text and persists
 WER/CER, deletions, insertions, repetitions, missing spans and premature-ending evidence before a

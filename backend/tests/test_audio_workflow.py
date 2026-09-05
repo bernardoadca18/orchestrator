@@ -14,7 +14,11 @@ from app.clients.voice_client import (
     VoiceProfileProvenance,
 )
 from app.core.config import Settings
-from app.services.audio_service import AudioWorkflowService, derive_quality_retry_seed
+from app.services.audio_service import (
+    AudioWorkflowService,
+    derive_manual_chunk_seed,
+    derive_quality_retry_seed,
+)
 from app.services.production_audio import inspect_wav
 from app.services.pronunciation import PronunciationPreprocessor
 from app.services.text_normalization import PortugueseTextNormalizer
@@ -97,6 +101,15 @@ class FakeRepository:
         return self.transcription
 
 
+class ChunkPersistingRepository(FakeRepository):
+    def __init__(self, workflow) -> None:
+        super().__init__(workflow)
+        self.persisted_chunks: list[tuple[uuid.UUID, list[dict]]] = []
+
+    async def persistir_chunks(self, block_id, chunks_data):
+        self.persisted_chunks.append((block_id, chunks_data))
+        return []
+
 class FakeVoiceClient:
     def __init__(self, audio: bytes) -> None:
         self.audio = audio
@@ -140,6 +153,53 @@ class FakeVoiceClient:
         return self.jobs[job_id]
 
     async def download_audio(self, job_id):
+        return self.audio
+
+
+class ChunkVoiceClient(FakeVoiceClient):
+    def __init__(self, audio: bytes, metadata) -> None:
+        super().__init__(audio)
+        self.chunk_metadata = metadata
+
+    async def create_narration(self, **payload):
+        queued = await super().create_narration(**payload)
+        completed = self.jobs[queued.id]
+        self.jobs[queued.id] = completed.model_copy(
+            update={
+                "metadata": {
+                    **completed.metadata,
+                    "chunks": [{"index": 0}],
+                }
+            }
+        )
+        return queued
+
+    async def list_chunks(self, job_id):
+        return [
+            {
+                "chunk_id": f"{job_id}_0000",
+                "job_id": job_id,
+                "chunk_index": 0,
+                "text": "Texto físico.",
+                "synthesis_text": "Texto físico.",
+                "start_char": 0,
+                "end_char": 14,
+                "boundary": "sentence",
+                "chunking_identity": "chunk-v1",
+                "chunking_strategy_version": "qwen3-tts-chunking-v2",
+                "voice_identity": "v" * 64,
+                "generation_identity": "g" * 64,
+                "seed": 123,
+                "duration_seconds": self.chunk_metadata.duration_seconds,
+                "sample_rate": self.chunk_metadata.sample_rate,
+                "byte_size": self.chunk_metadata.byte_size,
+                "sha256": self.chunk_metadata.sha256,
+                "frame_count": self.chunk_metadata.frame_count,
+            }
+        ]
+
+    async def download_chunk_audio(self, job_id, chunk_index):
+        assert chunk_index == 0
         return self.audio
 
 
@@ -242,6 +302,22 @@ def _config(tmp_path: Path, glossary: Path) -> Settings:
     )
 
 
+def test_manual_chunk_seed_is_stable_per_idempotent_operation_and_distinct_between_ops() -> None:
+    block_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    values = {
+        "block_id": block_id,
+        "chunk_id": chunk_id,
+        "synthesis_text_snapshot": "Síntese congelada.",
+    }
+    first = derive_manual_chunk_seed(**values, idempotency_key="operation-a")
+    replay = derive_manual_chunk_seed(**values, idempotency_key="operation-a")
+    second = derive_manual_chunk_seed(**values, idempotency_key="operation-b")
+    assert 1 <= first <= 2**31 - 1
+    assert replay == first
+    assert second != first
+
+
 @pytest.mark.asyncio
 async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     tmp_path: Path, write_tone
@@ -303,6 +379,50 @@ async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     assert len(voice.created) == 2
     assert transcription.calls == 1
     assert alignment.calls == [workflow.id, workflow.id]
+
+
+@pytest.mark.asyncio
+async def test_completed_block_persists_every_physical_chunk_with_plan_metadata(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", sample_rate=24_000, duration=1.0)
+    tone_metadata = inspect_wav(tone)
+    glossary = _write_glossary(tmp_path)
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto físico."}]},
+    )
+    repo = ChunkPersistingRepository(workflow)
+    voice = ChunkVoiceClient(tone.read_bytes(), tone_metadata)
+    service = AudioWorkflowService(
+        object(),
+        config=_config(tmp_path, glossary),
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+    )
+    service.repo = repo
+
+    await service.process(workflow.id)
+
+    assert workflow.status == "audio_concluido"
+    assert len(repo.persisted_chunks) == 1
+    block_id, chunks = repo.persisted_chunks[0]
+    assert block_id == repo.blocks[0].id
+    assert len(chunks) == 1
+    chunk = chunks[0]
+    assert chunk["synthesis_text"] == "Texto físico."
+    assert (chunk["start_char"], chunk["end_char"], chunk["boundary"]) == (
+        0,
+        14,
+        "sentence",
+    )
+    assert chunk["chunking_identity"] == "chunk-v1"
+    assert chunk["voice_profile_identity"] == "v" * 64
+    assert chunk["generation_profile_identity"] == "g" * 64
+    assert Path(chunk["audio_path"]).read_bytes() == tone.read_bytes()
+    assert chunk["audio_sha256"] == tone_metadata.sha256
 
 
 @pytest.mark.asyncio

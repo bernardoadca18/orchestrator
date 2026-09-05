@@ -297,6 +297,49 @@ def publish_source_block(
         temporary.unlink(missing_ok=True)
 
 
+def publish_immutable_source_audio(
+    audio_bytes: bytes,
+    destination: Path,
+    *,
+    expected_sha256: str | None = None,
+    expected_byte_size: int | None = None,
+    expected_duration_seconds: float | None = None,
+    expected_sample_rate: int | None = None,
+    expected_frame_count: int | None = None,
+) -> AudioFileMetadata:
+    """Publish a validated artifact once; concurrent retries may only reuse identical bytes."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    staging = destination.parent / f".{destination.name}.{uuid4().hex}.candidate.wav"
+    try:
+        generated = publish_source_block(
+            audio_bytes,
+            staging,
+            expected_sha256=expected_sha256,
+            expected_byte_size=expected_byte_size,
+            expected_duration_seconds=expected_duration_seconds,
+            expected_sample_rate=expected_sample_rate,
+            expected_frame_count=expected_frame_count,
+        )
+        try:
+            os.link(staging, destination)
+        except FileExistsError:
+            existing = inspect_wav(destination)
+            if existing != generated:
+                raise ProductionAudioError(
+                    "immutable audio identity already contains different bytes"
+                ) from None
+            return existing
+        published = inspect_wav(destination)
+        if published != generated:
+            destination.unlink(missing_ok=True)
+            raise ProductionAudioError(
+                "immutable audio changed during atomic publication"
+            )
+        return published
+    finally:
+        staging.unlink(missing_ok=True)
+
+
 def assemble_narration(
     block_paths: list[Path],
     destination: Path,

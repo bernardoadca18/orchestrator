@@ -1,16 +1,17 @@
-"""Tests for audio chunk persistence, regeneration, and take management.
+"""PostgreSQL coverage for durable physical chunks and immutable take history.
 
 Run with:
     POSTGRES_INTEGRATION=1 pytest tests/test_audio_chunks.py -v
 """
+
 from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime
-from pathlib import Path
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -22,323 +23,250 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture
 async def engine():
-    """Create async engine for integration test."""
     from app.core.config import settings
 
-    engine = create_async_engine(settings.database_url, echo=False)
-    yield engine
-    await engine.dispose()
+    value = create_async_engine(settings.database_url, echo=False)
+    yield value
+    await value.dispose()
 
 
 @pytest.fixture
 async def session(engine):
-    """Create async session for each test with cleanup."""
-    async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    async with async_session() as session:
-        yield session
-        await session.rollback()
+    factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as value:
+        yield value
+        await value.rollback()
 
 
 @pytest.fixture
-async def workflow(session):
-    """Create a sample workflow for testing."""
-    from app.models.workflow import WorkflowExecucao
+async def block(engine, session):
+    from app.models.workflow import AudioBloco, WorkflowExecucao
 
-    wf = WorkflowExecucao(
+    workflow = WorkflowExecucao(
         id=uuid.uuid4(),
-        idea_id="test-idea",
+        ideia_id=uuid.uuid4(),
+        roteiro_id=uuid.uuid4(),
+        roteiro_snapshot={"blocos": []},
         status="audio_concluido",
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
     )
-    session.add(wf)
-    await session.commit()
-    return wf
-
-
-@pytest.fixture
-async def block(session, workflow):
-    """Create a sample audio block for testing."""
-    from app.models.workflow import AudioBloco
-
-    bloco = AudioBloco(
+    value = AudioBloco(
         id=uuid.uuid4(),
-        workflow_id=workflow.id,
-        classification="narration",
-        sequence_index=0,
-        text="Primeiro bloco de teste.",
+        workflow_execucao_id=workflow.id,
+        ordem=0,
+        tipo="introducao",
+        texto="Primeiro bloco de teste.",
+        synthesis_text="Primeiro bloco de teste.",
         status="concluido",
-        voice_profile="bernardo_v1",
-        generation_profile="narration_v1",
-        seed=12345,
-        audio_sha256="a" * 64,
-        audio_duration_seconds=5.0,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+        voice_profile="test_voice",
+        voice_profile_identity="v" * 64,
+        generation_profile="test_generation",
+        generation_profile_identity="g" * 64,
+        job_id_voz="a" * 32,
     )
-    session.add(bloco)
+    session.add_all([workflow, value])
     await session.commit()
-    return bloco
+    workflow_id = workflow.id
+    block_id = value.id
+    try:
+        yield value
+    finally:
+        # Use a fresh session so cleanup is not coupled to the transaction state
+        # left by an integrity-error test.
+        await session.rollback()
+        factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as cleanup:
+            await cleanup.execute(
+                AudioBloco.__table__.delete().where(AudioBloco.id == block_id)
+            )
+            await cleanup.execute(
+                WorkflowExecucao.__table__.delete().where(
+                    WorkflowExecucao.id == workflow_id
+                )
+            )
+            await cleanup.commit()
+
+
+def _chunk_data(index: int, source_job_id: str) -> dict[str, object]:
+    start = index * 10
+    return {
+        "chunk_index": index,
+        "chunk_id": f"{source_job_id}_{index:04d}",
+        "text": f"Texto {index}",
+        "synthesis_text": f"Síntese congelada {index}",
+        "start_char": start,
+        "end_char": start + 9,
+        "boundary": "sentence" if index % 2 == 0 else "paragraph",
+        "chunking_identity": "c" * 64,
+        "chunking_strategy_version": "qwen3-tts-chunking-v2",
+        "voice_profile_identity": "v" * 64,
+        "generation_profile_identity": "g" * 64,
+        "source_job_id": source_job_id,
+        "seed": 100 + index,
+        "duration_seconds": 1.0 + index,
+        "sample_rate": 24_000,
+        "audio_path": f"/tmp/chunk_{index}.wav",
+        "audio_sha256": f"{index + 1:x}" * 64,
+        "audio_byte_size": 48_044 + index,
+        "audio_frame_count": 24_000 * (index + 1),
+    }
 
 
 @pytest.mark.asyncio
-async def test_persist_chunks_creates_chunks_and_initial_takes(
-    session, block
-) -> None:
-    """Test that persistir_chunks creates chunks with their initial active takes."""
-    from app.models.workflow import AudioChunk, AudioChunkTake
+async def test_initial_chunks_and_plan_provenance_survive_reload(session, block) -> None:
+    from app.models.workflow import AudioChunkTake
     from app.repositories.workflow_repository import WorkflowRepository
 
     repo = WorkflowRepository(session)
+    source_job_id = block.id.hex
+    persisted = await repo.persistir_chunks(
+        block.id, [_chunk_data(0, source_job_id), _chunk_data(1, source_job_id)]
+    )
+    assert len(persisted) == 2
 
-    chunks_data = [
-        {
-            "chunk_index": 0,
-            "chunk_id": "chunk-0-abc123",
-            "text": "Primeiro",
-            "synthesis_text": "Primeiro",
-            "seed": 100,
-            "duration_seconds": 1.0,
-            "sample_rate": 24000,
-            "audio_path": "/tmp/chunk_0.wav",
-            "audio_sha256": "b" * 64,
-            "audio_byte_size": 48000,
-            "audio_frame_count": 24000,
-        },
-        {
-            "chunk_index": 1,
-            "chunk_id": "chunk-1-def456",
-            "text": "bloco de teste.",
-            "synthesis_text": "bloco de teste.",
-            "seed": 200,
-            "duration_seconds": 2.0,
-            "sample_rate": 24000,
-            "audio_path": "/tmp/chunk_1.wav",
-            "audio_sha256": "c" * 64,
-            "audio_byte_size": 96000,
-            "audio_frame_count": 48000,
-        },
-    ]
+    reloaded = await repo.listar_chunks(block.id)
+    assert [chunk.chunk_index for chunk in reloaded] == [0, 1]
+    assert reloaded[0].synthesis_text_snapshot == "Síntese congelada 0"
+    assert (reloaded[0].start_char, reloaded[0].end_char) == (0, 9)
+    assert reloaded[0].boundary == "sentence"
+    assert reloaded[0].chunking_identity == "c" * 64
+    assert reloaded[0].chunking_strategy_version == "qwen3-tts-chunking-v2"
+    assert reloaded[0].voice_profile_identity == "v" * 64
+    assert reloaded[0].generation_profile_identity == "g" * 64
+    assert reloaded[0].source_job_id == source_job_id
 
-    chunks = await repo.persistir_chunks(block.id, chunks_data)
-
-    assert len(chunks) == 2
-    assert chunks[0].chunk_index == 0
-    assert chunks[0].chunk_id == "chunk-0-abc123"
-    assert chunks[0].seed == 100
-    assert chunks[1].chunk_index == 1
-
-    # Verify initial takes were created and are active
-    for chunk in chunks:
-        assert chunk.current_take_id is not None
-        from sqlalchemy import select
-
-        stmt = select(AudioChunkTake).where(AudioChunkTake.chunk_id == chunk.id)
-        result = await session.execute(stmt)
-        takes = result.scalars().all()
-        assert len(takes) == 1
-        assert takes[0].kind == "initial"
-        assert takes[0].status == "active"
-        assert takes[0].seed == chunk.seed
-
-
-@pytest.mark.asyncio
-async def test_list_chunks_returns_ordered_by_index(session, block) -> None:
-    """Test that listar_chunks returns chunks ordered by chunk_index."""
-    from app.models.workflow import AudioChunk
-    from app.repositories.workflow_repository import WorkflowRepository
-
-    # Create chunks out of order
-    for i in [2, 0, 1]:
-        chunk = AudioChunk(
-            id=uuid.uuid4(),
-            bloco_id=block.id,
-            chunk_index=i,
-            chunk_id=f"chunk-{i}",
-            seed=i * 100,
-            created_at=datetime.utcnow(),
-            updated_at=datetime.utcnow(),
+    takes = (
+        await session.execute(
+            select(AudioChunkTake).order_by(
+                AudioChunkTake.audio_chunk_id, AudioChunkTake.take_number
+            )
         )
-        session.add(chunk)
-    await session.commit()
-
-    repo = WorkflowRepository(session)
-    chunks = await repo.listar_chunks(block.id)
-
-    assert len(chunks) == 3
-    assert [c.chunk_index for c in chunks] == [0, 1, 2]
+    ).scalars().all()
+    owned = [take for take in takes if take.audio_chunk_id in {c.id for c in reloaded}]
+    assert len(owned) == 2
+    assert all(take.kind == "initial" and take.status == "completed" for take in owned)
+    assert all(chunk.current_take_id == chunk.takes[0].id for chunk in reloaded)
 
 
 @pytest.mark.asyncio
-async def test_create_regeneration_take_creates_candidate(session, block) -> None:
-    """Test that criar_chunk_take creates a candidate take for regeneration."""
-    from app.models.workflow import AudioChunk, AudioChunkTake
-    from app.repositories.workflow_repository import WorkflowRepository
-
-    # Create a chunk with an initial take
-    chunk = AudioChunk(
-        id=uuid.uuid4(),
-        bloco_id=block.id,
-        chunk_index=0,
-        chunk_id="chunk-0",
-        seed=100,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    session.add(chunk)
-    await session.commit()
-
-    initial_take = AudioChunkTake(
-        id=uuid.uuid4(),
-        chunk_id=chunk.id,
-        kind="initial",
-        status="active",
-        seed=100,
-        created_at=datetime.utcnow(),
-    )
-    session.add(initial_take)
-    await session.commit()
-
-    # Update chunk's current_take_id
-    chunk.current_take_id = initial_take.id
-    await session.commit()
-
-    repo = WorkflowRepository(session)
-    regen_take = await repo.criar_chunk_take(chunk.id, seed=200, kind="regeneration")
-
-    assert regen_take.kind == "regeneration"
-    assert regen_take.status == "candidate"
-    assert regen_take.seed == 200
-
-    # Verify both takes exist
-    from sqlalchemy import select
-
-    stmt = select(AudioChunkTake).where(AudioChunkTake.chunk_id == chunk.id)
-    result = await session.execute(stmt)
-    takes = result.scalars().all()
-    assert len(takes) == 2
-    statuses = {t.kind: t.status for t in takes}
-    assert statuses["initial"] == "active"
-    assert statuses["regeneration"] == "candidate"
-
-
-@pytest.mark.asyncio
-async def test_promote_take_updates_chunk_and_marks_old_take_superseded(
+async def test_candidate_creation_is_idempotent_and_does_not_change_current_take(
     session, block
 ) -> None:
-    """Test that promover_chunk_take atomically updates chunk and marks old take."""
-    from app.models.workflow import AudioChunk, AudioChunkTake
+    from app.models.workflow import AudioChunkTake
     from app.repositories.workflow_repository import WorkflowRepository
 
-    # Create a chunk with initial take
-    chunk = AudioChunk(
-        id=uuid.uuid4(),
-        bloco_id=block.id,
-        chunk_index=0,
-        chunk_id="chunk-0",
-        seed=100,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
-    )
-    session.add(chunk)
-    await session.commit()
-
-    initial_take = AudioChunkTake(
-        id=uuid.uuid4(),
-        chunk_id=chunk.id,
-        kind="initial",
-        status="active",
-        seed=100,
-        created_at=datetime.utcnow(),
-    )
-    session.add(initial_take)
-    await session.commit()
-
-    chunk.current_take_id = initial_take.id
-    await session.commit()
-
-    # Create a candidate take
-    candidate = AudioChunkTake(
-        id=uuid.uuid4(),
-        chunk_id=chunk.id,
-        kind="regeneration",
-        status="candidate",
-        seed=200,
-        created_at=datetime.utcnow(),
-    )
-    session.add(candidate)
-    await session.commit()
-
     repo = WorkflowRepository(session)
-    result = await repo.promover_chunk_take(candidate.id)
+    chunk = (
+        await repo.persistir_chunks(block.id, [_chunk_data(0, block.id.hex)])
+    )[0]
+    original_current = chunk.current_take_id
 
-    assert result is True
-
-    # Refresh and verify
-    await session.refresh(initial_take)
-    await session.refresh(candidate)
+    candidate = await repo.criar_chunk_take(
+        chunk.id,
+        seed=900,
+        idempotency_key="workflow-chunk-regeneration-1",
+    )
+    replay = await repo.criar_chunk_take(
+        chunk.id,
+        seed=900,
+        idempotency_key="workflow-chunk-regeneration-1",
+    )
     await session.refresh(chunk)
+    assert replay.id == candidate.id
+    assert candidate.kind == "regeneration"
+    assert candidate.status == "queued"
+    assert chunk.current_take_id == original_current
+    count = len(
+        (
+            await session.execute(
+                select(AudioChunkTake).where(AudioChunkTake.audio_chunk_id == chunk.id)
+            )
+        ).scalars().all()
+    )
+    assert count == 2
 
-    assert initial_take.status == "superseded"
-    assert candidate.status == "active"
-    assert chunk.current_take_id == candidate.id
+    with pytest.raises(ValueError, match="different chunk inputs"):
+        await repo.criar_chunk_take(
+            chunk.id,
+            seed=901,
+            idempotency_key="workflow-chunk-regeneration-1",
+        )
 
 
 @pytest.mark.asyncio
-async def test_discard_take_marks_as_rejected(session, block) -> None:
-    """Test that descartar_chunk_take marks a candidate as rejected."""
-    from app.models.workflow import AudioChunk, AudioChunkTake
+async def test_one_candidate_leaves_every_original_active_hash_unchanged(
+    session, block
+) -> None:
     from app.repositories.workflow_repository import WorkflowRepository
 
-    chunk = AudioChunk(
-        id=uuid.uuid4(),
-        bloco_id=block.id,
-        chunk_index=0,
-        chunk_id="chunk-0",
-        seed=100,
-        created_at=datetime.utcnow(),
-        updated_at=datetime.utcnow(),
+    repo = WorkflowRepository(session)
+    chunks = await repo.persistir_chunks(
+        block.id, [_chunk_data(i, block.id.hex) for i in range(4)]
     )
-    session.add(chunk)
-    await session.commit()
+    chunks = list(await repo.listar_chunks(block.id))
+    originals = {
+        chunk.chunk_index: (chunk.current_take_id, chunk.takes[0].audio_sha256)
+        for chunk in chunks
+    }
+    target = chunks[2]
+    candidate = await repo.criar_chunk_take(
+        target.id,
+        seed=902,
+        idempotency_key="workflow-chunk-regeneration-3",
+    )
+    await repo.atualizar_chunk_take(
+        candidate.id,
+        status="completed",
+        audio_path="/tmp/candidate.wav",
+        audio_sha256="f" * 64,
+        provider_candidate_id="b" * 32,
+    )
 
-    candidate = AudioChunkTake(
-        id=uuid.uuid4(),
-        chunk_id=chunk.id,
-        kind="regeneration",
-        status="candidate",
-        seed=200,
-        created_at=datetime.utcnow(),
-    )
-    session.add(candidate)
-    await session.commit()
+    block_id = block.id
+    session.expire_all()
+    reloaded = await repo.listar_chunks(block_id)
+    assert {
+        chunk.chunk_index: (chunk.current_take_id, chunk.takes[0].audio_sha256)
+        for chunk in reloaded
+    } == originals
+    assert reloaded[2].takes[1].audio_sha256 == "f" * 64
+
+
+@pytest.mark.asyncio
+async def test_reject_completed_candidate_retains_history_and_current_take(
+    session, block
+) -> None:
+    from app.repositories.workflow_repository import WorkflowRepository
 
     repo = WorkflowRepository(session)
-    result = await repo.descartar_chunk_take(candidate.id)
-
-    assert result is True
-    await session.refresh(candidate)
-    assert candidate.status == "rejected"
-
-
-def test_reassemble_from_chunks_combines_audio(tmp_path: Path, write_tone) -> None:
-    """Test that reassemble_block_from_chunks combines chunk audio files."""
-    from app.services.production_audio import reassemble_block_from_chunks
-
-    # Create two chunk audio files with different frequencies
-    chunk1_path = write_tone(tmp_path / "chunk_0.wav", frequency=220.0, duration=1.0)
-    chunk2_path = write_tone(tmp_path / "chunk_1.wav", frequency=440.0, duration=1.0)
-
-    output_path = tmp_path / "reassembled.wav"
-
-    result = reassemble_block_from_chunks(
-        [chunk1_path, chunk2_path],
-        output_path,
-        sample_rate=24000,
+    chunk = (
+        await repo.persistir_chunks(block.id, [_chunk_data(0, block.id.hex)])
+    )[0]
+    original_current = chunk.current_take_id
+    candidate = await repo.criar_chunk_take(
+        chunk.id,
+        seed=903,
+        idempotency_key="workflow-chunk-rejection",
     )
+    await repo.atualizar_chunk_take(candidate.id, status="completed")
 
-    assert output_path.exists()
-    assert result.sample_rate == 24000
-    assert result.duration_seconds == 2.0
-    assert result.frame_count == 48000
+    assert await repo.descartar_chunk_take(candidate.id) is True
+    loaded = await repo.obter_chunk(chunk.id)
+    assert loaded is not None
+    rejected = next(take for take in loaded.takes if take.id == candidate.id)
+    assert rejected.status == "rejected"
+    assert loaded.current_take_id == original_current
+    assert len(loaded.takes) == 2
+
+
+@pytest.mark.asyncio
+async def test_current_take_id_has_database_referential_integrity(session, block) -> None:
+    from app.repositories.workflow_repository import WorkflowRepository
+
+    repo = WorkflowRepository(session)
+    chunk = (
+        await repo.persistir_chunks(block.id, [_chunk_data(0, block.id.hex)])
+    )[0]
+    chunk.current_take_id = uuid.uuid4()
+    with pytest.raises(IntegrityError):
+        await session.commit()
+    await session.rollback()

@@ -327,11 +327,28 @@ class AudioChunk(Base):
     chunk_id: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
     canonical_text: Mapped[str] = mapped_column(Text, nullable=False)
     synthesis_text_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
+    start_char: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_char: Mapped[int] = mapped_column(Integer, nullable=False)
+    boundary: Mapped[str] = mapped_column(String(32), nullable=False)
+    chunking_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    chunking_strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    voice_profile_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    generation_profile_identity: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_job_id: Mapped[str] = mapped_column(String(64), nullable=False)
     seed: Mapped[int] = mapped_column(BigInteger, nullable=False)
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
-    current_take_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
+    current_take_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey(
+            "audio_chunk_takes.id",
+            name="fk_audio_chunks_current_take_id",
+            ondelete="SET NULL",
+            use_alter=True,
+        ),
+        nullable=True,
+    )
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -344,6 +361,7 @@ class AudioChunk(Base):
         back_populates="audio_chunk",
         cascade="all, delete-orphan",
         order_by="AudioChunkTake.take_number",
+        foreign_keys="AudioChunkTake.audio_chunk_id",
     )
 
 
@@ -353,6 +371,7 @@ class AudioChunkTake(Base):
     __tablename__ = "audio_chunk_takes"
     __table_args__ = (
         UniqueConstraint("audio_chunk_id", "take_number", name="uq_audio_chunk_take_number"),
+        UniqueConstraint("idempotency_key", name="uq_audio_chunk_take_idempotency_key"),
         CheckConstraint(
             "status IN ('queued', 'running', 'completed', 'failed', 'superseded', 'rejected')",
             name="ck_audio_chunk_take_status",
@@ -383,12 +402,16 @@ class AudioChunkTake(Base):
     audio_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     audio_frame_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    provider_candidate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    audio_chunk: Mapped["AudioChunk"] = relationship(back_populates="takes")
+    audio_chunk: Mapped["AudioChunk"] = relationship(
+        back_populates="takes", foreign_keys=[audio_chunk_id]
+    )
 
 
 class TranscricaoAudio(Base):

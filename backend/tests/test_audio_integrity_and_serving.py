@@ -273,3 +273,61 @@ def test_block_endpoint_rejects_stale_current_take_pointer(tmp_path: Path, write
         orchestrator_app.dependency_overrides.clear()
     assert response.status_code == 409
     assert "take ativo" in response.json()["detail"]
+
+
+def test_chunk_take_endpoint_serves_exact_requested_candidate(tmp_path: Path, write_tone) -> None:
+    first_path = write_tone(tmp_path / "candidate-a.wav", frequency=220.0)
+    second_path = write_tone(tmp_path / "candidate-b.wav", frequency=440.0)
+    first_metadata = inspect_wav(first_path)
+    second_metadata = inspect_wav(second_path)
+    workflow_id = uuid.uuid4()
+    block_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+
+    def take(take_id: uuid.UUID, path: Path, metadata, status: str):
+        return SimpleNamespace(
+            id=take_id,
+            audio_chunk_id=chunk_id,
+            status=status,
+            audio_path=str(path),
+            audio_sha256=metadata.sha256,
+            audio_byte_size=metadata.byte_size,
+            audio_duration_seconds=metadata.duration_seconds,
+            audio_sample_rate=metadata.sample_rate,
+            audio_frame_count=metadata.frame_count,
+            take_number=2,
+        )
+
+    chunk = SimpleNamespace(id=chunk_id, audio_bloco_id=block_id, chunk_index=3)
+    block = SimpleNamespace(id=block_id, workflow_execucao_id=workflow_id)
+    session = MagicMock()
+    session.get = AsyncMock(
+        side_effect=[
+            take(first_id, first_path, first_metadata, "rejected"),
+            chunk,
+            block,
+            take(second_id, second_path, second_metadata, "superseded"),
+            chunk,
+            block,
+        ]
+    )
+
+    async def fake_db():
+        yield session
+
+    orchestrator_app.dependency_overrides[get_db] = fake_db
+    try:
+        with TestClient(orchestrator_app) as client:
+            first = client.get(f"/workflow/{workflow_id}/chunks/{first_id}/audio")
+            second = client.get(f"/workflow/{workflow_id}/chunks/{second_id}/audio")
+    finally:
+        orchestrator_app.dependency_overrides.clear()
+
+    assert first.status_code == second.status_code == 200
+    assert first.content == first_path.read_bytes()
+    assert second.content == second_path.read_bytes()
+    assert first.content != second.content
+    assert first.headers["X-Audio-SHA256"] == first_metadata.sha256
+    assert second.headers["X-Audio-SHA256"] == second_metadata.sha256

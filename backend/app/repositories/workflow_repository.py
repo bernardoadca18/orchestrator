@@ -736,6 +736,10 @@ class WorkflowRepository:
                 - chunk_id: Stable identifier (job_id_chunk_index format)
                 - text: Canonical text from the script
                 - synthesis_text: Text sent to TTS provider
+                - start_char/end_char/boundary: Frozen physical chunk plan
+                - chunking_identity/chunking_strategy_version: Chunker provenance
+                - voice_profile_identity/generation_profile_identity: Frozen profile identities
+                - source_job_id: Voice Service narration job that produced the chunk
                 - seed: Deterministic seed used for synthesis
                 - duration_seconds: Audio duration
                 - sample_rate: Audio sample rate
@@ -771,6 +775,14 @@ class WorkflowRepository:
                 chunk_id=chunk_id,
                 canonical_text=canonical_text,
                 synthesis_text_snapshot=synthesis_text,
+                start_char=chunk_meta["start_char"],
+                end_char=chunk_meta["end_char"],
+                boundary=chunk_meta["boundary"],
+                chunking_identity=chunk_meta["chunking_identity"],
+                chunking_strategy_version=chunk_meta["chunking_strategy_version"],
+                voice_profile_identity=chunk_meta["voice_profile_identity"],
+                generation_profile_identity=chunk_meta["generation_profile_identity"],
+                source_job_id=chunk_meta["source_job_id"],
                 seed=seed,
                 duration_seconds=duration_seconds,
                 sample_rate=sample_rate,
@@ -842,15 +854,30 @@ class WorkflowRepository:
         chunk_id: uuid.UUID,
         seed: int,
         kind: str = "regeneration",
+        *,
+        idempotency_key: str | None = None,
     ) -> AudioChunkTake:
         """Create a new candidate take for a chunk.
 
         The take starts in 'queued' status and must be updated after
         regeneration completes.
         """
-        chunk = await self.obter_chunk(chunk_id)
+        chunk = (
+            await self.session.execute(
+                select(AudioChunk).where(AudioChunk.id == chunk_id).with_for_update()
+            )
+        ).scalar_one_or_none()
         if chunk is None:
             raise LookupError("chunk not found")
+
+        if idempotency_key is not None:
+            existing = await self.obter_chunk_take_por_idempotency(idempotency_key)
+            if existing is not None:
+                if existing.audio_chunk_id != chunk_id or existing.seed != seed:
+                    raise ValueError(
+                        "Idempotency-Key was already used with different chunk inputs"
+                    )
+                return existing
 
         # Determine next take number
         max_take = (
@@ -868,11 +895,20 @@ class WorkflowRepository:
             kind=kind,
             status="queued",
             seed=seed,
+            idempotency_key=idempotency_key,
         )
         self.session.add(take)
         await self.session.commit()
         await self.session.refresh(take)
         return take
+
+    async def obter_chunk_take_por_idempotency(
+        self, idempotency_key: str
+    ) -> AudioChunkTake | None:
+        stmt = select(AudioChunkTake).where(
+            AudioChunkTake.idempotency_key == idempotency_key
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def atualizar_chunk_take(self, take_id: uuid.UUID, **campos) -> None:
         """Update a chunk take's fields."""
@@ -929,7 +965,13 @@ class WorkflowRepository:
         if take is None:
             raise LookupError("take not found")
 
-        if take.status in {"completed", "superseded"}:
+        if take.status in {"rejected", "superseded", "failed"}:
+            return False
+
+        chunk = await self.obter_chunk(take.audio_chunk_id)
+        if chunk is None:
+            raise LookupError("chunk not found")
+        if chunk.current_take_id == take.id:
             return False
 
         take.status = "rejected"

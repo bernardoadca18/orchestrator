@@ -49,7 +49,7 @@ revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestra
     "SELECT version_num FROM alembic_version;")"
 column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_blocos' AND column_name IN ('text_normalizer_version','text_normalizer_identity','initial_resolved_seed','retry_seed_strategy','generation_attempt_history','current_take_id','requested_take_id','voice_chunking_identity','pronunciation_replacements','normalized_text');")"
-test "${revision}" = "013"
+test "${revision}" = "015"
 test "${column_count}" = "10"
 take_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='audio_bloco_takes';")"
@@ -60,6 +60,18 @@ test "${take_provenance_count}" = "7"
 integrity_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='workflow_execucoes' AND column_name IN ('audio_final_frame_count','audio_final_subtype','audio_integrity','narration_diagnostics')) OR (table_name='audio_blocos' AND column_name IN ('audio_frame_count','audio_subtype','artifact_integrity','pause_diagnostics')) OR (table_name='audio_bloco_takes' AND column_name IN ('audio_sample_rate','audio_channels','audio_frame_count','audio_subtype','quality_status','artifact_integrity','provider_metadata','content_quality','pause_diagnostics')));")"
 test "${integrity_column_count}" = "17"
+production_error_history_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='workflow_execucoes' AND column_name='production_error_history';")"
+test "${production_error_history_count}" = "1"
+chunk_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('audio_chunks','audio_chunk_takes');")"
+test "${chunk_table_count}" = "2"
+chunk_plan_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_chunks' AND column_name IN ('start_char','end_char','boundary','chunking_identity','chunking_strategy_version','voice_profile_identity','generation_profile_identity','source_job_id');")"
+test "${chunk_plan_column_count}" = "8"
+current_take_fk_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.table_constraints WHERE table_schema='public' AND table_name='audio_chunks' AND constraint_name='fk_audio_chunks_current_take_id' AND constraint_type='FOREIGN KEY';")"
+test "${current_take_fk_count}" = "1"
 
 docker run --rm \
     --network "${network_name}" \
@@ -84,9 +96,9 @@ docker run --rm \
     alembic upgrade head
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT version_num FROM alembic_version;")"
-test "${revision}" = "013"
+test "${revision}" = "015"
 historical_take_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM audio_bloco_takes WHERE id='00000000-0000-0000-0000-000000000005' AND status='completed' AND canonical_text IS NULL AND normalized_text IS NULL AND synthesis_text IS NULL AND pronunciation_glossary_identity IS NULL AND pronunciation_replacements IS NULL AND text_normalizer_version IS NULL AND text_normalizer_identity IS NULL AND audio_sample_rate IS NULL AND audio_channels IS NULL AND audio_frame_count IS NULL AND audio_subtype IS NULL AND quality_status IS NULL AND artifact_integrity IS NULL AND provider_metadata IS NULL AND content_quality IS NULL AND pause_diagnostics IS NULL;")"
 test "${historical_take_count}" = "1"
 
-echo "Fresh/reversible Orchestrator migrations passed: 001 -> 013 -> 012 -> 013"
+echo "Fresh/reversible Orchestrator migrations passed: 001 -> 015 -> 012 -> 015"
