@@ -84,9 +84,13 @@ class VisualPlanRepository:
         await self.session.commit()
         self.session.expire(plan, ["decisions"])
 
-    async def mark_blocked(self, plan: VisualPlan, reason: str) -> None:
+    async def mark_blocked(
+        self, plan: VisualPlan, reason: str, *, diagnostics: dict | None = None
+    ) -> None:
         plan.status = "blocked"
         plan.error_message = reason
+        if diagnostics is not None:
+            plan.diagnostics = diagnostics
         plan.completed_at = dt.datetime.now(dt.UTC)
         await self.session.commit()
 

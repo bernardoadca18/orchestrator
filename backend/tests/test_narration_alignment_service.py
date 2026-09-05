@@ -214,6 +214,45 @@ async def test_realistic_binding_uses_asr_time_and_leaves_gameplay_provenance_un
 
 
 @pytest.mark.asyncio
+async def test_long_block_visual_queries_bind_to_distributed_narration_spans() -> None:
+    excerpts = [
+        "Alpha um",
+        "Beta dois",
+        "Gama três",
+        "Delta quatro",
+        "Omega cinco",
+    ]
+    workflow = _workflow(
+        queries=[_query(excerpt, order=index) for index, excerpt in enumerate(excerpts)]
+    )
+    content = "Alpha um. Beta dois. Gama três. Delta quatro. Omega cinco."
+    workflow.roteiro_snapshot["duracao_total_segundos"] = 125
+    workflow.roteiro_snapshot["blocos"][0]["conteudo"] = content
+    workflow.duracao_audio_segundos = 125
+    block = workflow.blocos[0]
+    block.texto = content
+    block.synthesis_text = content
+    block.narration_end_seconds = 125
+    assert workflow.transcricao is not None
+    words = ["Alpha", "um", "Beta", "dois", "Gama", "três", "Delta", "quatro", "Omega", "cinco"]
+    workflow.transcricao.texto_completo = " ".join(words)
+    workflow.transcricao.palavras_timestamps = [
+        {"palavra": word, "inicio": index * 10.0, "fim": index * 10.0 + 2.0}
+        for index, word in enumerate(words)
+    ]
+
+    service, _ = _service(workflow)
+    alignment, _ = await service.ensure(workflow.id)
+
+    assert alignment.status == "completed"
+    bindings = alignment.visual_query_bindings
+    assert [item.status for item in bindings] == ["resolved"] * 5
+    starts = [item.narration_start_seconds for item in bindings]
+    assert starts == sorted(starts)
+    assert len(set(starts)) == 5
+
+
+@pytest.mark.asyncio
 async def test_same_identity_reuses_run_while_changed_inputs_create_new_runs() -> None:
     workflow = _workflow(queries=[_query("Geralt aprende o sinal Aard")])
     service, repository = _service(workflow)

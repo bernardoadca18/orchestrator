@@ -185,6 +185,12 @@ left `unresolved`; provider outage becomes `failed`, never "no results". Require
 remain explicit in `VisualPlan.status=completed_with_gaps` without invalidating script, audio or
 narration alignment.
 
+For the known final visual-production profiles, non-empty narration with zero structured
+`VisualQuery` requirements is not a successful empty plan. Stage 14 persists a blocked diagnostic
+with category `visual_queries_missing`, and Stage 17 records that same stable category in workflow
+error history. Historical scripts without queries remain readable and available in production
+packages; they need a new visual-enriched Ideas Hub revision before final visual production.
+
 Endpoints:
 
 - `GET /workflow/{id}/visual-plan` reads the current compatible artifact without hidden search;

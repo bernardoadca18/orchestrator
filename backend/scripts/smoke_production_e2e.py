@@ -87,6 +87,15 @@ def _get_artifact(client: httpx.Client, workflow_id: str, path: str, label: str)
     return _response_json(client.get(f"/workflow/{workflow_id}/{path}"), label)
 
 
+def _assert_visual_contract(workflow: dict[str, Any], visual_plan: dict[str, Any]) -> None:
+    duration = float(workflow.get("duracao_audio_segundos") or 0)
+    if duration > 0 and int(visual_plan.get("total_queries") or 0) == 0:
+        raise RuntimeError(
+            "visual_queries_missing: non-empty final narration cannot pass the "
+            "production smoke with VisualPlan completed 0/0"
+        )
+
+
 def run(args: argparse.Namespace) -> int:
     plan = {
         "smoke": "PRODUCTION_E2E_CONTRACT_SMOKE",
@@ -174,6 +183,7 @@ def run(args: argparse.Namespace) -> int:
                 ),
                 "render": _get_artifact(client, workflow_id, "render", "render"),
             }
+            _assert_visual_contract(workflow, artifacts["visual_plan"])
             qa_result = _response_json(
                 client.post(f"/workflow/{workflow_id}/qa-report", params={"mode": "standard"}),
                 "Stage 18 QA",

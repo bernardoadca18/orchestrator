@@ -21,7 +21,11 @@ from app.models.workflow import (
     VisualQueryNarrationBinding,
     WorkflowExecucao,
 )
-from app.services.visual_director_service import VisualDirectorInputError, VisualDirectorService
+from app.services.visual_director_service import (
+    VISUAL_QUERIES_MISSING_CATEGORY,
+    VisualDirectorInputError,
+    VisualDirectorService,
+)
 
 PROJECT_ID = uuid.UUID("20000000-0000-4000-8000-000000000001")
 SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000002")
@@ -83,9 +87,10 @@ class FakeVisualPlanRepository:
         plan.status = "processing"
         plan.started_at = dt.datetime.now(dt.UTC)
 
-    async def mark_blocked(self, plan, reason):
+    async def mark_blocked(self, plan, reason, *, diagnostics=None):
         plan.status = "blocked"
         plan.error_message = reason
+        plan.diagnostics = diagnostics
 
     async def mark_failed(self, plan, reason):
         plan.status = "failed"
@@ -236,6 +241,7 @@ def _entities(
         id=workflow_id,
         ideia_id=uuid.uuid4(),
         roteiro_id=uuid.uuid4(),
+        perfil_producao="game_analysis",
         roteiro_snapshot={
             "titulo": "Aard",
             "duracao_total_segundos": 20,
@@ -300,6 +306,36 @@ def _entities(
         for index, item in enumerate(queries)
     ]
     return workflow, alignment
+
+
+@pytest.mark.asyncio
+async def test_nonempty_final_faceless_narration_with_zero_queries_is_blocked() -> None:
+    workflow, alignment = _entities([])
+    workflow.perfil_producao = "faceless_pop_culture_lists"
+    provider = FakeProvider()
+    service, repository = _service(workflow, alignment, provider)
+
+    plan, created = await service.ensure(workflow.id)
+
+    assert created is True
+    assert plan.status == "blocked"
+    assert plan.total_queries == 0
+    assert plan.diagnostics == {
+        "error_category": VISUAL_QUERIES_MISSING_CATEGORY,
+        "production_profile": "faceless_pop_culture_lists",
+        "narration_duration_seconds": 10,
+        "visual_query_count": 0,
+    }
+    assert repository.output_writes == 0
+    assert provider.session_calls == []
+    assert provider.session_search_calls == []
+    assert provider.project_search_calls == []
+
+    plan.status = "completed"
+    repeated, repeated_created = await service.ensure(workflow.id)
+    assert repeated_created is False
+    assert repeated.status == "blocked"
+    assert repeated.diagnostics["error_category"] == VISUAL_QUERIES_MISSING_CATEGORY
 
 
 def _candidate(

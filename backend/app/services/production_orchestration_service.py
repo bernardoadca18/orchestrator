@@ -116,6 +116,16 @@ class ProductionOrchestrationService:
                     if plan.status in {"completed", "completed_with_gaps"}:
                         await self._advance(workflow, "production_timeline")
                         continue
+                    diagnostics = getattr(plan, "diagnostics", None) or {}
+                    stable_category = diagnostics.get("error_category")
+                    if plan.status == "blocked" and isinstance(stable_category, str):
+                        await self._block(
+                            workflow,
+                            "visual_plan",
+                            stable_category,
+                            plan.error_message or "visual_plan blocked",
+                        )
+                        return OrchestrationResult(terminal=True)
                     await self._upstream_terminal(
                         workflow, "visual_plan", plan.status, plan.error_message
                     )

@@ -334,6 +334,26 @@ async def test_invalid_narration_quality_blocks_before_visual_production() -> No
 
 
 @pytest.mark.asyncio
+async def test_missing_visual_queries_propagates_stable_workflow_error_category() -> None:
+    workflow = _workflow(phase="visual_plan", status="running")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    service.visual.item.status = "blocked"
+    service.visual.item.error_message = "Structured VisualQueries are required"
+    service.visual.item.diagnostics = {"error_category": "visual_queries_missing"}
+
+    result = await service.process(workflow.id)
+
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_phase == "visual_plan"
+    assert workflow.production_error_category == "visual_queries_missing"
+    assert workflow.production_error_message == "Structured VisualQueries are required"
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
 async def test_completed_remote_promotes_workflow() -> None:
     workflow = _workflow(phase="render", status="running")
     timeline = _timeline(workflow.id)

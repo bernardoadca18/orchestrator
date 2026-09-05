@@ -160,6 +160,16 @@ async def test_visual_plan_uniqueness_force_persistence_and_workflow_cascade() -
         assert len(rebuilt.decisions) == 1
         assert rebuilt.decisions[0].source_resolution_status == "unresolved"
 
+        await repository.mark_blocked(
+            rebuilt,
+            "Structured VisualQueries are required",
+            diagnostics={"error_category": "visual_queries_missing"},
+        )
+        blocked = await repository.get_by_id(plan.id)
+        assert blocked is not None
+        assert blocked.status == "blocked"
+        assert blocked.diagnostics == {"error_category": "visual_queries_missing"}
+
         plan_id = plan.id
         await session.delete(workflow)
         await session.commit()

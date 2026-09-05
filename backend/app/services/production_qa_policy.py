@@ -51,8 +51,8 @@ GAME_ANALYSIS_POLICY = ProductionQAPolicy(
 
 
 # These are the actual Ideas Hub production profile identifiers audited in Stage 18.
-# The faceless profiles currently have no separate frozen visual-production contract,
-# so they deliberately use the technical generic policy rather than guessed rules.
+# Faceless VisualQuery readiness is enforced upstream by Visual Director; these
+# profiles still use the technical generic QA checks defined here.
 KNOWN_IDEAS_HUB_PROFILES = frozenset(
     {
         "faceless_general",

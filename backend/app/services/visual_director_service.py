@@ -42,6 +42,20 @@ from app.services.visual_director_algorithm import (
 
 logger = logging.getLogger(__name__)
 
+VISUAL_QUERIES_MISSING_CATEGORY = "visual_queries_missing"
+VISUAL_QUERIES_MISSING_MESSAGE = (
+    "Final visual production requires structured VisualQueries for non-empty narration"
+)
+FINAL_VISUAL_PRODUCTION_PROFILES = frozenset(
+    {
+        "faceless_general",
+        "faceless_informational",
+        "faceless_pop_culture",
+        "faceless_pop_culture_lists",
+        "game_analysis",
+    }
+)
+
 
 class VisualDirectorError(RuntimeError):
     pass
@@ -213,8 +227,6 @@ class VisualDirectorService:
             status="pending",
         )
 
-        if not created and not force:
-            return plan, False
         if force:
             await self.repository.clear_outputs(plan)
 
@@ -222,6 +234,20 @@ class VisualDirectorService:
         if blocked_reason:
             await self.repository.mark_blocked(plan, blocked_reason)
             return await self.repository.reload(plan), created
+        if not queries and self._requires_visual_queries(workflow):
+            await self.repository.mark_blocked(
+                plan,
+                VISUAL_QUERIES_MISSING_MESSAGE,
+                diagnostics={
+                    "error_category": VISUAL_QUERIES_MISSING_CATEGORY,
+                    "production_profile": workflow.perfil_producao,
+                    "narration_duration_seconds": workflow.duracao_audio_segundos,
+                    "visual_query_count": 0,
+                },
+            )
+            return await self.repository.reload(plan), created
+        if not created and not force:
+            return plan, False
         if len(queries) > self.config.visual_director_max_queries:
             await self.repository.mark_failed(
                 plan,
@@ -291,6 +317,14 @@ class VisualDirectorService:
         if alignment.final_audio_sha256 != workflow.audio_final_sha256:
             return "NarrationAlignment audio identity is stale"
         return None
+
+    @staticmethod
+    def _requires_visual_queries(workflow: WorkflowExecucao) -> bool:
+        return bool(
+            workflow.perfil_producao in FINAL_VISUAL_PRODUCTION_PROFILES
+            and workflow.duracao_audio_segundos
+            and workflow.duracao_audio_segundos > 0
+        )
 
     def _queries(
         self, workflow: WorkflowExecucao, alignment: NarrationAlignment | None
