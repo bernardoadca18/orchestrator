@@ -112,7 +112,14 @@ class AudioBlocoOut(BaseModel):
     narration_start_seconds: float | None
     narration_end_seconds: float | None
     erro_mensagem: str | None
+    audio_edit_revision: int = 0
+    audio_materialized_revision: int = 0
     takes: list[AudioBlocoTakeOut] = Field(default_factory=list)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def audio_edit_dirty(self) -> bool:
+        return self.audio_edit_revision > self.audio_materialized_revision
 
 
 class WorkflowOut(BaseModel):
@@ -144,6 +151,8 @@ class WorkflowOut(BaseModel):
     production_error_history: list[dict] | None = None
     production_started_at: dt.datetime | None = None
     production_completed_at: dt.datetime | None = None
+    audio_edit_revision: int = 0
+    audio_materialized_revision: int = 0
     criado_em: dt.datetime
     atualizado_em: dt.datetime
 
@@ -156,6 +165,40 @@ class WorkflowOut(BaseModel):
             and self.audio_final_byte_size
             and self.audio_final_byte_size > 0
         )
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def audio_edits_pending(self) -> bool:
+        return self.audio_edit_revision > self.audio_materialized_revision
+
+
+class AudioEditUpdateOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    workflow_execucao_id: uuid.UUID
+    idempotency_key: str
+    target_revision: int
+    status: str
+    published_audio_sha256: str | None
+    error_stage: str | None
+    error_message: str | None
+    created_at: dt.datetime
+    started_at: dt.datetime | None
+    materialized_at: dt.datetime | None
+    completed_at: dt.datetime | None
+    updated_at: dt.datetime
+
+
+class AudioEditApplyOut(BaseModel):
+    workflow_id: uuid.UUID
+    update_id: uuid.UUID | None
+    status: str
+    created: bool
+    audio_edit_revision: int
+    audio_materialized_revision: int
+    audio_edits_pending: bool
+    final_audio_sha256: str | None
 
 
 class WorkflowDetailOut(WorkflowOut):

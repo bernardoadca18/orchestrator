@@ -8,7 +8,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.api.routers.workflow import regenerar_chunk
+from app.api.routers.workflow import (
+    aplicar_edicoes_pendentes,
+    promover_chunk_take,
+    regenerar_chunk,
+)
+from app.models.workflow import AudioChunkTake
 from app.services.production_audio import inspect_wav
 
 
@@ -134,3 +139,78 @@ async def test_regeneration_persists_exact_candidate_without_changing_current_ta
     assert not hasattr(repository, "invalidar_derivados_de_audio") or not (
         repository.invalidar_derivados_de_audio.called
     )
+
+
+@pytest.mark.asyncio
+async def test_promotion_only_selects_take_and_marks_pending_revision() -> None:
+    workflow_id = uuid.uuid4()
+    block_id = uuid.uuid4()
+    chunk_id = uuid.uuid4()
+    take_id = uuid.uuid4()
+    take = SimpleNamespace(
+        id=take_id,
+        audio_chunk_id=chunk_id,
+        status="completed",
+    )
+    chunk = SimpleNamespace(id=chunk_id, audio_bloco_id=block_id)
+    block = SimpleNamespace(id=block_id, workflow_execucao_id=workflow_id)
+    workflow = SimpleNamespace(
+        id=workflow_id,
+        audio_final_sha256="a" * 64,
+        audio_edit_revision=4,
+    )
+    session = MagicMock()
+    session.get = AsyncMock(return_value=take)
+    repository = MagicMock()
+    repository.obter_chunk = AsyncMock(return_value=chunk)
+    repository.obter_bloco_por_id = AsyncMock(return_value=block)
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    repository.promover_chunk_take = AsyncMock(return_value=True)
+
+    with patch(
+        "app.api.routers.workflow.WorkflowRepository", return_value=repository
+    ):
+        result = await promover_chunk_take(workflow_id, take_id, session)
+
+    repository.promover_chunk_take.assert_awaited_once_with(
+        take_id, workflow_id=workflow_id
+    )
+    assert result["audio_edits_pending"] is True
+    assert result["final_audio_sha256"] == "a" * 64
+    assert not hasattr(repository, "invalidar_derivados_de_audio") or not (
+        repository.invalidar_derivados_de_audio.called
+    )
+    session.get.assert_awaited_once_with(AudioChunkTake, take_id)
+
+
+@pytest.mark.asyncio
+async def test_update_pipeline_request_is_enqueued_only_when_created() -> None:
+    workflow_id = uuid.uuid4()
+    update = SimpleNamespace(id=uuid.uuid4(), status="pending")
+    workflow = SimpleNamespace(
+        id=workflow_id,
+        audio_edit_revision=3,
+        audio_materialized_revision=1,
+        audio_final_sha256="b" * 64,
+    )
+    repository = MagicMock()
+    repository.request_audio_edit_update = AsyncMock(
+        side_effect=[(update, True), (update, False)]
+    )
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch("app.api.routers.workflow.aplicar_edicoes_audio.delay") as enqueue,
+    ):
+        response = await aplicar_edicoes_pendentes(
+            workflow_id, MagicMock(), idempotency_key="apply-batch-1"
+        )
+        replay = await aplicar_edicoes_pendentes(
+            workflow_id, MagicMock(), idempotency_key="apply-batch-1"
+        )
+
+    enqueue.assert_called_once_with(str(update.id))
+    assert response.update_id == update.id
+    assert response.status == "pending"
+    assert response.audio_edits_pending is True
+    assert replay.update_id == update.id and replay.created is False

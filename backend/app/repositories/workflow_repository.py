@@ -14,6 +14,7 @@ from app.models.workflow import (
     AudioBlocoTake,
     AudioChunk,
     AudioChunkTake,
+    AudioEditUpdate,
     TranscricaoAudio,
     WorkflowExecucao,
 )
@@ -736,7 +737,7 @@ class WorkflowRepository:
                 - chunk_id: Stable identifier (job_id_chunk_index format)
                 - text: Canonical text from the script
                 - synthesis_text: Text sent to TTS provider
-                - start_char/end_char/boundary: Frozen physical chunk plan
+                - start_char/end_char/boundary/pause_after_frames: Frozen physical chunk plan
                 - chunking_identity/chunking_strategy_version: Chunker provenance
                 - voice_profile_identity/generation_profile_identity: Frozen profile identities
                 - source_job_id: Voice Service narration job that produced the chunk
@@ -778,6 +779,7 @@ class WorkflowRepository:
                 start_char=chunk_meta["start_char"],
                 end_char=chunk_meta["end_char"],
                 boundary=chunk_meta["boundary"],
+                pause_after_frames=chunk_meta["pause_after_frames"],
                 chunking_identity=chunk_meta["chunking_identity"],
                 chunking_strategy_version=chunk_meta["chunking_strategy_version"],
                 voice_profile_identity=chunk_meta["voice_profile_identity"],
@@ -919,27 +921,62 @@ class WorkflowRepository:
             setattr(take, chave, valor)
         await self.session.commit()
 
-    async def promover_chunk_take(self, take_id: uuid.UUID) -> bool:
+    async def promover_chunk_take(
+        self, take_id: uuid.UUID, *, workflow_id: uuid.UUID | None = None
+    ) -> bool:
         """Promote a candidate take to active.
 
         Atomically:
         - Mark the current active take as superseded
         - Set the candidate take as completed
         - Update the chunk's current_take_id
-        - Mark the chunk as stale (triggers downstream invalidation)
+        - Increment the durable workflow/block edit revision
 
         Returns True if promotion succeeded, False if take was already superseded.
         """
         take = await self.session.get(AudioChunkTake, take_id)
         if take is None:
             raise LookupError("take not found")
-
-        if take.status in {"superseded", "rejected", "failed"}:
-            return False
-
-        chunk = await self.obter_chunk(take.audio_chunk_id)
+        chunk = await self.session.get(AudioChunk, take.audio_chunk_id)
         if chunk is None:
             raise LookupError("chunk not found")
+        block = await self.session.get(AudioBloco, chunk.audio_bloco_id)
+        if block is None:
+            raise LookupError("audio block not found")
+        if workflow_id is not None and block.workflow_execucao_id != workflow_id:
+            raise LookupError("take does not belong to workflow")
+
+        workflow = (
+            await self.session.execute(
+                select(WorkflowExecucao)
+                .where(WorkflowExecucao.id == block.workflow_execucao_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if workflow is None:
+            raise LookupError("workflow not found")
+        chunk = (
+            await self.session.execute(
+                select(AudioChunk).where(AudioChunk.id == chunk.id).with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        take = (
+            await self.session.execute(
+                select(AudioChunkTake)
+                .where(AudioChunkTake.id == take_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+
+        if chunk.current_take_id == take.id:
+            await self.session.commit()
+            return True
+        if take.status in {"superseded", "rejected", "failed"}:
+            return False
+        if take.status != "completed":
+            return False
 
         # Supersede current active take if exists
         if chunk.current_take_id is not None and chunk.current_take_id != take_id:
@@ -951,13 +988,203 @@ class WorkflowRepository:
         take.status = "completed"
         take.completed_at = dt.datetime.now(dt.UTC)
         chunk.current_take_id = take.id
-        chunk.status = "stale"  # Triggers downstream invalidation
+        chunk.status = "active"
         chunk.updated_at = dt.datetime.now(dt.UTC)
+        workflow.audio_edit_revision += 1
+        block.audio_edit_revision = workflow.audio_edit_revision
 
         await self.session.commit()
         await self.session.refresh(chunk)
         await self.session.refresh(take)
         return True
+
+    async def request_audio_edit_update(
+        self, workflow_id: uuid.UUID, idempotency_key: str
+    ) -> tuple[AudioEditUpdate | None, bool]:
+        """Create/replay one batch update without launching duplicate work."""
+        workflow = (
+            await self.session.execute(
+                select(WorkflowExecucao)
+                .where(WorkflowExecucao.id == workflow_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if workflow is None:
+            raise LookupError("workflow not found")
+        existing = (
+            await self.session.execute(
+                select(AudioEditUpdate).where(
+                    AudioEditUpdate.idempotency_key == idempotency_key
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if existing.workflow_execucao_id != workflow_id:
+                raise ValueError("Idempotency-Key was already used for another workflow")
+            if existing.status == "failed":
+                if existing.error_stage == "edit_snapshot_stale":
+                    existing.edit_snapshot = None
+                    existing.target_revision = workflow.audio_edit_revision
+                existing.status = "pending"
+                existing.error_stage = None
+                existing.error_message = None
+                existing.completed_at = None
+                await self.session.commit()
+                await self.session.refresh(existing)
+                return existing, True
+            return existing, False
+
+        active = (
+            await self.session.execute(
+                select(AudioEditUpdate)
+                .where(
+                    AudioEditUpdate.workflow_execucao_id == workflow_id,
+                    AudioEditUpdate.status.in_(["pending", "running"]),
+                )
+                .order_by(AudioEditUpdate.created_at.desc())
+            )
+        ).scalars().first()
+        if active is not None:
+            return active, False
+        if workflow.audio_edit_revision <= workflow.audio_materialized_revision:
+            return None, False
+
+        update = AudioEditUpdate(
+            workflow_execucao_id=workflow_id,
+            idempotency_key=idempotency_key,
+            target_revision=workflow.audio_edit_revision,
+            status="pending",
+        )
+        self.session.add(update)
+        await self.session.commit()
+        await self.session.refresh(update)
+        return update, True
+
+    async def claim_audio_edit_update(
+        self, update_id: uuid.UUID, *, recovery: bool = False
+    ) -> AudioEditUpdate | None:
+        """Claim one update and freeze the exact selected-take snapshot."""
+        unresolved = await self.session.get(AudioEditUpdate, update_id)
+        if unresolved is None:
+            return None
+        workflow = (
+            await self.session.execute(
+                select(WorkflowExecucao)
+                .where(WorkflowExecucao.id == unresolved.workflow_execucao_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        update = (
+            await self.session.execute(
+                select(AudioEditUpdate)
+                .where(AudioEditUpdate.id == update_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        if update.status == "completed":
+            return None
+        if update.status == "running" and not recovery:
+            return None
+        if update.status == "failed":
+            return None
+        if update.edit_snapshot is None:
+            update.target_revision = max(
+                update.target_revision, workflow.audio_edit_revision
+            )
+            blocks = list(
+                (
+                    await self.session.execute(
+                        select(AudioBloco)
+                        .where(
+                            AudioBloco.workflow_execucao_id == workflow.id,
+                            AudioBloco.audio_edit_revision
+                            > AudioBloco.audio_materialized_revision,
+                            AudioBloco.audio_edit_revision <= update.target_revision,
+                        )
+                        .order_by(AudioBloco.ordem)
+                        .options(
+                            selectinload(AudioBloco.chunks).selectinload(
+                                AudioChunk.takes
+                            )
+                        )
+                    )
+                ).scalars()
+            )
+            update.edit_snapshot = {
+                "version": "audio_edit_snapshot_v1",
+                "target_revision": update.target_revision,
+                "blocks": [
+                    {
+                        "block_id": str(block.id),
+                        "order": block.ordem,
+                        "edit_revision": block.audio_edit_revision,
+                        "chunks": [
+                            {
+                                "chunk_id": str(chunk.id),
+                                "chunk_index": chunk.chunk_index,
+                                "take_id": (
+                                    str(chunk.current_take_id)
+                                    if chunk.current_take_id is not None
+                                    else None
+                                ),
+                            }
+                            for chunk in sorted(
+                                block.chunks, key=lambda item: item.chunk_index
+                            )
+                        ],
+                    }
+                    for block in blocks
+                ],
+            }
+        update.status = "running"
+        update.started_at = update.started_at or dt.datetime.now(dt.UTC)
+        update.error_stage = None
+        update.error_message = None
+        await self.session.commit()
+        await self.session.refresh(update)
+        return update
+
+    async def mark_audio_edit_update_failed(
+        self, update_id: uuid.UUID, *, stage: str, message: str
+    ) -> None:
+        update = await self.session.get(AudioEditUpdate, update_id)
+        if update is None:
+            return
+        update.status = "failed"
+        update.error_stage = stage
+        update.error_message = message
+        update.completed_at = dt.datetime.now(dt.UTC)
+        await self.session.commit()
+
+    async def mark_audio_edit_update_completed(self, update_id: uuid.UUID) -> None:
+        update = await self.session.get(AudioEditUpdate, update_id)
+        if update is None:
+            return
+        update.status = "completed"
+        update.error_stage = None
+        update.error_message = None
+        update.completed_at = dt.datetime.now(dt.UTC)
+        await self.session.commit()
+
+    async def get_audio_edit_update(
+        self, update_id: uuid.UUID
+    ) -> AudioEditUpdate | None:
+        return await self.session.get(AudioEditUpdate, update_id)
+
+    async def recoverable_audio_edit_updates(self) -> Sequence[AudioEditUpdate]:
+        statement = (
+            select(AudioEditUpdate)
+            .where(AudioEditUpdate.status.in_(["pending", "running"]))
+            .with_for_update()
+        )
+        updates = list((await self.session.execute(statement)).scalars())
+        for update in updates:
+            if update.status == "running":
+                update.status = "pending"
+        await self.session.commit()
+        return updates
 
     async def descartar_chunk_take(self, take_id: uuid.UUID) -> bool:
         """Mark a candidate take as rejected."""

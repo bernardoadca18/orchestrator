@@ -185,6 +185,7 @@ class ChunkVoiceClient(FakeVoiceClient):
                 "start_char": 0,
                 "end_char": 14,
                 "boundary": "sentence",
+                "pause_after_frames": 0,
                 "chunking_identity": "chunk-v1",
                 "chunking_strategy_version": "qwen3-tts-chunking-v2",
                 "voice_identity": "v" * 64,
@@ -419,6 +420,7 @@ async def test_completed_block_persists_every_physical_chunk_with_plan_metadata(
         "sentence",
     )
     assert chunk["chunking_identity"] == "chunk-v1"
+    assert chunk["pause_after_frames"] == 0
     assert chunk["voice_profile_identity"] == "v" * 64
     assert chunk["generation_profile_identity"] == "g" * 64
     assert Path(chunk["audio_path"]).read_bytes() == tone.read_bytes()

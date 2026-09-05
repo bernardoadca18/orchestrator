@@ -575,6 +575,9 @@ class AudioWorkflowService:
                                         "start_char": artifact["start_char"],
                                         "end_char": artifact["end_char"],
                                         "boundary": artifact["boundary"],
+                                        "pause_after_frames": artifact[
+                                            "pause_after_frames"
+                                        ],
                                         "chunking_identity": artifact["chunking_identity"],
                                         "chunking_strategy_version": artifact[
                                             "chunking_strategy_version"
@@ -1339,20 +1342,41 @@ class AudioWorkflowService:
     async def _ensure_transcription(
         self, workflow_id: uuid.UUID, final_path: Path, audio_sha256: str
     ) -> None:
-        existing = await self.repo.obter_transcricao(workflow_id)
-        if existing is not None and existing.audio_sha256 == audio_sha256:
-            return
-        provider = self.transcription_provider or get_transcription_provider()
-        result = provider.transcribe(final_path)
-        await self.repo.upsert_transcricao(
+        await ensure_transcription(
+            self.session,
             workflow_id,
-            texto_completo=result.text,
-            palavras_timestamps=[word.to_legacy_dict() for word in result.words],
-            audio_sha256=audio_sha256,
-            provider=result.provider,
-            model=result.model,
-            language=result.language,
+            final_path,
+            audio_sha256,
+            provider=self.transcription_provider,
+            repository=self.repo,
         )
+
+
+async def ensure_transcription(
+    session: AsyncSession,
+    workflow_id: uuid.UUID,
+    final_path: Path,
+    audio_sha256: str,
+    *,
+    provider: NarrationTranscriptionProvider | None = None,
+    repository: WorkflowRepository | None = None,
+) -> None:
+    """Reuse a compatible ASR artifact or replace it for the current audio SHA."""
+    repo = repository or WorkflowRepository(session)
+    existing = await repo.obter_transcricao(workflow_id)
+    if existing is not None and existing.audio_sha256 == audio_sha256:
+        return
+    resolved_provider = provider or get_transcription_provider()
+    result = resolved_provider.transcribe(final_path)
+    await repo.upsert_transcricao(
+        workflow_id,
+        texto_completo=result.text,
+        palavras_timestamps=[word.to_legacy_dict() for word in result.words],
+        audio_sha256=audio_sha256,
+        provider=result.provider,
+        model=result.model,
+        language=result.language,
+    )
 
 
 async def processar_workflow(

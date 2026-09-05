@@ -14,6 +14,7 @@ from app.services.production_audio import (
     inspect_wav,
     inspect_wav_metadata,
     publish_source_block,
+    reassemble_block_from_chunks,
 )
 
 
@@ -134,3 +135,34 @@ def test_assembly_failure_preserves_existing_destination(tmp_path: Path) -> None
         assemble_narration([invalid], destination, sample_rate=48_000, silence_ms=0)
     assert destination.read_bytes() == b"existing artifact"
     assert not list(tmp_path.glob(".*.tmp.wav"))
+
+
+def test_chunk_reassembly_uses_frozen_qwen_pause_frames_exactly(tmp_path: Path) -> None:
+    sample_rate = 8_000
+    paths: list[Path] = []
+    frame_counts = (800, 1_600, 2_400)
+    for index, frames in enumerate(frame_counts):
+        path = tmp_path / f"chunk-{index}.wav"
+        sf.write(
+            path,
+            np.full(frames, 0.1 * (index + 1), dtype=np.float64),
+            sample_rate,
+            format="WAV",
+            subtype="PCM_16",
+        )
+        paths.append(path)
+
+    # These are resolved Qwen frame counts, not Orchestrator pause defaults.
+    pauses = [800, 1_600, 0]
+    result = reassemble_block_from_chunks(
+        paths,
+        tmp_path / "block.wav",
+        sample_rate=sample_rate,
+        pause_frames=pauses,
+    )
+    assert result.metadata.frame_count == sum(frame_counts) + sum(pauses[:-1]) == 7_200
+    samples, _ = sf.read(tmp_path / "block.wav")
+    assert np.all(samples[800:1_600] == 0)
+    assert np.all(samples[3_200:4_800] == 0)
+    assert np.any(samples[4_800:] != 0)
+    assert len(samples) == 7_200  # no pause after the final physical chunk

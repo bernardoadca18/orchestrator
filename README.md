@@ -27,8 +27,9 @@ The Orchestrator's `AudioBloco` is an editorial block. Qwen still owns physical 
 synthesis, but completed physical chunks are downloaded, validated and persisted as durable
 `AudioChunk` / initial `AudioChunkTake` children under
 `data/audio/<workflow>/blocks/chunks/`. Their frozen plan records character span, boundary,
-chunker/profile identities, exact synthesis text and original seed so a later assembler can
-reproduce Qwen's deterministic boundary pauses. Independent speech blocks are never crossfaded;
+resolved `pause_after_frames`, chunker/profile identities, exact synthesis text and original seed
+so the assembler reproduces that historical Qwen generation without consulting current pause
+defaults. Independent speech blocks are never crossfaded;
 resampling still occurs once at final assembly.
 
 The final mastering policy measures Integrated LUFS, sample peak and real True Peak (FFmpeg EBU
@@ -69,9 +70,18 @@ take UUID and records the Qwen candidate UUID. Candidate completion does not mov
 the durable Orchestrator take UUID; rejection changes only that historical take. Activity is
 derived from `current_take_id`, not a second persisted `active` status.
 
-Alembic lineage is linear: revision `014` adds production-error history and revision `015` adds
-the chunk/take tables, frozen plan provenance, idempotency identity and the
-`audio_chunks.current_take_id` foreign key.
+Promotion changes only the selected chunk take and increments durable block/workflow edit
+revisions. The last successfully published narration remains current until
+`POST /workflow/{workflow_id}/audio-edits/apply` queues one idempotent batch update. Its worker
+freezes selected take IDs, rebuilds only dirty blocks, reuses clean block artifacts, and streams the
+complete narration through the established assembler and mastering path. Database pointers move
+only after the replacement validates. Pre-publication failure or a newer concurrent promotion
+leaves the old narration current and the edits pending. After publication, SHA-based transcription
+compatibility and the existing Stage 17 identity chain recover only timing-dependent artifacts.
+
+Alembic lineage is linear: revision `014` adds production-error history, revision `015` adds the
+chunk/take tables, and revision `016` adds exact pause provenance plus durable edit revisions and
+batch update operations.
 
 The take-level content gate compares Faster-Whisper against the actual synthesis text and persists
 WER/CER, deletions, insertions, repetitions, missing spans and premature-ending evidence before a

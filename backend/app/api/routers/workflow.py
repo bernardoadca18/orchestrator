@@ -35,6 +35,8 @@ from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
     AudioActionIn,
+    AudioEditApplyOut,
+    AudioEditUpdateOut,
     MediaScopeOut,
     NarrationAlignmentEnsureOut,
     NarrationBlockAlignmentOut,
@@ -94,6 +96,7 @@ from app.services.visual_director_service import (
     VisualDirectorNotFoundError,
     VisualDirectorService,
 )
+from app.tasks.audio_edit_tasks import aplicar_edicoes_audio
 from app.tasks.audio_tasks import gerar_audio_workflow
 from app.tasks.production_tasks import processar_producao_workflow
 
@@ -788,6 +791,8 @@ async def obter_transcricao(
     transcricao = await repo.obter_transcricao(workflow_id)
     if transcricao is None:
         raise HTTPException(404, "Transcrição ainda não disponível para este workflow")
+    if not wf.audio_final_sha256 or transcricao.audio_sha256 != wf.audio_final_sha256:
+        raise HTTPException(409, "Transcrição pertence a outra versão da narração final")
 
     return transcricao
 
@@ -1075,6 +1080,8 @@ async def listar_chunks_bloco(
             "duration_seconds": chunk.duration_seconds,
             "sample_rate": chunk.sample_rate,
             "status": chunk.status,
+            "boundary": chunk.boundary,
+            "pause_after_frames": chunk.pause_after_frames,
             "current_take_id": str(chunk.current_take_id) if chunk.current_take_id else None,
             "takes": [
                 {
@@ -1287,12 +1294,8 @@ async def promover_chunk_take(
 ):
     """Promote a candidate take to active.
 
-    Atomically:
-    - Marks current active take as superseded
-    - Sets candidate as completed and active
-    - Marks chunk as stale (triggers downstream invalidation)
-
-    The block audio is NOT automatically reassembled.
+    Selection is transactional and durable, but materialization is deferred to
+    the explicit batch Update Pipeline operation.
     """
     repo = WorkflowRepository(session)
 
@@ -1311,126 +1314,96 @@ async def promover_chunk_take(
     if take.status != "completed":
         raise HTTPException(400, "Take não está pronto para promoção")
 
-    success = await repo.promover_chunk_take(take_id)
+    old_final_sha256 = (
+        await repo.obter_por_id(workflow_id)
+    ).audio_final_sha256
+    success = await repo.promover_chunk_take(take_id, workflow_id=workflow_id)
     if not success:
         raise HTTPException(409, "Take já foi superado ou rejeitado")
 
-    # Trigger downstream invalidation
-    workflow = await repo.obter(workflow_id)
-    if workflow:
-        await repo.invalidar_derivados_de_audio(workflow, [bloco])
+    workflow = await repo.obter_por_id(workflow_id)
+    assert workflow is not None
+    if workflow.audio_final_sha256 != old_final_sha256:
+        raise RuntimeError("chunk promotion unexpectedly changed final narration")
 
     return {
         "take_id": str(take_id),
         "status": "promoted",
-        "chunk_status": "stale",
-        "message": "Take promovido. O bloco deve ser remontado.",
+        "chunk_status": "active",
+        "audio_edits_pending": True,
+        "audio_edit_revision": workflow.audio_edit_revision,
+        "final_audio_sha256": workflow.audio_final_sha256,
+        "message": "Take selecionado. Use Update Pipeline para publicar as edições.",
     }
 
 
-@router.post("/{workflow_id}/blocos/{bloco_id}/reassemble")
+@router.post(
+    "/{workflow_id}/audio-edits/apply",
+    response_model=AudioEditApplyOut,
+    status_code=202,
+)
+async def aplicar_edicoes_pendentes(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+):
+    """Queue one durable materialization of all currently pending chunk edits."""
+    key = _action_key(idempotency_key)
+    repo = WorkflowRepository(session)
+    try:
+        update, created = await repo.request_audio_edit_update(workflow_id, key)
+    except LookupError as exc:
+        raise HTTPException(404, "Workflow não encontrado") from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    workflow = await repo.obter_por_id(workflow_id)
+    assert workflow is not None
+    if created and update is not None:
+        aplicar_edicoes_audio.delay(str(update.id))
+    return AudioEditApplyOut(
+        workflow_id=workflow.id,
+        update_id=update.id if update is not None else None,
+        status=update.status if update is not None else "no_pending",
+        created=created,
+        audio_edit_revision=workflow.audio_edit_revision,
+        audio_materialized_revision=workflow.audio_materialized_revision,
+        audio_edits_pending=(
+            workflow.audio_edit_revision > workflow.audio_materialized_revision
+        ),
+        final_audio_sha256=workflow.audio_final_sha256,
+    )
+
+
+@router.get(
+    "/{workflow_id}/audio-edits/updates/{update_id}",
+    response_model=AudioEditUpdateOut,
+)
+async def obter_atualizacao_edicoes_audio(
+    workflow_id: uuid.UUID,
+    update_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    update = await WorkflowRepository(session).get_audio_edit_update(update_id)
+    if update is None or update.workflow_execucao_id != workflow_id:
+        raise HTTPException(404, "Atualização de áudio não encontrada")
+    return update
+
+
+@router.post("/{workflow_id}/blocos/{bloco_id}/reassemble", deprecated=True)
 async def remontar_bloco(
     workflow_id: uuid.UUID,
     bloco_id: uuid.UUID,
     session: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """Reassemble a block from its active chunk takes.
-
-    Reads the active take for each chunk in order and concatenates them
-    to produce a new block audio file. Invalidates downstream artifacts.
-    """
-    from app.core.config import settings
-    from app.services.production_audio import (
-        ProductionAudioError,
-        inspect_wav,
-        reassemble_block_from_chunks,
-    )
-
+    """Retained as a compatibility guard; publication is now batch-only."""
     repo = WorkflowRepository(session)
     bloco = await repo.obter_bloco_por_id(bloco_id)
     if bloco is None or bloco.workflow_execucao_id != workflow_id:
         raise HTTPException(404, "Bloco não encontrado")
-
-    if bloco.status != "concluido":
-        raise HTTPException(400, "Bloco ainda não foi gerado")
-
-    # Get all chunks with their active takes
-    chunks = await repo.listar_chunks(bloco_id)
-    if not chunks:
-        raise HTTPException(400, "Bloco não possui chunks persistidos")
-
-    # Verify all chunks have active takes
-    for chunk in chunks:
-        if chunk.status != "active" and chunk.status != "stale":
-            raise HTTPException(
-                400, f"Chunk {chunk.chunk_index} não possui take ativo"
-            )
-
-    # Collect active take audio paths in order
-    chunk_paths: list[Path] = []
-    for chunk in sorted(chunks, key=lambda c: c.chunk_index):
-        active_take = next(
-            (t for t in chunk.takes if t.id == chunk.current_take_id), None
-        )
-        if active_take is None or not active_take.audio_path:
-            raise HTTPException(
-                400, f"Chunk {chunk.chunk_index} não possui take ativo"
-            )
-        chunk_paths.append(Path(active_take.audio_path))
-
-    # Reassemble the block
-    source_dir = Path(settings.audio_storage_path) / str(workflow_id) / "blocks"
-    reassembled_path = source_dir / f"bloco_{bloco.ordem:02d}_reassembled.wav"
-
-    try:
-        reassemble_block_from_chunks(
-            chunk_paths,
-            reassembled_path,
-            sample_rate=24000,  # Qwen native sample rate
-        )
-    except ProductionAudioError as exc:
-        raise HTTPException(500, f"Falha na remontagem do bloco: {exc}") from exc
-
-    # Verify the reassembled audio
-    metadata = inspect_wav(reassembled_path)
-
-    # Update the block with the new audio
-    old_path = source_dir / f"bloco_{bloco.ordem:02d}.wav"
-    if old_path.exists():
-        backup_path = source_dir / f"bloco_{bloco.ordem:02d}_backup_{uuid.uuid4().hex[:8]}.wav"
-        old_path.rename(backup_path)
-
-    reassembled_path.rename(old_path)
-
-    # Update block metadata
-    bloco.audio_sha256 = metadata.sha256
-    bloco.audio_byte_size = metadata.byte_size
-    bloco.audio_sample_rate = metadata.sample_rate
-    bloco.audio_duration_seconds = metadata.duration_seconds
-    bloco.audio_frame_count = metadata.frame_count
-    bloco.audio_channels = metadata.channels
-    bloco.audio_subtype = metadata.subtype
-    bloco.status = "concluido"
-
-    # Mark all chunks as active (no longer stale)
-    for chunk in chunks:
-        if chunk.status == "stale":
-            chunk.status = "active"
-
-    await session.commit()
-
-    # Invalidate downstream artifacts
-    workflow = await repo.obter(workflow_id)
-    if workflow:
-        await repo.invalidar_derivados_de_audio(workflow, [bloco])
-
-    return {
-        "bloco_id": str(bloco_id),
-        "status": "reassembled",
-        "duration_seconds": metadata.duration_seconds,
-        "sha256": metadata.sha256,
-        "chunks_used": len(chunk_paths),
-    }
+    raise HTTPException(
+        409,
+        "Remontagem isolada foi substituída por POST /workflow/{id}/audio-edits/apply",
+    )
 
 
 @router.post("/{workflow_id}/chunk-takes/{take_id}/discard")
@@ -1612,7 +1585,7 @@ async def obter_pacote_producao(
     # Montar seção de transcrição
     transcricao_data = await repo.obter_transcricao(workflow_id)
     transcricao = None
-    if transcricao_data:
+    if transcricao_data and transcricao_data.audio_sha256 == wf.audio_final_sha256:
         transcricao = TranscricaoPacoteOut(
             texto_completo=transcricao_data.texto_completo,
             palavras_timestamps=[

@@ -96,6 +96,7 @@ def _chunk_data(index: int, source_job_id: str) -> dict[str, object]:
         "start_char": start,
         "end_char": start + 9,
         "boundary": "sentence" if index % 2 == 0 else "paragraph",
+        "pause_after_frames": 0 if index == 3 else 2_400 + index,
         "chunking_identity": "c" * 64,
         "chunking_strategy_version": "qwen3-tts-chunking-v2",
         "voice_profile_identity": "v" * 64,
@@ -128,6 +129,7 @@ async def test_initial_chunks_and_plan_provenance_survive_reload(session, block)
     assert reloaded[0].synthesis_text_snapshot == "Síntese congelada 0"
     assert (reloaded[0].start_char, reloaded[0].end_char) == (0, 9)
     assert reloaded[0].boundary == "sentence"
+    assert reloaded[0].pause_after_frames == 2_400
     assert reloaded[0].chunking_identity == "c" * 64
     assert reloaded[0].chunking_strategy_version == "qwen3-tts-chunking-v2"
     assert reloaded[0].voice_profile_identity == "v" * 64
@@ -270,3 +272,113 @@ async def test_current_take_id_has_database_referential_integrity(session, block
     with pytest.raises(IntegrityError):
         await session.commit()
     await session.rollback()
+
+
+@pytest.mark.asyncio
+async def test_promotion_marks_durable_pending_edit_without_invalidating_final(
+    session, block
+) -> None:
+    from app.models.workflow import WorkflowExecucao
+    from app.repositories.workflow_repository import WorkflowRepository
+
+    repo = WorkflowRepository(session)
+    workflow = await session.get(WorkflowExecucao, block.workflow_execucao_id)
+    assert workflow is not None
+    workflow.audio_final_path = "/tmp/old-final.wav"
+    workflow.audio_final_sha256 = "e" * 64
+    await session.commit()
+    chunk = (
+        await repo.persistir_chunks(block.id, [_chunk_data(3, block.id.hex)])
+    )[0]
+    original_take_id = chunk.current_take_id
+    candidate = await repo.criar_chunk_take(
+        chunk.id,
+        seed=904,
+        idempotency_key=f"promotion-{block.id}",
+    )
+    await repo.atualizar_chunk_take(candidate.id, status="completed")
+
+    assert await repo.promover_chunk_take(
+        candidate.id, workflow_id=workflow.id
+    ) is True
+    chunk_id = chunk.id
+    workflow_id = workflow.id
+    block_id = block.id
+    session.expire_all()
+    reloaded = await repo.obter_chunk(chunk_id)
+    durable_workflow = await session.get(WorkflowExecucao, workflow_id)
+    durable_block = await repo.obter_bloco_por_id(block_id)
+    assert reloaded is not None and durable_workflow is not None and durable_block is not None
+    assert reloaded.current_take_id == candidate.id
+    assert reloaded.status == "active"
+    assert next(t for t in reloaded.takes if t.id == original_take_id).status == "superseded"
+    assert durable_workflow.audio_final_sha256 == "e" * 64
+    assert durable_workflow.audio_final_path == "/tmp/old-final.wav"
+    assert durable_workflow.audio_edit_revision == 1
+    assert durable_workflow.audio_materialized_revision == 0
+    assert durable_block.audio_edit_revision == 1
+    assert durable_block.audio_materialized_revision == 0
+
+
+@pytest.mark.asyncio
+async def test_update_request_is_durable_idempotent_and_single_flight(session, block) -> None:
+    from app.models.workflow import WorkflowExecucao
+    from app.repositories.workflow_repository import WorkflowRepository
+
+    repo = WorkflowRepository(session)
+    workflow = await session.get(WorkflowExecucao, block.workflow_execucao_id)
+    assert workflow is not None
+    workflow.audio_edit_revision = 2
+    block.audio_edit_revision = 2
+    await session.commit()
+
+    first, created = await repo.request_audio_edit_update(
+        workflow.id, f"apply-{workflow.id}"
+    )
+    replay, replay_created = await repo.request_audio_edit_update(
+        workflow.id, f"apply-{workflow.id}"
+    )
+    concurrent, concurrent_created = await repo.request_audio_edit_update(
+        workflow.id, f"apply-concurrent-{workflow.id}"
+    )
+    assert first is not None and replay is not None and concurrent is not None
+    assert created is True
+    assert replay_created is concurrent_created is False
+    assert replay.id == concurrent.id == first.id
+
+    update_id = first.id
+    session.expire_all()
+    durable = await repo.get_audio_edit_update(update_id)
+    assert durable is not None
+    assert durable.status == "pending"
+    assert durable.target_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_repeated_promotions_keep_one_consistent_selected_take(session, block) -> None:
+    from app.repositories.workflow_repository import WorkflowRepository
+
+    repo = WorkflowRepository(session)
+    chunk = (
+        await repo.persistir_chunks(block.id, [_chunk_data(3, block.id.hex)])
+    )[0]
+    candidates = []
+    for index in range(2):
+        take = await repo.criar_chunk_take(
+            chunk.id,
+            seed=920 + index,
+            idempotency_key=f"promotion-race-{block.id}-{index}",
+        )
+        await repo.atualizar_chunk_take(take.id, status="completed")
+        candidates.append(take)
+
+    assert await repo.promover_chunk_take(
+        candidates[0].id, workflow_id=block.workflow_execucao_id
+    )
+    assert await repo.promover_chunk_take(
+        candidates[1].id, workflow_id=block.workflow_execucao_id
+    )
+    selected = await repo.obter_chunk(chunk.id)
+    assert selected is not None
+    assert selected.current_take_id == candidates[1].id
+    assert next(t for t in selected.takes if t.id == candidates[0].id).status == "superseded"

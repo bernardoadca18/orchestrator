@@ -12,6 +12,7 @@ from fastapi import HTTPException, Request
 from app.api.routers.workflow import (
     baixar_video_final,
     obter_render,
+    obter_transcricao,
     repetir_workflow,
     retomar_producao,
 )
@@ -142,6 +143,23 @@ def test_audio_availability_is_artifact_based_after_downstream_failure() -> None
         audio_final_byte_size=100,
     )
     assert workflow.audio_available is True
+
+
+@pytest.mark.asyncio
+async def test_stale_transcription_is_not_exposed_as_current() -> None:
+    workflow = _workflow("running")
+    workflow.audio_final_sha256 = "b" * 64
+    repository = MagicMock()
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    repository.obter_transcricao = AsyncMock(
+        return_value=SimpleNamespace(audio_sha256="a" * 64)
+    )
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        pytest.raises(HTTPException) as error,
+    ):
+        await obter_transcricao(workflow.id, MagicMock())
+    assert error.value.status_code == 409
 
 
 @pytest.mark.asyncio

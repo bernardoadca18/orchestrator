@@ -138,6 +138,15 @@ class WorkflowExecucao(Base):
     production_completed_at: Mapped[dt.datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    audio_edit_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    audio_materialized_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    audio_edit_updates: Mapped[list["AudioEditUpdate"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan"
+    )
 
 
 class AudioBloco(Base):
@@ -206,6 +215,12 @@ class AudioBloco(Base):
     narration_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     narration_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     erro_mensagem: Mapped[str | None] = mapped_column(Text, nullable=True)
+    audio_edit_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    audio_materialized_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
 
     criado_em: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -235,7 +250,8 @@ class AudioBlocoTake(Base):
         UniqueConstraint("audio_bloco_id", "attempt_index", name="uq_audio_bloco_take_attempt"),
         UniqueConstraint("request_key", name="uq_audio_bloco_take_request_key"),
         CheckConstraint(
-            "kind IN ('initial', 'quality_retry', 'manual_retry', 'manual_regeneration')",
+            "kind IN ('initial', 'quality_retry', 'manual_retry', 'manual_regeneration', "
+            "'chunk_edit_reassembly')",
             name="ck_audio_bloco_take_kind",
         ),
         CheckConstraint(
@@ -330,6 +346,7 @@ class AudioChunk(Base):
     start_char: Mapped[int] = mapped_column(Integer, nullable=False)
     end_char: Mapped[int] = mapped_column(Integer, nullable=False)
     boundary: Mapped[str] = mapped_column(String(32), nullable=False)
+    pause_after_frames: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     chunking_identity: Mapped[str] = mapped_column(String(64), nullable=False)
     chunking_strategy_version: Mapped[str] = mapped_column(String(64), nullable=False)
     voice_profile_identity: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -412,6 +429,47 @@ class AudioChunkTake(Base):
     audio_chunk: Mapped["AudioChunk"] = relationship(
         back_populates="takes", foreign_keys=[audio_chunk_id]
     )
+
+
+class AudioEditUpdate(Base):
+    """Durable, idempotent publication of one snapshot of promoted chunk edits."""
+
+    __tablename__ = "audio_edit_updates"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_audio_edit_update_idempotency_key"),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_audio_edit_update_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    edit_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    published_audio_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_stage: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    materialized_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="audio_edit_updates")
 
 
 class TranscricaoAudio(Base):
