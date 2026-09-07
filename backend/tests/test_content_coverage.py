@@ -1,9 +1,20 @@
 from __future__ import annotations
 
+import pytest
+
 from app.services.content_coverage import (
+    MAX_COVERAGE_CELLS_PER_WINDOW,
+    ContentCoverageSegment,
+    _token_edit_operations,
     analyze_content_coverage,
+    analyze_segmented_content_coverage,
     unavailable_content_report,
 )
+from app.services.narration_alignment_algorithm import tokenize
+
+
+def _long_tokens(count: int) -> list[str]:
+    return [f"palavra{index}" for index in range(count)]
 
 
 def test_complete_speech_passes_and_reports_normalized_metrics() -> None:
@@ -158,3 +169,116 @@ def test_long_form_scattered_local_substitutions_do_not_accumulate_into_rejectio
     assert report.retry_required is False
     assert report.metrics["structural_coverage_ratio"] == 1.0
     assert report.metrics["pronunciation_variant_match_count"] > 0
+
+
+def test_public_coverage_segments_input_above_old_global_cell_limit() -> None:
+    tokens = _long_tokens(1_600)
+    report = analyze_content_coverage(" ".join(tokens), " ".join(tokens))
+
+    assert 1_600 * 1_600 > 2_000_000
+    assert report.status == "passed"
+    assert report.classification == "content_complete"
+    assert report.metrics["maximum_observed_window_cells"] <= (
+        MAX_COVERAGE_CELLS_PER_WINDOW
+    )
+    assert report.metrics["segments"][0]["window_count"] > 1
+    assert report.metrics["segments"][0]["used_proportional_fallback"] is False
+
+
+def test_exact_matrix_guard_remains_in_place_beneath_bounded_public_api() -> None:
+    tokens = tokenize(" ".join(_long_tokens(1_500)))
+    with pytest.raises(ValueError, match="deterministic alignment limits"):
+        _token_edit_operations(tokens, tokens)
+
+
+def test_long_coverage_detects_large_middle_loss_and_premature_end() -> None:
+    tokens = _long_tokens(1_800)
+    reference = " ".join(tokens)
+
+    middle_loss = analyze_content_coverage(
+        reference, " ".join([*tokens[:650], *tokens[900:]])
+    )
+    premature = analyze_content_coverage(reference, " ".join(tokens[:-180]))
+
+    assert middle_loss.status == "rejected"
+    assert middle_loss.classification == "probable_content_loss"
+    assert middle_loss.metrics["deletion_count"] == 250
+    assert middle_loss.metrics["longest_missing_contiguous_token_count"] >= 100
+    assert premature.status == "rejected"
+    assert premature.classification == "premature_end"
+    assert premature.metrics["trailing_missing_token_count"] == 180
+
+
+def test_long_coverage_detects_significant_repetition_and_reordering() -> None:
+    tokens = _long_tokens(1_800)
+    reference = " ".join(tokens)
+    repetition = analyze_content_coverage(
+        reference,
+        " ".join(
+            [
+                *tokens[:700],
+                *(["trecho", "muito", "repetido", "agora"] * 180),
+                *tokens[700:],
+            ]
+        ),
+    )
+    reordered = analyze_content_coverage(
+        reference,
+        " ".join([*tokens[:600], *tokens[1_200:], *tokens[600:1_200]]),
+    )
+
+    assert repetition.status == "rejected"
+    assert repetition.classification == "probable_repetition"
+    assert reordered.status == "rejected"
+    assert reordered.classification == "probable_reordering"
+
+
+def test_three_realistic_blocks_are_aggregated_without_global_matrix() -> None:
+    segments = []
+    for order, count in enumerate((490, 560, 629)):
+        text = " ".join(f"bloco{order}palavra{index}" for index in range(count))
+        segments.append(ContentCoverageSegment(f"block:{order}", text, text))
+
+    report = analyze_segmented_content_coverage(segments)
+
+    assert 1_679 * 1_679 > 2_000_000
+    assert report.status == "passed"
+    assert report.metrics["content_coverage_strategy"] == "block_segmented_v1"
+    assert report.metrics["segment_count"] == 3
+    assert [item["reference_token_count"] for item in report.metrics["segments"]] == [
+        490,
+        560,
+        629,
+    ]
+    assert report.metrics["maximum_observed_window_cells"] <= 262_144
+
+
+def test_bad_block_cannot_be_hidden_by_healthy_global_average() -> None:
+    healthy_a = " ".join(f"inicio{index}" for index in range(900))
+    missing = " ".join(f"meio{index}" for index in range(300))
+    healthy_b = " ".join(f"fim{index}" for index in range(900))
+    report = analyze_segmented_content_coverage(
+        (
+            ContentCoverageSegment("block:0", healthy_a, healthy_a),
+            ContentCoverageSegment("block:1", missing, ""),
+            ContentCoverageSegment("block:2", healthy_b, healthy_b),
+        )
+    )
+
+    assert report.metrics["coverage_ratio"] > 0.80
+    assert report.status == "rejected"
+    assert report.classification == "probable_content_loss"
+    assert report.metrics["segments"][1]["status"] == "rejected"
+
+
+def test_unanchored_large_disagreement_is_explicitly_inconclusive() -> None:
+    reference = " ".join(f"referencia{index}" for index in range(1_600))
+    hypothesis = " ".join(f"hipotese{index}" for index in range(1_600))
+
+    report = analyze_content_coverage(reference, hypothesis)
+
+    assert report.status == "unavailable"
+    assert report.classification == "content_inconclusive"
+    assert "bounded_alignment_used_proportional_fallback" in report.reasons
+    assert report.metrics["segments"][0]["used_proportional_fallback"] is True
+    assert report.retry_required is False

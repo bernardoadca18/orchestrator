@@ -12,13 +12,23 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Literal
 
-from app.services.narration_alignment_algorithm import TextToken, token_similarity, tokenize
+from app.services.narration_alignment_algorithm import (
+    AlignmentWindow,
+    TextToken,
+    bounded_alignment_windows,
+    token_similarity,
+    tokenize,
+)
 from app.services.text_normalization import PortugueseTextNormalizer
 
-CONTENT_COVERAGE_VERSION = "narration_content_coverage_v2"
+CONTENT_COVERAGE_VERSION = "narration_content_coverage_v3"
+CONTENT_COVERAGE_STRATEGY = "block_segmented_v1"
+MAX_COVERAGE_TOKENS_PER_WINDOW = 2_500
+MAX_COVERAGE_CELLS_PER_WINDOW = 2_000_000
 CONTENT_COMPARISON_NORMALIZATION_VERSION = "narration_content_comparison_pt_br_v1"
 _COMPARISON_NORMALIZER = PortugueseTextNormalizer(version=CONTENT_COMPARISON_NORMALIZATION_VERSION)
 _SENTENCE_PATTERN = re.compile(r"[^.!?]+(?:[.!?]+|$)", re.UNICODE)
@@ -32,6 +42,10 @@ ContentClassification = Literal[
     "probable_repetition",
     "probable_reordering",
 ]
+
+
+class ContentCoverageLimitError(ValueError):
+    """An exact internal window exceeded its deterministic safety budget."""
 
 
 @dataclass(frozen=True)
@@ -83,6 +97,13 @@ class ContentCoverageReport:
         }
 
 
+@dataclass(frozen=True)
+class ContentCoverageSegment:
+    key: str
+    reference_text: str
+    hypothesis_text: str
+
+
 def normalize_content_comparison_text(value: str) -> str:
     """Normalize representation only; canonical and synthesis text stay immutable."""
     return _COMPARISON_NORMALIZER.normalize(value).normalized_text
@@ -97,7 +118,9 @@ def _token_edit_operations(
 ) -> list[tuple[str, int | None, int | None]]:
     n, m = len(reference), len(hypothesis)
     if n > 2_500 or m > 2_500 or n * m > 2_000_000:
-        raise ValueError("content coverage input exceeds deterministic alignment limits")
+        raise ContentCoverageLimitError(
+            "content coverage input exceeds deterministic alignment limits"
+        )
     previous = list(range(m + 1))
     trace = [bytearray(m + 1) for _ in range(n + 1)]
     for j in range(1, m + 1):
@@ -347,14 +370,305 @@ def analyze_content_coverage(
     *,
     thresholds: ContentCoverageThresholds | None = None,
 ) -> ContentCoverageReport:
+    return analyze_segmented_content_coverage(
+        (
+            ContentCoverageSegment(
+                key="narration",
+                reference_text=reference_text,
+                hypothesis_text=hypothesis_text,
+            ),
+        ),
+        thresholds=thresholds,
+    )
+
+
+def analyze_segmented_content_coverage(
+    segments: Sequence[ContentCoverageSegment],
+    *,
+    thresholds: ContentCoverageThresholds | None = None,
+) -> ContentCoverageReport:
+    """Evaluate ordered semantic/temporal segments with bounded exact matrices."""
+
     policy = thresholds or ContentCoverageThresholds()
-    normalized_reference_text = normalize_content_comparison_text(reference_text)
-    normalized_hypothesis_text = normalize_content_comparison_text(hypothesis_text)
+    if not segments:
+        raise ValueError("content coverage requires at least one segment")
+
+    normalized_segments: list[
+        tuple[
+            ContentCoverageSegment,
+            str,
+            str,
+            tuple[TextToken, ...],
+            tuple[TextToken, ...],
+            list[tuple[str, int | None, int | None]],
+            tuple[AlignmentWindow, ...],
+            ContentCoverageReport,
+        ]
+    ] = []
+    seen_keys: set[str] = set()
+    for segment in segments:
+        if not segment.key or segment.key in seen_keys:
+            raise ValueError("content coverage segment keys must be non-empty and unique")
+        seen_keys.add(segment.key)
+        normalized_reference = normalize_content_comparison_text(segment.reference_text)
+        normalized_hypothesis = normalize_content_comparison_text(segment.hypothesis_text)
+        reference = tokenize(normalized_reference)
+        hypothesis = tokenize(normalized_hypothesis)
+        if not reference:
+            raise ValueError("content coverage reference must contain speech tokens")
+        segment_operations, windows = _bounded_token_edit_operations(
+            reference, hypothesis
+        )
+        local_report = _report_from_operations(
+            normalized_reference,
+            normalized_hypothesis,
+            reference,
+            hypothesis,
+            segment_operations,
+            policy,
+            degraded=any(
+                window.method == "proportional_fallback" for window in windows
+            ),
+        )
+        normalized_segments.append(
+            (
+                segment,
+                normalized_reference,
+                normalized_hypothesis,
+                reference,
+                hypothesis,
+                segment_operations,
+                windows,
+                local_report,
+            )
+        )
+
+    normalized_reference_text = "\n".join(item[1] for item in normalized_segments)
+    normalized_hypothesis_text = "\n".join(item[2] for item in normalized_segments)
     reference = tokenize(normalized_reference_text)
     hypothesis = tokenize(normalized_hypothesis_text)
-    if not reference:
-        raise ValueError("content coverage reference must contain speech tokens")
-    operations = _token_edit_operations(reference, hypothesis)
+    operations: list[tuple[str, int | None, int | None]] = []
+    reference_offset = hypothesis_offset = 0
+    for _, _, _, local_reference, local_hypothesis, local_operations, _, _ in (
+        normalized_segments
+    ):
+        operations.extend(
+            (
+                kind,
+                reference_offset + reference_index
+                if reference_index is not None
+                else None,
+                hypothesis_offset + hypothesis_index
+                if hypothesis_index is not None
+                else None,
+            )
+            for kind, reference_index, hypothesis_index in local_operations
+        )
+        reference_offset += len(local_reference)
+        hypothesis_offset += len(local_hypothesis)
+    if reference_offset != len(reference) or hypothesis_offset != len(hypothesis):
+        raise RuntimeError("content coverage segment token accounting is inconsistent")
+
+    local_blocking = tuple(
+        item[7].classification
+        for item in normalized_segments
+        if item[7].status == "rejected"
+    )
+    local_inconclusive = any(
+        item[7].classification == "content_inconclusive"
+        for item in normalized_segments
+    )
+    degraded = any(
+        window.method == "proportional_fallback"
+        for item in normalized_segments
+        for window in item[6]
+    )
+    report = _report_from_operations(
+        normalized_reference_text,
+        normalized_hypothesis_text,
+        reference,
+        hypothesis,
+        operations,
+        policy,
+        degraded=degraded,
+        local_blocking=local_blocking,
+        local_inconclusive=local_inconclusive,
+    )
+    metrics = dict(report.metrics)
+    metrics.update(
+        {
+            "content_coverage_strategy": CONTENT_COVERAGE_STRATEGY,
+            "segment_count": len(normalized_segments),
+            "maximum_window_token_count": MAX_COVERAGE_TOKENS_PER_WINDOW,
+            "maximum_window_cell_count": MAX_COVERAGE_CELLS_PER_WINDOW,
+            "maximum_observed_window_cells": max(
+                (
+                    window.cells
+                    for item in normalized_segments
+                    for window in item[6]
+                ),
+                default=0,
+            ),
+            "segments": [
+                {
+                    "key": item[0].key,
+                    "status": item[7].status,
+                    "classification": item[7].classification,
+                    "reasons": list(item[7].reasons),
+                    "reference_token_count": len(item[3]),
+                    "hypothesis_token_count": len(item[4]),
+                    "coverage_ratio": item[7].metrics["coverage_ratio"],
+                    "structural_coverage_ratio": item[7].metrics[
+                        "structural_coverage_ratio"
+                    ],
+                    "deletion_ratio": item[7].metrics["deletion_ratio"],
+                    "insertion_ratio": item[7].metrics["insertion_ratio"],
+                    "repetition_ratio": item[7].metrics["repetition_ratio"],
+                    "longest_missing_contiguous_token_count": item[7].metrics[
+                        "longest_missing_contiguous_token_count"
+                    ],
+                    "trailing_missing_token_count": item[7].metrics[
+                        "trailing_missing_token_count"
+                    ],
+                    "window_count": len(item[6]),
+                    "maximum_window_cells": max(
+                        (window.cells for window in item[6]), default=0
+                    ),
+                    "used_proportional_fallback": any(
+                        window.method == "proportional_fallback"
+                        for window in item[6]
+                    ),
+                }
+                for item in normalized_segments
+            ],
+        }
+    )
+    return ContentCoverageReport(
+        status=report.status,
+        classification=report.classification,
+        severity=report.severity,
+        retry_required=report.retry_required,
+        reasons=report.reasons,
+        metrics=metrics,
+        policy_version=report.policy_version,
+        policy_identity=report.policy_identity,
+    )
+
+
+def _bounded_token_edit_operations(
+    reference: tuple[TextToken, ...], hypothesis: tuple[TextToken, ...]
+) -> tuple[
+    list[tuple[str, int | None, int | None]], tuple[AlignmentWindow, ...]
+]:
+    windows = bounded_alignment_windows(
+        reference,
+        hypothesis,
+        max_tokens=MAX_COVERAGE_TOKENS_PER_WINDOW,
+        max_cells=MAX_COVERAGE_CELLS_PER_WINDOW,
+    )
+    operations: list[tuple[str, int | None, int | None]] = []
+    for window in windows:
+        if window.method == "proportional_fallback":
+            operations.extend(
+                _proportional_fallback_operations(reference, hypothesis, window)
+            )
+            continue
+        local = _token_edit_operations(
+            reference[window.source_start : window.source_end],
+            hypothesis[window.target_start : window.target_end],
+        )
+        operations.extend(
+            (
+                kind,
+                window.source_start + reference_index
+                if reference_index is not None
+                else None,
+                window.target_start + hypothesis_index
+                if hypothesis_index is not None
+                else None,
+            )
+            for kind, reference_index, hypothesis_index in local
+        )
+    return operations, windows
+
+
+def _proportional_fallback_operations(
+    reference: tuple[TextToken, ...],
+    hypothesis: tuple[TextToken, ...],
+    window: AlignmentWindow,
+) -> list[tuple[str, int | None, int | None]]:
+    """Produce bounded conservative evidence when a large region has no anchors."""
+
+    operations: list[tuple[str, int | None, int | None]] = []
+    source_count = window.source_end - window.source_start
+    target_count = window.target_end - window.target_start
+    paired = min(source_count, target_count)
+    for offset in range(paired):
+        reference_index = window.source_start + offset
+        hypothesis_index = window.target_start + offset
+        if _token_equal(reference[reference_index], hypothesis[hypothesis_index]):
+            kind = (
+                "match"
+                if reference[reference_index].accentless
+                == hypothesis[hypothesis_index].accentless
+                else "pronunciation_variant"
+            )
+        else:
+            kind = "substitution"
+        operations.append((kind, reference_index, hypothesis_index))
+    operations.extend(
+        ("deletion", window.source_start + offset, None)
+        for offset in range(paired, source_count)
+    )
+    operations.extend(
+        ("insertion", None, window.target_start + offset)
+        for offset in range(paired, target_count)
+    )
+    return operations
+
+
+def _bounded_character_error_rate(
+    normalized_reference: str,
+    normalized_hypothesis: str,
+    reference: tuple[TextToken, ...],
+    hypothesis: tuple[TextToken, ...],
+    operations: list[tuple[str, int | None, int | None]],
+) -> tuple[float, str]:
+    if len(normalized_reference) * len(normalized_hypothesis) <= 2_000_000:
+        return (
+            _edit_distance(normalized_reference, normalized_hypothesis)
+            / max(len(normalized_reference), 1),
+            "exact_character_edit_distance",
+        )
+    distance = 0
+    for kind, reference_index, hypothesis_index in operations:
+        if kind == "match":
+            continue
+        if reference_index is None:
+            assert hypothesis_index is not None
+            distance += len(hypothesis[hypothesis_index].accentless) + 1
+        elif hypothesis_index is None:
+            distance += len(reference[reference_index].accentless) + 1
+        else:
+            distance += _edit_distance(
+                reference[reference_index].accentless,
+                hypothesis[hypothesis_index].accentless,
+            )
+    return distance / max(len(normalized_reference), 1), "bounded_token_operations_v1"
+
+
+def _report_from_operations(
+    normalized_reference_text: str,
+    normalized_hypothesis_text: str,
+    reference: tuple[TextToken, ...],
+    hypothesis: tuple[TextToken, ...],
+    operations: list[tuple[str, int | None, int | None]],
+    policy: ContentCoverageThresholds,
+    *,
+    degraded: bool,
+    local_blocking: tuple[ContentClassification, ...] = (),
+    local_inconclusive: bool = False,
+) -> ContentCoverageReport:
     counts = {
         name: sum(kind == name for kind, _, _ in operations)
         for name in ("match", "pronunciation_variant", "substitution", "deletion", "insertion")
@@ -382,8 +696,12 @@ def analyze_content_coverage(
     structural_coverage_ratio = (len(reference) - counts["deletion"]) / len(reference)
     normalized_reference = " ".join(token.accentless for token in reference)
     normalized_hypothesis = " ".join(token.accentless for token in hypothesis)
-    character_error_rate = _edit_distance(normalized_reference, normalized_hypothesis) / max(
-        len(normalized_reference), 1
+    character_error_rate, character_error_strategy = _bounded_character_error_rate(
+        normalized_reference,
+        normalized_hypothesis,
+        reference,
+        hypothesis,
+        operations,
     )
     word_error_rate = (counts["substitution"] + counts["deletion"] + counts["insertion"]) / len(
         reference
@@ -409,6 +727,11 @@ def analyze_content_coverage(
         reasons.append("repetition_ratio_above_threshold")
     if out_of_order >= 3:
         reasons.append("obvious_out_of_order_segments")
+    if local_blocking:
+        reasons.append("one_or_more_content_segments_rejected")
+    structural_reasons = bool(reasons)
+    if degraded:
+        reasons.append("bounded_alignment_used_proportional_fallback")
 
     if premature:
         classification: ContentClassification = "premature_end"
@@ -416,8 +739,17 @@ def analyze_content_coverage(
         classification = "probable_repetition"
     elif out_of_order >= 3:
         classification = "probable_reordering"
-    elif reasons:
+    elif "probable_repetition" in local_blocking:
+        classification = "probable_repetition"
+    elif "probable_reordering" in local_blocking:
+        classification = "probable_reordering"
+    elif structural_reasons or any(
+        item in {"probable_content_loss", "premature_end"}
+        for item in local_blocking
+    ):
         classification = "probable_content_loss"
+    elif degraded or local_inconclusive:
+        classification = "content_inconclusive"
     elif coverage_ratio < policy.minimum_coverage_ratio and substitution_ratio > 0.40:
         # A weak lexical anchor set cannot prove loss when the sequence remains
         # structurally aligned. Preserve uncertainty instead of spending GPU on
@@ -457,6 +789,7 @@ def analyze_content_coverage(
             "hypothesis_token_count": len(hypothesis),
             "normalized_wer": round(word_error_rate, 6),
             "normalized_cer": round(character_error_rate, 6),
+            "normalized_cer_strategy": character_error_strategy,
             "deletion_ratio": round(deletion_ratio, 6),
             "insertion_ratio": round(insertion_ratio, 6),
             "substitution_ratio": round(substitution_ratio, 6),

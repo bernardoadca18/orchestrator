@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 from app.models.workflow import AudioBloco, NarrationAlignment, TranscricaoAudio, WorkflowExecucao
+from app.services.content_coverage import ContentCoverageLimitError
 from app.services.narration_alignment_service import NarrationAlignmentService
 
 
@@ -18,6 +19,12 @@ class FakeWorkflowRepository:
 
     async def obter_por_id(self, workflow_id: uuid.UUID, **kwargs):
         return self.workflow if workflow_id == self.workflow.id else None
+
+    async def atualizar_status(self, workflow_id: uuid.UUID, status: str, **values):
+        assert workflow_id == self.workflow.id
+        self.workflow.status = status
+        for key, value in values.items():
+            setattr(self.workflow, key, value)
 
 
 class FakeAlignmentRepository:
@@ -121,6 +128,7 @@ def _workflow(*, queries: list[dict] | None = None) -> WorkflowExecucao:
             ],
         },
         status="audio_concluido",
+        audio_phase="quality_unvalidated",
         audio_final_sha256="a" * 64,
         duracao_audio_segundos=8.0,
         audio_final_sample_rate=48_000,
@@ -172,6 +180,63 @@ def _workflow(*, queries: list[dict] | None = None) -> WorkflowExecucao:
     return workflow
 
 
+def _long_workflow(
+    token_counts: tuple[int, ...], duration_seconds: tuple[float, ...]
+) -> WorkflowExecucao:
+    workflow = _workflow()
+    workflow.roteiro_snapshot["blocos"] = []
+    workflow.blocos = []
+    all_words: list[str] = []
+    timed_words: list[dict[str, object]] = []
+    cursor = 0.0
+    for order, (token_count, duration) in enumerate(
+        zip(token_counts, duration_seconds, strict=True)
+    ):
+        words = [f"bloco{order}palavra{index}" for index in range(token_count)]
+        content = " ".join(words)
+        workflow.roteiro_snapshot["blocos"].append(
+            {
+                "ordem": order,
+                "tipo": "desenvolvimento",
+                "conteudo": content,
+                "visual_queries": [],
+            }
+        )
+        workflow.blocos.append(
+            AudioBloco(
+                id=uuid.uuid4(),
+                workflow_execucao_id=workflow.id,
+                ordem=order,
+                tipo="desenvolvimento",
+                texto=content,
+                synthesis_text=content,
+                source_text_sha256=f"{order + 1}" * 64,
+                synthesis_text_sha256=f"{order + 2}" * 64,
+                synthesis_identity=f"{order + 3}" * 64,
+                narration_start_seconds=cursor,
+                narration_end_seconds=cursor + duration,
+                status="concluido",
+            )
+        )
+        word_duration = duration / token_count
+        timed_words.extend(
+            {
+                "palavra": word,
+                "inicio": cursor + index * word_duration,
+                "fim": cursor + (index + 0.8) * word_duration,
+            }
+            for index, word in enumerate(words)
+        )
+        all_words.extend(words)
+        cursor += duration
+    workflow.roteiro_snapshot["duracao_total_segundos"] = round(cursor)
+    workflow.duracao_audio_segundos = cursor
+    assert workflow.transcricao is not None
+    workflow.transcricao.texto_completo = " ".join(all_words)
+    workflow.transcricao.palavras_timestamps = timed_words
+    return workflow
+
+
 def _service(workflow: WorkflowExecucao, *, strategy: str | None = None):
     service = NarrationAlignmentService(
         object(),  # type: ignore[arg-type]
@@ -192,6 +257,12 @@ def test_alignment_configuration_rejects_unsafe_thresholds_and_guards() -> None:
         Settings(_env_file=None, narration_alignment_max_cells=0)
 
 
+def test_known_coverage_limit_has_a_safe_operator_diagnostic() -> None:
+    assert NarrationAlignmentService._safe_error(
+        ContentCoverageLimitError("internal details")
+    ) == "narration content coverage exceeded a bounded evaluation window"
+
+
 @pytest.mark.asyncio
 async def test_realistic_binding_uses_asr_time_and_leaves_gameplay_provenance_untouched() -> None:
     query = _query("Geralt aprende o sinal Aard")
@@ -208,6 +279,7 @@ async def test_realistic_binding_uses_asr_time_and_leaves_gameplay_provenance_un
     assert binding.narration_start_seconds == 1.5
     assert binding.narration_end_seconds == 3.9
     assert binding.speech_alignment_coverage == 1.0
+    assert workflow.audio_phase == "completed"
     assert workflow.roteiro_snapshot == snapshot_before
     assert query["preferred_start_seconds"] == 1200.0
     assert binding.narration_start_seconds != query["preferred_start_seconds"]
@@ -283,12 +355,42 @@ async def test_same_identity_reuses_run_while_changed_inputs_create_new_runs() -
     versioned = NarrationAlignmentService(
         object(),  # type: ignore[arg-type]
         config=Settings(_env_file=None),
-        strategy_version="narration_alignment_v2",
+        strategy_version="narration_alignment_v3",
     )
     versioned.workflows = service.workflows  # type: ignore[assignment]
     versioned.alignments = repository  # type: ignore[assignment]
     changed_strategy, _ = await versioned.ensure(workflow.id)
     assert changed_strategy.id != changed_excerpt.id
+
+
+@pytest.mark.asyncio
+async def test_bounded_policy_identity_creates_new_derived_alignment_only() -> None:
+    workflow = _workflow()
+    original_sha = workflow.audio_final_sha256
+    transcription_id = workflow.transcricao.id if workflow.transcricao else None
+    repository = FakeAlignmentRepository()
+    legacy = NarrationAlignmentService(
+        object(),  # type: ignore[arg-type]
+        config=Settings(
+            _env_file=None,
+            narration_alignment_strategy_version="narration_alignment_v1",
+            narration_quality_policy_version="narration_speech_quality_v1",
+        ),
+    )
+    legacy.workflows = FakeWorkflowRepository(workflow)  # type: ignore[assignment]
+    legacy.alignments = repository  # type: ignore[assignment]
+    old_alignment, _ = await legacy.ensure(workflow.id)
+
+    current = NarrationAlignmentService(object(), config=Settings(_env_file=None))  # type: ignore[arg-type]
+    current.workflows = legacy.workflows  # type: ignore[assignment]
+    current.alignments = repository  # type: ignore[assignment]
+    new_alignment, _ = await current.ensure(workflow.id)
+
+    assert new_alignment.id != old_alignment.id
+    assert new_alignment.fingerprint != old_alignment.fingerprint
+    assert old_alignment.status == "completed"
+    assert workflow.audio_final_sha256 == original_sha
+    assert (workflow.transcricao.id if workflow.transcricao else None) == transcription_id
 
 
 @pytest.mark.asyncio
@@ -365,3 +467,54 @@ async def test_failed_force_rebuild_clears_only_previous_derived_outputs(monkeyp
     assert failed.block_alignments == []
     assert failed.visual_query_bindings == []
     assert workflow.status == "audio_concluido"
+
+
+@pytest.mark.asyncio
+async def test_three_real_duration_blocks_complete_with_block_segmented_coverage() -> None:
+    workflow = _long_workflow((490, 560, 629), (203.94, 238.78, 269.46))
+    service, _ = _service(workflow)
+
+    alignment, _ = await service.ensure(workflow.id)
+
+    assert alignment.status == "completed"
+    assert alignment.block_count == 3
+    coverage = alignment.metrics["speech_quality"]["metrics"]["content_coverage"]
+    assert coverage["classification"] == "content_complete"
+    assert coverage["metrics"]["content_coverage_strategy"] == "block_segmented_v1"
+    assert coverage["metrics"]["segment_count"] == 3
+    assert coverage["metrics"]["maximum_observed_window_cells"] <= 262_144
+
+
+@pytest.mark.asyncio
+async def test_single_block_above_token_limit_uses_internal_bounded_windows() -> None:
+    workflow = _long_workflow((2_600,), (900.0,))
+    service, _ = _service(workflow)
+
+    alignment, _ = await service.ensure(workflow.id)
+
+    assert alignment.status == "completed"
+    assert alignment.block_alignments[0].synthesis_token_count == 2_600
+    coverage = alignment.metrics["speech_quality"]["metrics"]["content_coverage"]
+    assert coverage["classification"] == "content_complete"
+    assert coverage["metrics"]["segments"][0]["window_count"] > 1
+    assert coverage["metrics"]["segments"][0]["maximum_window_cells"] <= 2_000_000
+    assert coverage["metrics"]["segments"][0]["used_proportional_fallback"] is False
+
+
+@pytest.mark.asyncio
+async def test_inconclusive_content_does_not_claim_audio_quality_validation() -> None:
+    workflow = _long_workflow((600,), (240.0,))
+    assert workflow.transcricao is not None
+    for index, word in enumerate(workflow.transcricao.palavras_timestamps):
+        word["palavra"] = f"divergente{index}"
+    workflow.transcricao.texto_completo = " ".join(
+        str(word["palavra"]) for word in workflow.transcricao.palavras_timestamps
+    )
+    service, _ = _service(workflow)
+
+    alignment, _ = await service.ensure(workflow.id)
+
+    coverage = alignment.metrics["speech_quality"]["metrics"]["content_coverage"]
+    assert alignment.status == "completed"
+    assert coverage["classification"] == "content_inconclusive"
+    assert workflow.audio_phase == "quality_unvalidated"

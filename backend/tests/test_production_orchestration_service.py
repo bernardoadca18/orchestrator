@@ -334,6 +334,31 @@ async def test_invalid_narration_quality_blocks_before_visual_production() -> No
 
 
 @pytest.mark.asyncio
+async def test_alignment_retry_reuses_final_audio_and_resumes_at_alignment() -> None:
+    workflow = _workflow(phase="narration_alignment", status="failed")
+    original_path = workflow.audio_final_path
+    original_sha = workflow.audio_final_sha256
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    service.visual.item.status = "blocked"
+    service.visual.item.error_message = "next independent blocker"
+
+    await service.explicit_retry(workflow)
+    result = await service.process(workflow.id)
+
+    assert result.terminal
+    assert workflow.audio_final_path == original_path
+    assert workflow.audio_final_sha256 == original_sha
+    assert workflow.status == "audio_concluido"
+    assert workflow.production_phase == "visual_plan"
+    service.audio_processor.assert_not_awaited()
+    service.alignments.ensure.assert_awaited_once_with(workflow.id, force=False)
+    service.visual.ensure.assert_awaited_once_with(workflow.id, force=False)
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
 async def test_missing_visual_queries_propagates_stable_workflow_error_category() -> None:
     workflow = _workflow(phase="visual_plan", status="running")
     timeline = _timeline(workflow.id)

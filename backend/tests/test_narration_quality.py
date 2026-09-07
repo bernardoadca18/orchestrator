@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from app.services.content_coverage import ContentCoverageSegment
 from app.services.narration_quality import NarrationSpeechQualityPolicy
 
 
@@ -91,3 +92,23 @@ def test_policy_identity_tracks_threshold_semantics() -> None:
         max_repeated_ngram_occurrences=4,
     )
     assert baseline.identity != changed.identity
+
+
+def test_block_segment_content_loss_is_not_hidden_by_good_average_coverage() -> None:
+    good = " ".join(f"contexto{index}" for index in range(500))
+    missing = " ".join(f"ausente{index}" for index in range(120))
+    decision = _policy().evaluate(
+        [_block(1.0), _block(0.95), _block(1.0)],
+        good.split() * 2,
+        content_segments=(
+            ContentCoverageSegment("block:0", good, good),
+            ContentCoverageSegment("block:1", missing, ""),
+            ContentCoverageSegment("block:2", good, good),
+        ),
+    )
+
+    assert decision.status == "invalid"
+    assert "content_coverage_rejected" in decision.reasons
+    coverage = decision.metrics["content_coverage"]
+    assert isinstance(coverage, dict)
+    assert coverage["metrics"]["segments"][1]["classification"] == "premature_end"

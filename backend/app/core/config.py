@@ -94,7 +94,7 @@ class Settings(BaseSettings):
     transcription_local_files_only: bool = False
     transcription_model_lifetime: Literal["resident", "per_job"] = "resident"
 
-    narration_alignment_strategy_version: str = "narration_alignment_v1"
+    narration_alignment_strategy_version: str = "narration_alignment_v2"
     narration_alignment_fuzzy_min_score: float = 0.72
     narration_alignment_ambiguity_delta: float = 0.03
     narration_alignment_min_speech_coverage: float = 0.60
@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     narration_alignment_timestamp_tolerance_seconds: float = 0.25
     narration_alignment_max_tokens: int = 2_500
     narration_alignment_max_cells: int = 2_000_000
-    narration_quality_policy_version: str = "narration_speech_quality_v1"
+    narration_quality_policy_version: str = "narration_speech_quality_v2"
     narration_quality_max_repeated_ngram_occurrences: int = 4
 
     visual_director_strategy_version: str = "visual_director_v1"

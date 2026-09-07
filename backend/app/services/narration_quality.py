@@ -10,8 +10,10 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from app.services.content_coverage import (
+    ContentCoverageSegment,
     ContentCoverageThresholds,
     analyze_content_coverage,
+    analyze_segmented_content_coverage,
 )
 
 
@@ -72,6 +74,7 @@ class NarrationSpeechQualityPolicy:
         *,
         synthesis_text: str | None = None,
         asr_text: str | None = None,
+        content_segments: Sequence[ContentCoverageSegment] | None = None,
     ) -> NarrationQualityDecision:
         coverages = [float(block.synthesis_asr_coverage) for block in block_alignments]
         average = sum(coverages) / len(coverages) if coverages else 0.0
@@ -90,12 +93,15 @@ class NarrationSpeechQualityPolicy:
         if repeated:
             blocking_reasons.append("catastrophic_repeated_asr_run")
         content = None
-        if synthesis_text is not None and asr_text is not None:
-            content = analyze_content_coverage(
-                synthesis_text,
-                asr_text,
-                thresholds=self.content_thresholds,
+        if content_segments is not None:
+            content = analyze_segmented_content_coverage(
+                content_segments, thresholds=self.content_thresholds
             )
+        elif synthesis_text is not None and asr_text is not None:
+            content = analyze_content_coverage(
+                synthesis_text, asr_text, thresholds=self.content_thresholds
+            )
+        if content is not None:
             if content.status == "rejected":
                 blocking_reasons.append("content_coverage_rejected")
             elif content.classification != "content_complete":

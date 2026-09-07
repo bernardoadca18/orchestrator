@@ -80,6 +80,18 @@ async def test_alignment_uniqueness_persistence_and_workflow_cascade() -> None:
         assert repeated_created is False
         assert repeated.id == alignment.id
 
+        versioned, versioned_created = await repository.create_or_get(
+            workflow_id=workflow_id,
+            transcription_id=transcription_id,
+            final_audio_sha256="a" * 64,
+            script_fingerprint="b" * 64,
+            transcription_fingerprint="c" * 64,
+            strategy_version="narration_alignment_v2",
+            fingerprint="f" * 64,
+        )
+        assert versioned_created is True
+        assert versioned.id != alignment.id
+
         await repository.replace_outputs(
             alignment,
             blocks=[
@@ -123,5 +135,10 @@ async def test_alignment_uniqueness_persistence_and_workflow_cascade() -> None:
         assert (
             await session.execute(
                 select(NarrationAlignment).where(NarrationAlignment.id == alignment.id)
+            )
+        ).scalar_one_or_none() is None
+        assert (
+            await session.execute(
+                select(NarrationAlignment).where(NarrationAlignment.id == versioned.id)
             )
         ).scalar_one_or_none() is None

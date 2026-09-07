@@ -22,7 +22,11 @@ from app.models.workflow import (
 )
 from app.repositories.narration_alignment_repository import NarrationAlignmentRepository
 from app.repositories.workflow_repository import WorkflowRepository
-from app.services.content_coverage import ContentCoverageThresholds
+from app.services.content_coverage import (
+    ContentCoverageLimitError,
+    ContentCoverageSegment,
+    ContentCoverageThresholds,
+)
 from app.services.narration_alignment_algorithm import (
     AlignmentAlgorithmError,
     BlockRange,
@@ -37,7 +41,7 @@ from app.services.narration_quality import NarrationSpeechQualityPolicy
 
 logger = logging.getLogger(__name__)
 
-ALIGNMENT_STRATEGY_VERSION = "narration_alignment_v1"
+ALIGNMENT_STRATEGY_VERSION = "narration_alignment_v2"
 
 
 class NarrationAlignmentNotFoundError(LookupError):
@@ -211,7 +215,9 @@ class NarrationAlignmentService:
             fingerprint=identity.fingerprint,
         )
         if alignment.status == "completed" and not force:
-            return await self.alignments.reload(alignment), False
+            completed = await self.alignments.reload(alignment)
+            await self._sync_audio_quality_phase(workflow, completed)
+            return completed, False
         if alignment.status == "processing" and not force:
             return await self.alignments.reload(alignment), False
 
@@ -251,6 +257,7 @@ class NarrationAlignmentService:
             )
             await self.alignments.mark_failed(alignment, self._safe_error(exc))
         result = await self.alignments.reload(alignment)
+        await self._sync_audio_quality_phase(workflow, result)
         logger.info(
             "narration alignment finished",
             extra={
@@ -265,6 +272,26 @@ class NarrationAlignmentService:
             },
         )
         return result, created
+
+    async def _sync_audio_quality_phase(
+        self, workflow: WorkflowExecucao, alignment: NarrationAlignment
+    ) -> None:
+        if workflow.audio_phase != "quality_unvalidated" or alignment.status != "completed":
+            return
+        speech_quality = (alignment.metrics or {}).get("speech_quality")
+        if not isinstance(speech_quality, dict):
+            return
+        quality_metrics = speech_quality.get("metrics")
+        if not isinstance(quality_metrics, dict):
+            return
+        content = quality_metrics.get("content_coverage")
+        if not isinstance(content, dict) or content.get("status") != "passed":
+            return
+        await self.workflows.atualizar_status(
+            workflow.id,
+            workflow.status,
+            audio_phase="completed",
+        )
 
     def _precondition_error(
         self, workflow: WorkflowExecucao, transcription: TranscricaoAudio | None
@@ -438,15 +465,25 @@ class NarrationAlignmentService:
             if total_queries
             else 1.0,
             "word_count": len(timed_words),
-            "algorithm_complexity": "per-block O(canonical_tokens * synthesis/asr_tokens)",
+            "algorithm_complexity": (
+                "per-block bounded windows; O(max_window_source_tokens * "
+                "max_window_target_tokens) peak matrix"
+            ),
         }
+        content_segments = tuple(
+            ContentCoverageSegment(
+                key=f"block:{block.ordem}",
+                reference_text=block.synthesis_text or block.texto,
+                hypothesis_text=" ".join(
+                    word.word for word in words_by_block.get(block.ordem, ())
+                ),
+            )
+            for block in audio_blocks
+        )
         quality = self.quality_policy.evaluate(
             persisted_blocks,
             [word.word for word in timed_words],
-            synthesis_text="\n".join(
-                (block.synthesis_text or block.texto) for block in audio_blocks
-            ),
-            asr_text=transcription.texto_completo,
+            content_segments=content_segments,
         )
         metrics["speech_quality"] = quality.to_dict()
         return persisted_blocks, bindings, metrics
@@ -493,4 +530,6 @@ class NarrationAlignmentService:
     def _safe_error(exc: Exception) -> str:
         if isinstance(exc, AlignmentAlgorithmError):
             return str(exc)
+        if isinstance(exc, ContentCoverageLimitError):
+            return "narration content coverage exceeded a bounded evaluation window"
         return "unexpected narration alignment failure"

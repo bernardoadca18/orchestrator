@@ -137,13 +137,15 @@ never performed inside `qwen3-tts-workshop`.
 
 Stage 13 first partitions Faster-Whisper words using the exact assembled block offsets. Within each
 block it performs deterministic sequence alignment from canonical tokens to pronunciation-adjusted
-synthesis tokens and then to ASR words. `VisualQuery.narration_excerpt` is searched only in its own
-canonical block: literal, normalized, accent-insensitive, then a bounded token-fuzzy fallback.
+synthesis tokens and then to ASR words. Long blocks use unique monotonic token anchors and bounded
+exact windows; an unanchored exceptional region is reported as inconclusive rather than allocating
+an unbounded matrix. `VisualQuery.narration_excerpt` is searched only in its own canonical block:
+literal, normalized, accent-insensitive, then a bounded token-fuzzy fallback.
 Repeated or weak excerpts become `ambiguous` or `unresolved`; timestamps are never estimated from
 characters, reading speed or gameplay time.
 
 Persisted `NarrationAlignment`, compact per-block metrics and
-`VisualQueryNarrationBinding` records are versioned by `narration_alignment_v1`. The compatibility
+`VisualQueryNarrationBinding` records are versioned by `narration_alignment_v2`. The compatibility
 fingerprint includes final audio SHA, relevant script/excerpts, block synthesis identities and
 offsets, full transcription identity and strategy version. The same inputs reuse one run.
 
@@ -155,12 +157,14 @@ Endpoints:
 
 Alignment runs automatically after a current transcription is available. Missing/stale
 transcription yields `blocked`; algorithm/input failure yields `failed`. The versioned
-`narration_speech_quality_v1` policy reuses per-block synthesis/ASR coverage, empty-block evidence
-and an obvious repeated-ASR-run detector. Catastrophic evidence blocks Stage 17 while preserving
-source WAVs, the final WAV, transcription and alignment diagnostics. Harmless pronunciation
-differences do not require perfect WER. Neither state deletes or invalidates the technically valid
-`audio_concluido` artifact; `audio_phase=quality_unvalidated` distinguishes it from production-
-validated narration when transcription/alignment evidence is unavailable.
+`narration_speech_quality_v2` policy evaluates content as ordered block segments and aggregates
+global deletion spans, ending loss, repetition and reordering. Each persisted block diagnostic
+includes token counts, classification and bounded-window usage, so a bad block cannot disappear
+inside a healthy average. Catastrophic evidence blocks Stage 17 while preserving source WAVs, the
+final WAV, transcription and alignment diagnostics. Harmless pronunciation differences do not
+require perfect WER. Neither state deletes or invalidates the technically valid `audio_concluido`
+artifact; `audio_phase=quality_unvalidated` distinguishes it from production-validated narration
+when transcription/alignment evidence is unavailable.
 
 ## Stage 14 Visual Director
 

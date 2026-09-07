@@ -1,9 +1,9 @@
 """Deterministic text/ASR alignment primitives for narration time.
 
-The implementation intentionally operates per editorial block. Sequence
-alignment uses two score rows plus a byte-per-cell traceback matrix: O(n*m)
-time, O(n*m) compact traceback memory and O(m) floating-point score memory.
-Explicit guards prevent pathological script blocks from exhausting a worker.
+The implementation intentionally operates per editorial block. Small sequence
+alignments use two score rows plus a byte-per-cell traceback matrix. Long blocks
+are partitioned by monotonic lexical anchors before invoking that exact primitive,
+so every matrix retains explicit token/cell guards and predictable peak memory.
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import math
 import re
 import unicodedata
+from bisect import bisect_left
+from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
@@ -51,6 +53,27 @@ class SequenceAlignment:
     source_to_target: tuple[int | None, ...]
     matched_count: int
     matched_ratio: float
+
+
+@dataclass(frozen=True)
+class AlignmentWindow:
+    source_start: int
+    source_end: int
+    target_start: int
+    target_end: int
+    method: str
+
+    @property
+    def cells(self) -> int:
+        return (self.source_end - self.source_start) * (
+            self.target_end - self.target_start
+        )
+
+
+@dataclass(frozen=True)
+class BoundedSequenceAlignment(SequenceAlignment):
+    windows: tuple[AlignmentWindow, ...]
+    used_proportional_fallback: bool
 
 
 @dataclass(frozen=True)
@@ -176,6 +199,315 @@ def align_token_sequences(
     return SequenceAlignment(tuple(mapping), matched, matched / n)
 
 
+def bounded_alignment_windows(
+    source: tuple[TextToken, ...],
+    target: tuple[TextToken, ...],
+    *,
+    max_tokens: int = 2_500,
+    max_cells: int = 2_000_000,
+    anchor_size: int = 4,
+) -> tuple[AlignmentWindow, ...]:
+    """Partition a long comparison into deterministic, memory-bounded windows.
+
+    Unique accent-insensitive n-grams provide monotonic semantic boundaries. If
+    an exceptionally divergent region has no trustworthy anchor, proportional
+    windows keep computation bounded and the caller can expose the degraded
+    evidence instead of treating it as a healthy exact alignment.
+    """
+
+    if max_tokens <= 0 or max_cells <= 0 or anchor_size < 2:
+        raise AlignmentAlgorithmError("invalid bounded alignment limits")
+    direct_max_tokens = min(max_tokens, 512)
+    direct_max_cells = min(max_cells, 262_144)
+    if _window_fits(
+        len(source),
+        len(target),
+        max_tokens=direct_max_tokens,
+        max_cells=direct_max_cells,
+    ):
+        return (AlignmentWindow(0, len(source), 0, len(target), "exact"),)
+
+    anchors = _monotonic_unique_anchors(source, target, size=anchor_size)
+    raw: list[AlignmentWindow] = []
+    source_cursor = target_cursor = 0
+    for source_start, target_start in anchors:
+        if source_start > source_cursor or target_start > target_cursor:
+            raw.extend(
+                _bounded_gap_windows(
+                    source_cursor,
+                    source_start,
+                    target_cursor,
+                    target_start,
+                    max_tokens=max_tokens,
+                    max_cells=max_cells,
+                    anchored=True,
+                )
+            )
+        source_end = source_start + anchor_size
+        target_end = target_start + anchor_size
+        raw.append(
+            AlignmentWindow(
+                source_start,
+                source_end,
+                target_start,
+                target_end,
+                "anchor",
+            )
+        )
+        source_cursor, target_cursor = source_end, target_end
+    if source_cursor < len(source) or target_cursor < len(target):
+        raw.extend(
+            _bounded_gap_windows(
+                source_cursor,
+                len(source),
+                target_cursor,
+                len(target),
+                max_tokens=max_tokens,
+                max_cells=max_cells,
+                anchored=bool(anchors),
+            )
+        )
+    if not raw:
+        raw.extend(
+            _bounded_gap_windows(
+                0,
+                len(source),
+                0,
+                len(target),
+                max_tokens=max_tokens,
+                max_cells=max_cells,
+                anchored=False,
+            )
+        )
+    return _coalesce_windows(raw, max_tokens=max_tokens, max_cells=max_cells)
+
+
+def align_token_sequences_bounded(
+    source: tuple[TextToken, ...],
+    target: tuple[TextToken, ...],
+    *,
+    max_tokens: int = 2_500,
+    max_cells: int = 2_000_000,
+    minimum_pair_score: float = 0.68,
+) -> BoundedSequenceAlignment:
+    """Align arbitrarily long ordered speech using only bounded exact matrices."""
+
+    windows = bounded_alignment_windows(
+        source,
+        target,
+        max_tokens=max_tokens,
+        max_cells=max_cells,
+    )
+    mapping: list[int | None] = [None] * len(source)
+    for window in windows:
+        if window.method == "proportional_fallback":
+            paired = min(
+                window.source_end - window.source_start,
+                window.target_end - window.target_start,
+            )
+            for offset in range(paired):
+                source_index = window.source_start + offset
+                target_index = window.target_start + offset
+                if token_similarity(source[source_index], target[target_index]) >= (
+                    minimum_pair_score
+                ):
+                    mapping[source_index] = target_index
+            continue
+        local = align_token_sequences(
+            source[window.source_start : window.source_end],
+            target[window.target_start : window.target_end],
+            max_tokens=max_tokens,
+            max_cells=max_cells,
+            minimum_pair_score=minimum_pair_score,
+        )
+        for local_source, local_target in enumerate(local.source_to_target):
+            if local_target is not None:
+                mapping[window.source_start + local_source] = (
+                    window.target_start + local_target
+                )
+    matched = sum(index is not None for index in mapping)
+    return BoundedSequenceAlignment(
+        source_to_target=tuple(mapping),
+        matched_count=matched,
+        matched_ratio=matched / len(source) if source else 1.0,
+        windows=windows,
+        used_proportional_fallback=any(
+            window.method == "proportional_fallback" for window in windows
+        ),
+    )
+
+
+def _window_fits(
+    source_count: int,
+    target_count: int,
+    *,
+    max_tokens: int,
+    max_cells: int,
+) -> bool:
+    return (
+        source_count <= max_tokens
+        and target_count <= max_tokens
+        and source_count * target_count <= max_cells
+    )
+
+
+def _monotonic_unique_anchors(
+    source: tuple[TextToken, ...],
+    target: tuple[TextToken, ...],
+    *,
+    size: int,
+) -> list[tuple[int, int]]:
+    if len(source) < size or len(target) < size:
+        return []
+    source_ngrams = [
+        tuple(token.accentless for token in source[index : index + size])
+        for index in range(len(source) - size + 1)
+    ]
+    target_ngrams = [
+        tuple(token.accentless for token in target[index : index + size])
+        for index in range(len(target) - size + 1)
+    ]
+    source_counts = Counter(source_ngrams)
+    target_counts = Counter(target_ngrams)
+    target_positions = {
+        ngram: index
+        for index, ngram in enumerate(target_ngrams)
+        if target_counts[ngram] == 1
+    }
+    candidates = [
+        (source_index, target_positions[ngram])
+        for source_index, ngram in enumerate(source_ngrams)
+        if source_counts[ngram] == 1 and ngram in target_positions
+    ]
+    if not candidates:
+        return []
+
+    tails: list[int] = []
+    tail_candidate_indexes: list[int] = []
+    previous = [-1] * len(candidates)
+    for candidate_index, (_, target_index) in enumerate(candidates):
+        position = bisect_left(tails, target_index)
+        if position:
+            previous[candidate_index] = tail_candidate_indexes[position - 1]
+        if position == len(tails):
+            tails.append(target_index)
+            tail_candidate_indexes.append(candidate_index)
+        else:
+            tails[position] = target_index
+            tail_candidate_indexes[position] = candidate_index
+
+    cursor = tail_candidate_indexes[-1]
+    monotonic: list[tuple[int, int]] = []
+    while cursor >= 0:
+        monotonic.append(candidates[cursor])
+        cursor = previous[cursor]
+    monotonic.reverse()
+
+    non_overlapping: list[tuple[int, int]] = []
+    source_end = target_end = 0
+    for source_start, target_start in monotonic:
+        if source_start >= source_end and target_start >= target_end:
+            non_overlapping.append((source_start, target_start))
+            source_end = source_start + size
+            target_end = target_start + size
+    return non_overlapping
+
+
+def _bounded_gap_windows(
+    source_start: int,
+    source_end: int,
+    target_start: int,
+    target_end: int,
+    *,
+    max_tokens: int,
+    max_cells: int,
+    anchored: bool,
+) -> list[AlignmentWindow]:
+    source_count = source_end - source_start
+    target_count = target_end - target_start
+    fallback_max_tokens = min(max_tokens, 128)
+    fallback_max_cells = min(max_cells, 16_384)
+    if _window_fits(
+        source_count,
+        target_count,
+        max_tokens=fallback_max_tokens,
+        max_cells=fallback_max_cells,
+    ):
+        return [
+            AlignmentWindow(
+                source_start,
+                source_end,
+                target_start,
+                target_end,
+                "anchored_gap" if anchored else "exact",
+            )
+        ]
+    pieces = max(
+        math.ceil(source_count / fallback_max_tokens),
+        math.ceil(target_count / fallback_max_tokens),
+        math.ceil(math.sqrt(source_count * target_count / fallback_max_cells))
+        if source_count and target_count
+        else 1,
+    )
+    return [
+        AlignmentWindow(
+            source_start + source_count * part // pieces,
+            source_start + source_count * (part + 1) // pieces,
+            target_start + target_count * part // pieces,
+            target_start + target_count * (part + 1) // pieces,
+            "proportional_fallback",
+        )
+        for part in range(pieces)
+        if (
+            source_count * part // pieces != source_count * (part + 1) // pieces
+            or target_count * part // pieces != target_count * (part + 1) // pieces
+        )
+    ]
+
+
+def _coalesce_windows(
+    windows: list[AlignmentWindow],
+    *,
+    max_tokens: int,
+    max_cells: int,
+) -> tuple[AlignmentWindow, ...]:
+    coalesced_max_tokens = min(max_tokens, 64)
+    coalesced_max_cells = min(max_cells, 4_096)
+    result: list[AlignmentWindow] = []
+    for window in windows:
+        if not result:
+            result.append(window)
+            continue
+        previous = result[-1]
+        contiguous = (
+            previous.source_end == window.source_start
+            and previous.target_end == window.target_start
+        )
+        source_count = window.source_end - previous.source_start
+        target_count = window.target_end - previous.target_start
+        same_evidence = (
+            previous.method == "proportional_fallback"
+        ) == (window.method == "proportional_fallback")
+        if contiguous and same_evidence and _window_fits(
+            source_count,
+            target_count,
+            max_tokens=coalesced_max_tokens,
+            max_cells=coalesced_max_cells,
+        ):
+            result[-1] = AlignmentWindow(
+                previous.source_start,
+                window.source_end,
+                previous.target_start,
+                window.target_end,
+                "proportional_fallback"
+                if window.method == "proportional_fallback"
+                else "anchored",
+            )
+        else:
+            result.append(window)
+    return tuple(result)
+
+
 def validate_timed_words(
     words: tuple[TimedWord, ...],
     *,
@@ -282,11 +614,11 @@ def build_block_text_alignment(
 ) -> BlockTextAlignment:
     canonical = tokenize(canonical_text)
     synthesis = tokenize(synthesis_text)
-    canonical_synthesis = align_token_sequences(
+    canonical_synthesis = align_token_sequences_bounded(
         canonical, synthesis, max_tokens=max_tokens, max_cells=max_cells
     )
     asr_tokens, asr_word_indexes = _asr_tokens(asr_words)
-    synthesis_asr = align_token_sequences(
+    synthesis_asr = align_token_sequences_bounded(
         synthesis, asr_tokens, max_tokens=max_tokens, max_cells=max_cells
     )
     synthesis_to_word = tuple(

@@ -185,3 +185,33 @@ async def test_retry_reuses_valid_final_audio_without_legacy_demotion() -> None:
     repository.incrementar_tentativa.assert_not_awaited()
     service.explicit_retry.assert_awaited_once_with(workflow)
     enqueue.assert_called_once_with(str(workflow.id))
+
+
+@pytest.mark.asyncio
+async def test_retry_preserves_narration_alignment_phase() -> None:
+    workflow = _workflow("failed")
+    workflow.production_phase = "narration_alignment"
+    workflow.audio_final_sha256 = "a" * 64
+    original_sha = workflow.audio_final_sha256
+    repository = MagicMock()
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    repository.incrementar_tentativa = AsyncMock()
+    service = MagicMock()
+    service.explicit_retry = AsyncMock()
+
+    with (
+        patch(
+            "app.api.routers.workflow.ProductionOrchestrationService",
+            return_value=service,
+        ),
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+    ):
+        result = await repetir_workflow(workflow.id, MagicMock())
+
+    assert result is workflow
+    assert workflow.production_phase == "narration_alignment"
+    assert workflow.audio_final_sha256 == original_sha
+    repository.incrementar_tentativa.assert_not_awaited()
+    service.explicit_retry.assert_awaited_once_with(workflow)
+    enqueue.assert_called_once_with(str(workflow.id))

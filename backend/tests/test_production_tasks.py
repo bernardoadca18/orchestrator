@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -45,8 +45,15 @@ async def test_restart_recovery_routes_render_to_poll_and_other_phase_to_process
     audio_workflow = SimpleNamespace(
         id=uuid.uuid4(), production_phase="audio", production_status="queued"
     )
+    alignment_workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        production_phase="narration_alignment",
+        production_status="queued",
+    )
     repository = MagicMock()
-    repository.recoverable_productions = AsyncMock(return_value=[render_workflow, audio_workflow])
+    repository.recoverable_productions = AsyncMock(
+        return_value=[render_workflow, audio_workflow, alignment_workflow]
+    )
     current_render = SimpleNamespace(id=uuid.uuid4(), composer_render_id=str(uuid.uuid4()))
     service = MagicMock()
     service.current_render = AsyncMock(return_value=current_render)
@@ -62,4 +69,7 @@ async def test_restart_recovery_routes_render_to_poll_and_other_phase_to_process
     ):
         await production_tasks.recover_productions()
     poll.assert_called_once()
-    process.assert_called_once_with(str(audio_workflow.id))
+    assert process.call_args_list == [
+        call(str(audio_workflow.id)),
+        call(str(alignment_workflow.id)),
+    ]
