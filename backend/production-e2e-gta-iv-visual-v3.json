@@ -1,0 +1,53 @@
+{
+  "smoke": "PRODUCTION_E2E_CONTRACT_SMOKE",
+  "mode": "run",
+  "target": {
+    "workflow_id": null,
+    "roteiro_id": "9e27ec2b-5881-4ee9-93e9-7caceda4fca6"
+  },
+  "orchestrator_url": "http://localhost:8011",
+  "expected_chain": [
+    "audio",
+    "narration_alignment",
+    "visual_plan",
+    "production_timeline",
+    "render",
+    "qa"
+  ],
+  "mutations": "create workflow or explicitly resume blocked workflow; execute standard Stage 18 QA",
+  "report": "production-e2e-gta-iv-visual-v3.json",
+  "started_at": "2026-09-08T22:04:31.474875+00:00",
+  "workflow_id": "f853f74c-4390-4f60-96f0-505a1de061b1",
+  "status": "FAIL",
+  "failure_category": "RuntimeError",
+  "failure_reason": "production failed: composer:source_asset_missing - Media asset not found",
+  "transitions": [
+    {
+      "elapsed_seconds": 0.359,
+      "production_status": "queued",
+      "production_phase": "audio"
+    },
+    {
+      "elapsed_seconds": 3.371,
+      "production_status": "running",
+      "production_phase": "audio"
+    },
+    {
+      "elapsed_seconds": 1505.309,
+      "production_status": "running",
+      "production_phase": "visual_plan"
+    },
+    {
+      "elapsed_seconds": 1511.395,
+      "production_status": "running",
+      "production_phase": "render"
+    },
+    {
+      "elapsed_seconds": 1514.43,
+      "production_status": "failed",
+      "production_phase": "render"
+    }
+  ],
+  "wall_seconds": 1514.43,
+  "finished_at": "2026-09-08T22:29:45.905203+00:00"
+}
