@@ -804,6 +804,49 @@ def match_excerpt(
     )
 
 
+def match_host_owned_span(
+    text: str,
+    excerpt: str | None,
+    *,
+    start_char: int,
+    end_char: int,
+) -> ExcerptMatch:
+    """Resolve a trusted Ideas Hub beat without re-discovering its textual span."""
+
+    if (
+        start_char < 0
+        or end_char <= start_char
+        or end_char > len(text)
+        or excerpt != text[start_char:end_char]
+    ):
+        raise AlignmentAlgorithmError(
+            "host-owned visual coverage span does not match canonical narration"
+        )
+    token_indexes = tuple(
+        token.order
+        for token in tokenize(text)
+        if token.start_char >= start_char and token.end_char <= end_char
+    )
+    if not token_indexes:
+        return ExcerptMatch(
+            status="unresolved",
+            method="host_owned_span",
+            score=0.0,
+            start_char=start_char,
+            end_char=end_char,
+            token_indexes=(),
+            reason="host-owned visual coverage span contains no spoken tokens",
+        )
+    return ExcerptMatch(
+        status="matched",
+        method="host_owned_span",
+        score=1.0,
+        start_char=start_char,
+        end_char=end_char,
+        token_indexes=token_indexes,
+    )
+
+
 def resolve_match_timestamps(
     match: ExcerptMatch,
     alignment: BlockTextAlignment,

@@ -3,12 +3,19 @@ from __future__ import annotations
 import copy
 import datetime as dt
 import uuid
+from itertools import pairwise
 
 import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.models.workflow import AudioBloco, NarrationAlignment, TranscricaoAudio, WorkflowExecucao
+from app.models.workflow import (
+    AudioBloco,
+    NarrationAlignment,
+    TranscricaoAudio,
+    VisualQueryNarrationBinding,
+    WorkflowExecucao,
+)
 from app.services.content_coverage import ContentCoverageLimitError
 from app.services.narration_alignment_service import NarrationAlignmentService
 
@@ -325,6 +332,107 @@ async def test_long_block_visual_queries_bind_to_distributed_narration_spans() -
 
 
 @pytest.mark.asyncio
+async def test_contiguous_host_owned_beats_bind_full_monotonic_audio_spans() -> None:
+    content = "Alpha um dois três. Beta quatro cinco seis. Gama sete oito nove."
+    cuts = [0, content.index("Beta"), content.index("Gama"), len(content)]
+    queries = []
+    for order, (start, end) in enumerate(pairwise(cuts)):
+        query = _query(content[start:end], order=order)
+        query.update(
+            {
+                "visual_beat_id": str(uuid.uuid4()),
+                "coverage_start_char": start,
+                "coverage_end_char": end,
+                "coverage_policy_version": "visual_requirements_v2",
+            }
+        )
+        queries.append(query)
+    workflow = _workflow(queries=queries)
+    workflow.roteiro_snapshot["blocos"][0]["conteudo"] = content
+    workflow.roteiro_snapshot["duracao_total_segundos"] = 12
+    workflow.duracao_audio_segundos = 12
+    block = workflow.blocos[0]
+    block.texto = content
+    block.synthesis_text = content
+    block.narration_end_seconds = 12
+    words = content.replace(".", "").split()
+    assert workflow.transcricao is not None
+    workflow.transcricao.texto_completo = " ".join(words)
+    workflow.transcricao.palavras_timestamps = [
+        {"palavra": word, "inicio": index * 0.9, "fim": index * 0.9 + 0.75}
+        for index, word in enumerate(words)
+    ]
+
+    service, _ = _service(workflow)
+    alignment, _ = await service.ensure(workflow.id)
+
+    bindings = alignment.visual_query_bindings
+    assert [item.status for item in bindings] == ["resolved"] * 3
+    assert [item.excerpt_match_method for item in bindings] == ["host_owned_span"] * 3
+    assert [item.canonical_start_char for item in bindings] == cuts[:-1]
+    assert [item.canonical_end_char for item in bindings] == cuts[1:]
+    assert all(
+        left.narration_end_seconds == right.narration_start_seconds
+        for left, right in pairwise(bindings)
+    )
+    assert bindings[0].narration_start_seconds == 0.0
+    assert bindings[-1].narration_end_seconds == 12.0
+    assert all(
+        item.diagnostics["timeline_projection"] == "host_owned_contiguous_v1"
+        for item in bindings
+    )
+
+    workflow.roteiro_snapshot["blocos"][0]["visual_queries"][0][
+        "coverage_policy_version"
+    ] = "visual_requirements_v3"
+    changed_policy, _ = await service.ensure(workflow.id)
+    assert changed_policy.id != alignment.id
+
+
+def test_host_owned_beats_share_the_real_inter_block_pause() -> None:
+    workflow_id = uuid.uuid4()
+    blocks = [
+        AudioBloco(
+            id=uuid.uuid4(),
+            workflow_execucao_id=workflow_id,
+            ordem=order,
+            tipo="narracao",
+            texto="texto",
+            narration_start_seconds=start,
+            narration_end_seconds=end,
+        )
+        for order, (start, end) in enumerate(((0.0, 10.0), (10.5, 20.0)))
+    ]
+    bindings = [
+        VisualQueryNarrationBinding(
+            narration_alignment_id=uuid.UUID(int=0),
+            audio_bloco_id=block.id,
+            visual_query_id=uuid.uuid4(),
+            block_order=block.ordem,
+            query_order=0,
+            status="resolved",
+            narration_start_seconds=block.narration_start_seconds,
+            narration_end_seconds=block.narration_end_seconds,
+            excerpt_match_method="host_owned_span",
+            diagnostics={"timeline_projection": "host_owned_contiguous_v1"},
+        )
+        for block in blocks
+    ]
+
+    NarrationAlignmentService._project_host_owned_block_boundaries(
+        blocks=blocks,
+        bindings=bindings,
+    )
+
+    assert bindings[0].narration_end_seconds == 10.25
+    assert bindings[1].narration_start_seconds == 10.25
+    assert all(
+        item.diagnostics["inter_block_pause_projection"] == "midpoint_v1"
+        for item in bindings
+    )
+
+
+@pytest.mark.asyncio
 async def test_same_identity_reuses_run_while_changed_inputs_create_new_runs() -> None:
     workflow = _workflow(queries=[_query("Geralt aprende o sinal Aard")])
     service, repository = _service(workflow)
@@ -355,7 +463,7 @@ async def test_same_identity_reuses_run_while_changed_inputs_create_new_runs() -
     versioned = NarrationAlignmentService(
         object(),  # type: ignore[arg-type]
         config=Settings(_env_file=None),
-        strategy_version="narration_alignment_v3",
+        strategy_version="narration_alignment_v4",
     )
     versioned.workflows = service.workflows  # type: ignore[assignment]
     versioned.alignments = repository  # type: ignore[assignment]

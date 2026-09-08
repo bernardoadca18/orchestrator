@@ -49,6 +49,35 @@ async def test_malformed_ideas_hub_response_is_explicit() -> None:
 
 
 @pytest.mark.asyncio
+async def test_visual_readiness_contract_is_typed_and_uses_canonical_endpoint() -> None:
+    script_id = uuid.uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/roteiros/{script_id}/visual-readiness"
+        return httpx.Response(
+            200,
+            json={
+                "status": "ready",
+                "policy_version": "visual_requirements_v2",
+                "policy_identity": "a" * 64,
+                "speakable_content_identity": "b" * 64,
+                "block_count": 3,
+                "visual_beat_count": 24,
+                "textual_coverage_ratio": 1.0,
+                "missing_ranges": [],
+                "overlap_ranges": [],
+                "issues": [],
+            },
+        )
+
+    result = await IdeasHubClient(
+        settings(), transport=httpx.MockTransport(handler)
+    ).obter_visual_readiness(script_id)
+    assert result["status"] == "ready"
+    assert result["visual_beat_count"] == 24
+
+
+@pytest.mark.asyncio
 async def test_safe_get_retries_transient_server_error() -> None:
     calls = 0
 

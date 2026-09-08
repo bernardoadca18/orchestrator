@@ -8,12 +8,14 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, settings
 from app.models.workflow import (
+    AudioBloco,
     NarrationAlignment,
     NarrationBlockAlignment,
     TranscricaoAudio,
@@ -33,6 +35,7 @@ from app.services.narration_alignment_algorithm import (
     TimedWord,
     build_block_text_alignment,
     match_excerpt,
+    match_host_owned_span,
     partition_words_by_block,
     resolve_match_timestamps,
     validate_timed_words,
@@ -41,7 +44,7 @@ from app.services.narration_quality import NarrationSpeechQualityPolicy
 
 logger = logging.getLogger(__name__)
 
-ALIGNMENT_STRATEGY_VERSION = "narration_alignment_v2"
+ALIGNMENT_STRATEGY_VERSION = "narration_alignment_v3"
 
 
 class NarrationAlignmentNotFoundError(LookupError):
@@ -81,6 +84,12 @@ def _script_identity(workflow: WorkflowExecucao) -> str:
                         "id": query.get("id"),
                         "order": query.get("order", query_index),
                         "narration_excerpt": query.get("narration_excerpt"),
+                        "visual_beat_id": query.get("visual_beat_id"),
+                        "coverage_start_char": query.get("coverage_start_char"),
+                        "coverage_end_char": query.get("coverage_end_char"),
+                        "coverage_policy_version": query.get(
+                            "coverage_policy_version"
+                        ),
                     }
                     for query_index, query in enumerate(queries)
                     if isinstance(query, dict)
@@ -400,6 +409,7 @@ class NarrationAlignmentService:
             if not isinstance(raw_queries, list):
                 raise AlignmentAlgorithmError("visual_queries must be a list")
             last_resolved_char: int | None = None
+            block_bindings: list[VisualQueryNarrationBinding] = []
             for fallback_order, query in enumerate(raw_queries):
                 if not isinstance(query, dict):
                     raise AlignmentAlgorithmError("visual query must be an object")
@@ -411,13 +421,29 @@ class NarrationAlignmentService:
                 excerpt = query.get("narration_excerpt")
                 if excerpt is not None and not isinstance(excerpt, str):
                     raise AlignmentAlgorithmError("narration_excerpt must be text or null")
-                excerpt_match = match_excerpt(
-                    canonical,
-                    excerpt,
-                    after_char=last_resolved_char,
-                    fuzzy_threshold=self.fuzzy_threshold,
-                    ambiguity_delta=self.ambiguity_delta,
-                )
+                coverage_start = query.get("coverage_start_char")
+                coverage_end = query.get("coverage_end_char")
+                if coverage_start is not None or coverage_end is not None:
+                    if not isinstance(coverage_start, int) or not isinstance(
+                        coverage_end, int
+                    ):
+                        raise AlignmentAlgorithmError(
+                            "host-owned visual coverage span must use integer offsets"
+                        )
+                    excerpt_match = match_host_owned_span(
+                        canonical,
+                        excerpt,
+                        start_char=coverage_start,
+                        end_char=coverage_end,
+                    )
+                else:
+                    excerpt_match = match_excerpt(
+                        canonical,
+                        excerpt,
+                        after_char=last_resolved_char,
+                        fuzzy_threshold=self.fuzzy_threshold,
+                        ambiguity_delta=self.ambiguity_delta,
+                    )
                 status, start, end, speech_coverage, reason = resolve_match_timestamps(
                     excerpt_match,
                     text_alignment,
@@ -429,26 +455,36 @@ class NarrationAlignmentService:
                     end = min(cast(float, block.narration_end_seconds), end)
                     last_resolved_char = excerpt_match.end_char
                 confidence = excerpt_match.score * speech_coverage if status == "resolved" else 0.0
-                bindings.append(
-                    VisualQueryNarrationBinding(
-                        narration_alignment_id=uuid.UUID(int=0),  # replaced below
-                        audio_bloco_id=block.id,
-                        visual_query_id=query_id,
-                        block_order=block.ordem,
-                        query_order=query_order,
-                        status=status,
-                        narration_start_seconds=start,
-                        narration_end_seconds=end,
-                        excerpt_match_method=excerpt_match.method,
-                        excerpt_match_score=round(excerpt_match.score, 6),
-                        speech_alignment_coverage=round(speech_coverage, 6),
-                        binding_confidence=round(confidence, 6),
-                        canonical_start_char=excerpt_match.start_char,
-                        canonical_end_char=excerpt_match.end_char,
-                        reason=reason,
-                        diagnostics={"excerpt_status": excerpt_match.status},
-                    )
+                binding = VisualQueryNarrationBinding(
+                    narration_alignment_id=uuid.UUID(int=0),  # replaced below
+                    audio_bloco_id=block.id,
+                    visual_query_id=query_id,
+                    block_order=block.ordem,
+                    query_order=query_order,
+                    status=status,
+                    narration_start_seconds=start,
+                    narration_end_seconds=end,
+                    excerpt_match_method=excerpt_match.method,
+                    excerpt_match_score=round(excerpt_match.score, 6),
+                    speech_alignment_coverage=round(speech_coverage, 6),
+                    binding_confidence=round(confidence, 6),
+                    canonical_start_char=excerpt_match.start_char,
+                    canonical_end_char=excerpt_match.end_char,
+                    reason=reason,
+                    diagnostics={"excerpt_status": excerpt_match.status},
                 )
+                bindings.append(binding)
+                block_bindings.append(binding)
+            self._project_host_owned_beat_timeline(
+                canonical=canonical,
+                block=block,
+                bindings=block_bindings,
+            )
+
+        self._project_host_owned_block_boundaries(
+            blocks=audio_blocks,
+            bindings=bindings,
+        )
 
         # Parent IDs are assigned before this method is called; placeholders are
         # replaced by the caller immediately before persistence.
@@ -487,6 +523,119 @@ class NarrationAlignmentService:
         )
         metrics["speech_quality"] = quality.to_dict()
         return persisted_blocks, bindings, metrics
+
+    @staticmethod
+    def _project_host_owned_beat_timeline(
+        *,
+        canonical: str,
+        block: AudioBloco,
+        bindings: list[VisualQueryNarrationBinding],
+    ) -> None:
+        """Map contiguous text coverage onto the full physical block interval.
+
+        The ASR still determines every internal boundary.  Block edges cover leading
+        and trailing silence, while the midpoint between adjacent spoken word edges
+        assigns inter-beat silence deterministically.  An unresolved beat prevents
+        projection, so missing speech is never disguised as coverage.
+        """
+
+        host_bindings = [
+            item for item in bindings if item.excerpt_match_method == "host_owned_span"
+        ]
+        if not host_bindings:
+            return
+        if len(host_bindings) != len(bindings):
+            raise AlignmentAlgorithmError(
+                "host-owned and historical visual query spans cannot be mixed in one block"
+            )
+        ordered = sorted(host_bindings, key=lambda item: item.query_order)
+        cursor = 0
+        for item in ordered:
+            if item.canonical_start_char != cursor or item.canonical_end_char is None:
+                raise AlignmentAlgorithmError(
+                    "host-owned visual coverage must be contiguous and ordered"
+                )
+            cursor = item.canonical_end_char
+        if cursor != len(canonical):
+            raise AlignmentAlgorithmError(
+                "host-owned visual coverage must reach the end of canonical narration"
+            )
+        if any(
+            item.status != "resolved"
+            or item.narration_start_seconds is None
+            or item.narration_end_seconds is None
+            for item in ordered
+        ):
+            return
+
+        block_start = cast(float, block.narration_start_seconds)
+        block_end = cast(float, block.narration_end_seconds)
+        boundaries = [block_start]
+        for left, right in pairwise(ordered):
+            assert left.narration_end_seconds is not None
+            assert right.narration_start_seconds is not None
+            boundary = (left.narration_end_seconds + right.narration_start_seconds) / 2
+            boundaries.append(max(boundaries[-1], min(boundary, block_end)))
+        boundaries.append(block_end)
+        for item, start, end in zip(
+            ordered, boundaries[:-1], boundaries[1:], strict=True
+        ):
+            item.narration_start_seconds = start
+            item.narration_end_seconds = end
+            item.diagnostics = {
+                **(item.diagnostics or {}),
+                "timeline_projection": "host_owned_contiguous_v1",
+            }
+
+    @staticmethod
+    def _project_host_owned_block_boundaries(
+        *,
+        blocks: list[AudioBloco],
+        bindings: list[VisualQueryNarrationBinding],
+    ) -> None:
+        """Assign deterministic inter-block assembly pauses to adjacent beats."""
+
+        by_block: dict[int, list[VisualQueryNarrationBinding]] = {}
+        for item in bindings:
+            by_block.setdefault(item.block_order, []).append(item)
+        for left_block, right_block in pairwise(blocks):
+            left_items = sorted(
+                by_block.get(left_block.ordem, []), key=lambda item: item.query_order
+            )
+            right_items = sorted(
+                by_block.get(right_block.ordem, []), key=lambda item: item.query_order
+            )
+            if not left_items or not right_items:
+                continue
+            left = left_items[-1]
+            right = right_items[0]
+            if (
+                left.status != "resolved"
+                or right.status != "resolved"
+                or left.excerpt_match_method != "host_owned_span"
+                or right.excerpt_match_method != "host_owned_span"
+                or left.narration_end_seconds is None
+                or right.narration_start_seconds is None
+                or (left.diagnostics or {}).get("timeline_projection")
+                != "host_owned_contiguous_v1"
+                or (right.diagnostics or {}).get("timeline_projection")
+                != "host_owned_contiguous_v1"
+            ):
+                continue
+            boundary = (
+                cast(float, left_block.narration_end_seconds)
+                + cast(float, right_block.narration_start_seconds)
+            ) / 2
+            left.narration_end_seconds = boundary
+            right.narration_start_seconds = boundary
+            left.diagnostics = {
+                **(left.diagnostics or {}),
+                "inter_block_pause_projection": "midpoint_v1",
+            }
+            right.diagnostics = {
+                **(right.diagnostics or {}),
+                "inter_block_pause_projection": "midpoint_v1",
+            }
 
     @staticmethod
     def _parse_words(raw_words: list[dict]) -> tuple[TimedWord, ...]:

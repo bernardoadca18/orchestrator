@@ -33,6 +33,7 @@ class IdeasHubBlock(BaseModel):
     tipo: str = Field(min_length=1)
     duracao_segundos: int = Field(gt=0)
     conteudo: str = Field(min_length=1)
+    visual_queries: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class IdeasHubScriptStructure(BaseModel):
@@ -55,6 +56,20 @@ class IdeasHubIdea(BaseModel):
     model_config = ConfigDict(extra="allow")
     id: uuid.UUID
     perfil_producao: str | None = None
+
+
+class IdeasHubVisualReadiness(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    status: str
+    policy_version: str
+    policy_identity: str
+    speakable_content_identity: str
+    block_count: int = Field(ge=0)
+    visual_beat_count: int = Field(ge=0)
+    textual_coverage_ratio: float = Field(ge=0, le=1)
+    missing_ranges: list[dict[str, int]] = Field(default_factory=list)
+    overlap_ranges: list[dict[str, int]] = Field(default_factory=list)
+    issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class IdeasHubClient:
@@ -124,6 +139,16 @@ class IdeasHubClient:
             return IdeasHubIdea.model_validate(response.json()).model_dump(mode="json")
         except (ValidationError, ValueError, TypeError) as exc:
             raise IdeasHubContractError("Ideas Hub idea response is malformed") from exc
+
+    async def obter_visual_readiness(self, roteiro_id: uuid.UUID) -> dict[str, Any]:
+        response = await self._get(f"/roteiros/{roteiro_id}/visual-readiness")
+        try:
+            readiness = IdeasHubVisualReadiness.model_validate(response.json())
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise IdeasHubContractError(
+                "Ideas Hub visual readiness response is malformed"
+            ) from exc
+        return readiness.model_dump(mode="json")
 
 
 ideas_hub_client = IdeasHubClient()

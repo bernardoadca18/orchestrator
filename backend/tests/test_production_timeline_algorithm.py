@@ -104,6 +104,37 @@ def test_basic_timeline_exact_fit_and_explicit_edge_gaps() -> None:
     assert result.status == "completed_with_gaps"
 
 
+def test_resolved_visual_beats_cover_full_narration_without_fake_gap_fill() -> None:
+    decisions = [
+        _decision(
+            start,
+            end,
+            _source(100 + start, 100 + end),
+            order=order,
+        )
+        for order, (start, end) in enumerate(((0, 10), (10, 20), (20, 30)))
+    ]
+    result = build_production_timeline(30, decisions, _policy(gap_fill_enabled=False))
+    assert result.status == "completed"
+    assert result.coverage_ratio == 1.0
+    assert result.gaps == ()
+    assert all(item.status == "fully_placed" for item in result.outcomes)
+
+    decisions[1] = _decision(
+        10,
+        20,
+        None,
+        order=1,
+        source_status="unresolved",
+    )
+    unresolved = build_production_timeline(
+        30, decisions, _policy(gap_fill_enabled=False)
+    )
+    assert unresolved.status == "completed_with_gaps"
+    assert unresolved.coverage_ratio < 1
+    assert any(gap.reason == "source_unresolved" for gap in unresolved.gaps)
+
+
 def test_long_source_uses_center_anchor_and_direct_start_policies() -> None:
     centered = build_production_timeline(
         10, [_decision(0, 5, _source(100, 120))], _policy()

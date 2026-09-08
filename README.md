@@ -145,7 +145,9 @@ Repeated or weak excerpts become `ambiguous` or `unresolved`; timestamps are nev
 characters, reading speed or gameplay time.
 
 Persisted `NarrationAlignment`, compact per-block metrics and
-`VisualQueryNarrationBinding` records are versioned by `narration_alignment_v2`. The compatibility
+`VisualQueryNarrationBinding` records are versioned by `narration_alignment_v3`. Host-owned visual
+beat offsets bind directly to their full literal narration spans; historical queries without those
+offsets retain the v2 excerpt-matching compatibility path. The compatibility
 fingerprint includes final audio SHA, relevant script/excerpts, block synthesis identities and
 offsets, full transcription identity and strategy version. The same inputs reuse one run.
 
@@ -167,6 +169,13 @@ artifact; `audio_phase=quality_unvalidated` distinguishes it from production-val
 when transcription/alignment evidence is unavailable.
 
 ## Stage 14 Visual Director
+
+Workflow creation performs a read-only Ideas Hub visual-readiness preflight before persisting or
+enqueuing any audio work. A final-production script that lacks contiguous host-owned Visual Beats
+returns HTTP 409 with `production_script_not_visual_ready` plus the canonical readiness report;
+therefore Qwen is never called for that request. Editorial approval and visual-production readiness
+remain separate contracts. The Stage 14 zero-query gate remains as defense for historical workflow
+snapshots created before this preflight.
 
 Stage 14 is a synchronous, independently rebuildable production-domain service inside the
 Orchestrator. It consumes immutable `VisualQuery` records, the compatible completed Stage 13

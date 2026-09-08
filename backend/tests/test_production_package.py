@@ -73,6 +73,20 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
         }
     )
     hub.obter_ideia = AsyncMock(return_value={"perfil_producao": "analysis"})
+    hub.obter_visual_readiness = AsyncMock(
+        return_value={
+            "status": "ready",
+            "policy_version": "visual_requirements_v2",
+            "policy_identity": "a" * 64,
+            "speakable_content_identity": "b" * 64,
+            "block_count": 1,
+            "visual_beat_count": 1,
+            "textual_coverage_ratio": 1.0,
+            "missing_ranges": [],
+            "overlap_ranges": [],
+            "issues": [],
+        }
+    )
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         patch("app.api.routers.workflow.ideas_hub_client", hub),
@@ -85,6 +99,57 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
         == query
     )
     task.delay.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_unready_script_is_rejected_before_workflow_or_audio_task() -> None:
+    script_id = uuid.uuid4()
+    idea_id = uuid.uuid4()
+    repository = MagicMock()
+    repository.criar = AsyncMock()
+    hub = MagicMock()
+    hub.obter_roteiro = AsyncMock(
+        return_value={
+            "id": str(script_id),
+            "ideia_id": str(idea_id),
+            "status": "aprovado",
+            "estrutura": {
+                "titulo": "Legacy",
+                "duracao_total_segundos": 60,
+                "blocos": [{"tipo": "intro", "conteudo": "Texto", "visual_queries": []}],
+            },
+        }
+    )
+    hub.obter_ideia = AsyncMock(
+        return_value={"perfil_producao": "faceless_pop_culture_lists"}
+    )
+    hub.obter_visual_readiness = AsyncMock(
+        return_value={
+            "status": "not_ready",
+            "policy_version": "visual_requirements_v2",
+            "policy_identity": "a" * 64,
+            "speakable_content_identity": "b" * 64,
+            "block_count": 1,
+            "visual_beat_count": 0,
+            "textual_coverage_ratio": 0.0,
+            "missing_ranges": [{"block_order": 0, "start_char": 0, "end_char": 5}],
+            "overlap_ranges": [],
+            "issues": [{"block_order": 0, "code": "visual_queries_missing"}],
+        }
+    )
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch("app.api.routers.workflow.ideas_hub_client", hub),
+        patch("app.api.routers.workflow.processar_producao_workflow") as production_task,
+        patch("app.api.routers.workflow.gerar_audio_workflow") as audio_task,
+        pytest.raises(Exception) as caught,
+    ):
+        await criar_workflow(WorkflowCreateIn(roteiro_id=script_id), MagicMock())
+    assert getattr(caught.value, "status_code", None) == 409
+    assert caught.value.detail["category"] == "production_script_not_visual_ready"
+    repository.criar.assert_not_awaited()
+    production_task.delay.assert_not_called()
+    audio_task.delay.assert_not_called()
 
 
 @pytest.mark.asyncio
