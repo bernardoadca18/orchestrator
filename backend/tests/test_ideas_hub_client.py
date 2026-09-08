@@ -78,6 +78,50 @@ async def test_visual_readiness_contract_is_typed_and_uses_canonical_endpoint() 
 
 
 @pytest.mark.asyncio
+async def test_production_readiness_contract_is_typed_and_uses_canonical_endpoint() -> None:
+    script_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/roteiros/{script_id}/production-readiness"
+        return httpx.Response(
+            200,
+            json={
+                "status": "ready",
+                "profile": "game_analysis",
+                "editorial_status": "aprovado",
+                "visual": {
+                    "status": "ready",
+                    "policy_version": "visual_requirements_v2",
+                    "policy_identity": "a" * 64,
+                    "speakable_content_identity": "b" * 64,
+                    "block_count": 1,
+                    "visual_beat_count": 1,
+                    "textual_coverage_ratio": 1.0,
+                    "missing_ranges": [],
+                    "overlap_ranges": [],
+                    "issues": [],
+                },
+                "media_scope": {
+                    "required": True,
+                    "status": "ready",
+                    "media_project_id": str(project_id),
+                    "media_session_ids": [str(session_id)],
+                },
+                "issues": [],
+            },
+        )
+
+    result = await IdeasHubClient(
+        settings(), transport=httpx.MockTransport(handler)
+    ).obter_production_readiness(script_id)
+    assert result["status"] == "ready"
+    assert result["profile"] == "game_analysis"
+    assert result["media_scope"]["media_project_id"] == str(project_id)
+
+
+@pytest.mark.asyncio
 async def test_safe_get_retries_transient_server_error() -> None:
     calls = 0
 

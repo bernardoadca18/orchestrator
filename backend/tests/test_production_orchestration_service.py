@@ -379,6 +379,25 @@ async def test_missing_visual_queries_propagates_stable_workflow_error_category(
 
 
 @pytest.mark.asyncio
+async def test_missing_media_scope_propagates_specific_visual_plan_reason() -> None:
+    workflow = _workflow(phase="visual_plan", status="running")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    service.visual.item.status = "blocked"
+    service.visual.item.error_message = "media scope is unavailable"
+    service.visual.item.diagnostics = {"error_category": "visual_plan_media_scope_missing"}
+
+    result = await service.process(workflow.id)
+
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_error_category == "visual_plan_media_scope_missing"
+    assert workflow.production_error_message == "media scope is unavailable"
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
 async def test_completed_remote_promotes_workflow() -> None:
     workflow = _workflow(phase="render", status="running")
     timeline = _timeline(workflow.id)

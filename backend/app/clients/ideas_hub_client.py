@@ -72,6 +72,24 @@ class IdeasHubVisualReadiness(BaseModel):
     issues: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class IdeasHubMediaScopeReadiness(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    required: bool
+    status: str
+    media_project_id: uuid.UUID | None = None
+    media_session_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
+class IdeasHubProductionReadiness(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    status: str
+    profile: str
+    editorial_status: str
+    visual: IdeasHubVisualReadiness
+    media_scope: IdeasHubMediaScopeReadiness
+    issues: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class IdeasHubClient:
     """GETs may retry transiently; no mutating request is exposed by this client."""
 
@@ -145,8 +163,16 @@ class IdeasHubClient:
         try:
             readiness = IdeasHubVisualReadiness.model_validate(response.json())
         except (ValidationError, ValueError, TypeError) as exc:
+            raise IdeasHubContractError("Ideas Hub visual readiness response is malformed") from exc
+        return readiness.model_dump(mode="json")
+
+    async def obter_production_readiness(self, roteiro_id: uuid.UUID) -> dict[str, Any]:
+        response = await self._get(f"/roteiros/{roteiro_id}/production-readiness")
+        try:
+            readiness = IdeasHubProductionReadiness.model_validate(response.json())
+        except (ValidationError, ValueError, TypeError) as exc:
             raise IdeasHubContractError(
-                "Ideas Hub visual readiness response is malformed"
+                "Ideas Hub production readiness response is malformed"
             ) from exc
         return readiness.model_dump(mode="json")
 

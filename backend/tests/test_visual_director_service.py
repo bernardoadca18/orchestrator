@@ -502,6 +502,24 @@ async def test_idempotency_force_and_changed_query() -> None:
 
 
 @pytest.mark.asyncio
+async def test_changed_media_scope_creates_distinct_visual_plan_identity() -> None:
+    query = _query(preferred_session_id=None, start=None, end=None)
+    workflow, alignment = _entities([query])
+    provider = FakeProvider()
+    provider.results = [_candidate()]
+    repository = FakeVisualPlanRepository()
+    service, _ = _service(workflow, alignment, provider, repository)
+    first, _ = await service.ensure(workflow.id)
+
+    workflow.roteiro_snapshot["media_context"]["media_project_id"] = str(uuid.uuid4())
+    changed, created = await service.ensure(workflow.id)
+
+    assert created is True
+    assert changed.id != first.id
+    assert changed.media_scope_fingerprint != first.media_scope_fingerprint
+
+
+@pytest.mark.asyncio
 async def test_missing_alignment_creates_blocked_artifact_without_provider_calls() -> None:
     workflow, _ = _entities([_query()])
     provider = FakeProvider()
@@ -510,6 +528,22 @@ async def test_missing_alignment_creates_blocked_artifact_without_provider_calls
     assert plan.status == "blocked"
     assert "NarrationAlignment" in plan.error_message
     assert provider.session_calls == []
+    assert provider.project_search_calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_scope_persists_decisions_and_specific_aggregate_diagnostic() -> None:
+    query = _query(preferred_session_id=None, start=None, end=None)
+    workflow, alignment = _entities([query])
+    workflow.roteiro_snapshot["media_context"] = None
+    provider = FakeProvider()
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.status == "blocked"
+    assert plan.error_message == "media scope is unavailable"
+    assert plan.diagnostics["error_category"] == "visual_plan_media_scope_missing"
+    assert plan.decisions[0].reason == "media scope is unavailable"
+    assert plan.media_search_count == 0
     assert provider.project_search_calls == []
 
 

@@ -72,18 +72,24 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
             "estrutura": structure,
         }
     )
-    hub.obter_ideia = AsyncMock(return_value={"perfil_producao": "analysis"})
-    hub.obter_visual_readiness = AsyncMock(
+    hub.obter_production_readiness = AsyncMock(
         return_value={
             "status": "ready",
-            "policy_version": "visual_requirements_v2",
-            "policy_identity": "a" * 64,
-            "speakable_content_identity": "b" * 64,
-            "block_count": 1,
-            "visual_beat_count": 1,
-            "textual_coverage_ratio": 1.0,
-            "missing_ranges": [],
-            "overlap_ranges": [],
+            "profile": "analysis",
+            "editorial_status": "aprovado",
+            "visual": {
+                "status": "ready",
+                "policy_version": "visual_requirements_v2",
+                "policy_identity": "a" * 64,
+                "speakable_content_identity": "b" * 64,
+                "block_count": 1,
+                "visual_beat_count": 1,
+                "textual_coverage_ratio": 1.0,
+                "missing_ranges": [],
+                "overlap_ranges": [],
+                "issues": [],
+            },
+            "media_scope": {"required": True, "status": "ready"},
             "issues": [],
         }
     )
@@ -120,21 +126,28 @@ async def test_unready_script_is_rejected_before_workflow_or_audio_task() -> Non
             },
         }
     )
-    hub.obter_ideia = AsyncMock(
-        return_value={"perfil_producao": "faceless_pop_culture_lists"}
-    )
-    hub.obter_visual_readiness = AsyncMock(
+    hub.obter_production_readiness = AsyncMock(
         return_value={
             "status": "not_ready",
-            "policy_version": "visual_requirements_v2",
-            "policy_identity": "a" * 64,
-            "speakable_content_identity": "b" * 64,
-            "block_count": 1,
-            "visual_beat_count": 0,
-            "textual_coverage_ratio": 0.0,
-            "missing_ranges": [{"block_order": 0, "start_char": 0, "end_char": 5}],
-            "overlap_ranges": [],
-            "issues": [{"block_order": 0, "code": "visual_queries_missing"}],
+            "profile": "faceless_pop_culture_lists",
+            "editorial_status": "aprovado",
+            "visual": {
+                "status": "not_ready",
+                "policy_version": "visual_requirements_v2",
+                "policy_identity": "a" * 64,
+                "speakable_content_identity": "b" * 64,
+                "block_count": 1,
+                "visual_beat_count": 0,
+                "textual_coverage_ratio": 0.0,
+                "missing_ranges": [{"block_order": 0, "start_char": 0, "end_char": 5}],
+                "overlap_ranges": [],
+                "issues": [{"block_order": 0, "code": "visual_queries_missing"}],
+            },
+            "media_scope": {"required": True, "status": "missing"},
+            "issues": [
+                {"code": "visual_readiness_not_ready"},
+                {"code": "media_scope_missing"},
+            ],
         }
     )
     with (
@@ -142,14 +155,61 @@ async def test_unready_script_is_rejected_before_workflow_or_audio_task() -> Non
         patch("app.api.routers.workflow.ideas_hub_client", hub),
         patch("app.api.routers.workflow.processar_producao_workflow") as production_task,
         patch("app.api.routers.workflow.gerar_audio_workflow") as audio_task,
+        patch("app.services.audio_service.VoiceClient") as voice_client,
         pytest.raises(Exception) as caught,
     ):
         await criar_workflow(WorkflowCreateIn(roteiro_id=script_id), MagicMock())
     assert getattr(caught.value, "status_code", None) == 409
-    assert caught.value.detail["category"] == "production_script_not_visual_ready"
+    assert caught.value.detail["category"] == "production_script_not_ready"
     repository.criar.assert_not_awaited()
     production_task.delay.assert_not_called()
     audio_task.delay.assert_not_called()
+    voice_client.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_missing_required_media_scope_blocks_before_workflow_and_all_tasks() -> None:
+    script_id = uuid.uuid4()
+    idea_id = uuid.uuid4()
+    repository = MagicMock()
+    repository.criar = AsyncMock()
+    hub = MagicMock()
+    hub.obter_roteiro = AsyncMock(
+        return_value={
+            "id": str(script_id),
+            "ideia_id": str(idea_id),
+            "status": "aprovado",
+            "estrutura": {"titulo": "Ready visual", "blocos": []},
+        }
+    )
+    hub.obter_production_readiness = AsyncMock(
+        return_value={
+            "status": "not_ready",
+            "profile": "game_analysis",
+            "editorial_status": "aprovado",
+            "visual": {"status": "ready"},
+            "media_scope": {"required": True, "status": "missing"},
+            "issues": [{"code": "media_scope_missing"}],
+        }
+    )
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch("app.api.routers.workflow.ideas_hub_client", hub),
+        patch("app.api.routers.workflow.processar_producao_workflow") as production_task,
+        patch("app.api.routers.workflow.gerar_audio_workflow") as audio_task,
+        patch("app.services.audio_service.VoiceClient") as voice_client,
+        pytest.raises(Exception) as caught,
+    ):
+        await criar_workflow(WorkflowCreateIn(roteiro_id=script_id), MagicMock())
+    assert getattr(caught.value, "status_code", None) == 409
+    assert caught.value.detail["category"] == "production_script_not_ready"
+    assert caught.value.detail["production_readiness"]["issues"] == [
+        {"code": "media_scope_missing"}
+    ]
+    repository.criar.assert_not_awaited()
+    production_task.delay.assert_not_called()
+    audio_task.delay.assert_not_called()
+    voice_client.assert_not_called()
 
 
 @pytest.mark.asyncio

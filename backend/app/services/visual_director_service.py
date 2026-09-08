@@ -279,6 +279,17 @@ class VisualDirectorService:
                 diagnostics=diagnostics,
             )
             plan = await self.repository.reload(plan)
+            if plan.status == "blocked" and scope is None:
+                diagnostics = {
+                    **(plan.diagnostics or {}),
+                    "error_category": "visual_plan_media_scope_missing",
+                }
+                await self.repository.mark_blocked(
+                    plan,
+                    "media scope is unavailable",
+                    diagnostics=diagnostics,
+                )
+                plan = await self.repository.reload(plan)
             logger.info(
                 "visual plan finished",
                 extra={

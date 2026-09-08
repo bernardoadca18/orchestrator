@@ -472,22 +472,20 @@ async def criar_workflow(
             400, "Roteiro precisa estar aprovado no ideas-hub para entrar na fila de produção"
         )
 
-    # Buscar perfil_producao da ideia associada
-    ideia = await ideas_hub_client.obter_ideia(uuid.UUID(roteiro["ideia_id"]))
-    perfil_producao = ideia.get("perfil_producao")
-    readiness = await ideas_hub_client.obter_visual_readiness(payload.roteiro_id)
+    readiness = await ideas_hub_client.obter_production_readiness(payload.roteiro_id)
     if readiness["status"] != "ready":
         raise HTTPException(
             409,
             detail={
-                "category": "production_script_not_visual_ready",
+                "category": "production_script_not_ready",
                 "message": (
-                    "Roteiro aprovado não possui coverage visual host-owned completo. "
-                    "Crie e aprove uma revisão de visual enrichment antes da produção."
+                    "Roteiro aprovado não satisfaz os requisitos do ProductionProfile. "
+                    "Corrija os issues e aprove a revisão antes da produção."
                 ),
-                "visual_readiness": readiness,
+                "production_readiness": readiness,
             },
         )
+    perfil_producao = readiness["profile"]
 
     try:
         wf = await repo.criar(
