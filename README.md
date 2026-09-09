@@ -182,16 +182,22 @@ Orchestrator. It consumes immutable `VisualQuery` records, the compatible comple
 alignment and Media Indexer's public HTTP API. It selects logical gameplay source windows and does
 not download media, run FFmpeg, trigger indexing or create final edit placement.
 
-Selection is deterministic and versioned as `visual_director_v1`:
+Selection is deterministic and currently versioned as `visual_director_v4_evidence_band`:
 
 1. validate trusted `preferred_session_id` and gameplay range through `GET /sessions/{id}`;
 2. select valid trusted provenance directly, with zero Media Search calls;
 3. otherwise call `POST /media-search/sessions/{id}` or
    `POST /media-search/projects/{id}` using the explicit script media scope;
 4. normalize and deduplicate overlapping candidates;
-5. apply semantic relevance, weak preferred-session/source-note/duration bonuses and a modest
-   overlap-reuse penalty;
+5. apply semantic relevance, preferred-session/source-note/duration evidence and deterministic
+   overlap/exact/consecutive-reuse penalties; evidence intent stays inside a tight semantic band;
 6. persist the selected source and at most two compact alternatives.
+
+The plan persists candidate-count and diversity diagnostics: unique source windows, reuse ratio,
+maximum/dominant window use, unique media/sessions and union source duration. Plans with at least
+four non-anchored selections are blocked when reuse collapses to one window (or crosses the
+configured reuse and dominance limits). Short plans and explicitly anchored editorial reuse remain
+valid.
 
 The default semantic threshold is the Media Search contract's cosine-like `0.25`. A weak result is
 left `unresolved`; provider outage becomes `failed`, never "no results". Required and optional gaps
@@ -211,9 +217,9 @@ Endpoints:
 - `POST ...?force=true` re-runs only source resolution and may call Media Search again.
 
 Searches use a request-scoped duplicate-query cache and bounded concurrency. The persisted
-fingerprint contains script/query identity, Stage 13 alignment, media scope, policy version and the
-resolved TemporalIndex/search provenance. Since Media Indexer has no cheap "latest index identity"
-read contract, discovering a newly-created index requires an explicit force rebuild.
+fingerprint contains script/query identity, Stage 13 alignment, media scope, selection/diversity
+policy and required Media Search strategy, plus resolved TemporalIndex/search provenance. Strategy
+changes create a new VisualPlan without regenerating healthy audio or narration alignment.
 
 ## Stage 15 Production Timeline
 
@@ -278,6 +284,11 @@ remain `running` and are rescheduled until the persisted render timeout; healthy
 are not invalidated by a temporary Composer outage. Composer identity mismatch, timeout and stale
 current timeline protection prevent the wrong MP4 from completing a workflow.
 
+Immediately before local render creation/submission, Stage 17 applies the same host-configured
+visual-diversity policy to ProductionTimeline candidate windows, weighted additionally by final
+timeline duration. Degenerate historical plans are blocked as `visual_diversity_gate_failed`
+before Composer receives work.
+
 Endpoints:
 
 - `GET /workflow/{id}/render` returns the current semantic final render without side effects;
@@ -302,7 +313,8 @@ deliberately independent.
 The automatic `standard` mode runs after Stage 17 completes and on worker recovery when a completed
 workflow has no compatible report or left one `pending`/`running`. It validates artifact identities, final narration format and
 persisted mastering measurements, transcription/alignment/visual-query requirements, a gap-free
-full-coverage timeline, current render/profile/duration metadata and Composer delivery. Delivery is
+full-coverage timeline, visual-diversity status/metrics, current render/profile/duration metadata
+and Composer delivery. Delivery is
 bounded to `Range: bytes=0-0`; standard QA never downloads the whole MP4. Temporary Composer
 outages yield `blocked`, use bounded Celery retries and never demote the production.
 

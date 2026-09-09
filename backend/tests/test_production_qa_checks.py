@@ -106,7 +106,18 @@ def _inputs() -> ProductionQAInputs:
                 {"visual_query_id": str(query_id), "status": "fully_placed"}
             ]
         },
-        placements=[SimpleNamespace(source_type="gameplay")],
+        placements=[
+            SimpleNamespace(
+                source_type="gameplay",
+                source_session_id=uuid.UUID(int=1),
+                source_media_id=uuid.UUID(int=2),
+                candidate_start_seconds=0.0,
+                candidate_end_seconds=10.0,
+                timeline_start_seconds=0.0,
+                timeline_end_seconds=10.0,
+                strategy="media_search",
+            )
+        ],
     )
     profile = ComposerRenderProfile(
         name="youtube_1080p30_v1",
@@ -170,6 +181,25 @@ def test_stale_timeline_fingerprint_fails_chain_and_render_identity() -> None:
     checks = _checks(inputs)
     assert checks["artifact_chain_identity"].result == "failed"
     assert checks["render_timeline_identity"].result == "failed"
+
+
+def test_visual_diversity_check_reports_degenerate_reuse() -> None:
+    inputs = _inputs()
+    source = inputs.timeline.placements[0]
+    inputs.timeline.placements = [
+        SimpleNamespace(
+            **{
+                **vars(source),
+                "timeline_start_seconds": float(index),
+                "timeline_end_seconds": float(index + 1),
+            }
+        )
+        for index in range(22)
+    ]
+    check = _checks(inputs)["visual_diversity"]
+    assert check.result == "failed"
+    assert check.actual["unique_source_window_count"] == 1
+    assert check.actual["dominant_window_use_ratio"] == 1.0
 
 
 @pytest.mark.parametrize(

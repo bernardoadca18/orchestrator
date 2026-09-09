@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     video_composer_render_timeout_seconds: float = 3600.0
     video_composer_render_profile: str = "youtube_1080p30_v1"
 
-    production_qa_strategy_version: str = "production_qa_v1"
+    production_qa_strategy_version: str = "production_qa_v2"
     production_qa_deep_max_video_bytes: int = 10 * 1024 * 1024 * 1024
     production_qa_task_max_retries: int = 2
     production_qa_task_retry_seconds: float = 5.0
@@ -105,12 +105,17 @@ class Settings(BaseSettings):
     narration_quality_policy_version: str = "narration_speech_quality_v2"
     narration_quality_max_repeated_ngram_occurrences: int = 4
 
-    visual_director_strategy_version: str = "visual_director_v1"
+    visual_director_strategy_version: str = "visual_director_v4_evidence_band"
     visual_director_max_queries: int = 100
     visual_director_search_top_k: int = 5
     visual_director_max_alternatives: int = 2
     visual_director_search_concurrency: int = 4
     visual_director_min_semantic_score: float = 0.25
+    visual_director_media_search_strategy_version: str = "media_search_v4_hybrid_evidence"
+    visual_diversity_policy_version: str = "visual_diversity_policy_v1"
+    visual_diversity_minimum_window_count: int = 4
+    visual_diversity_maximum_reuse_ratio: float = 0.75
+    visual_diversity_maximum_dominant_window_ratio: float = 0.75
 
     production_timeline_strategy_version: str = "production_timeline_v1"
     production_timeline_schema_version: str = "production_timeline_schema_v1"
@@ -194,6 +199,7 @@ class Settings(BaseSettings):
     @field_validator(
         "text_normalizer_version",
         "narration_quality_policy_version",
+        "visual_director_media_search_strategy_version",
     )
     @classmethod
     def validate_version_identity(cls, value: str) -> str:
@@ -229,6 +235,7 @@ class Settings(BaseSettings):
         "visual_director_max_queries",
         "visual_director_search_top_k",
         "visual_director_search_concurrency",
+        "visual_diversity_minimum_window_count",
         "production_timeline_max_sources_per_query",
     )
     @classmethod
@@ -278,7 +285,11 @@ class Settings(BaseSettings):
             raise ValueError("production QA deep size limit must be positive")
         return value
 
-    @field_validator("visual_director_min_semantic_score")
+    @field_validator(
+        "visual_director_min_semantic_score",
+        "visual_diversity_maximum_reuse_ratio",
+        "visual_diversity_maximum_dominant_window_ratio",
+    )
     @classmethod
     def validate_visual_director_score(cls, value: float) -> float:
         if value < 0 or value > 1:

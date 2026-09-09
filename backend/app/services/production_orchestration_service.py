@@ -28,6 +28,10 @@ from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.visual_director_service import VisualDirectorService
+from app.services.visual_diversity import (
+    VisualDiversityPolicy,
+    timeline_visual_diversity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +166,19 @@ class ProductionOrchestrationService:
                             "Current render input is unavailable",
                         )
                         return OrchestrationResult(terminal=True)
+                    diversity = timeline_visual_diversity(
+                        timeline.placements,
+                        self._visual_diversity_policy(),
+                    )
+                    if diversity.status == "failed":
+                        await self._block(
+                            workflow,
+                            "render",
+                            "visual_diversity_gate_failed",
+                            "ProductionTimeline failed pre-render visual diversity gate: "
+                            + ", ".join(diversity.reasons),
+                        )
+                        return OrchestrationResult(terminal=True)
                     render = await self._ensure_local_render(workflow, timeline)
                     render_id_for_retry = render.id
                     remote = await self._reconcile_or_submit(
@@ -291,6 +308,16 @@ class ProductionOrchestrationService:
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
+
+    def _visual_diversity_policy(self) -> VisualDiversityPolicy:
+        return VisualDiversityPolicy(
+            version=self.config.visual_diversity_policy_version,
+            minimum_window_count=self.config.visual_diversity_minimum_window_count,
+            maximum_reuse_ratio=self.config.visual_diversity_maximum_reuse_ratio,
+            maximum_dominant_window_ratio=(
+                self.config.visual_diversity_maximum_dominant_window_ratio
+            ),
+        )
 
     async def _reconcile_or_submit(
         self, render: WorkflowRender, *, retry_failed: bool

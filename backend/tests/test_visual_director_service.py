@@ -189,7 +189,7 @@ class FakeProvider:
                     "skip_reason": None,
                 },
             ),
-            strategy="media_search_v1",
+            strategy="media_search_v4_hybrid_evidence",
             embedding_provider="ollama",
             embedding_model="mxbai-embed-large:latest",
             embedding_dimensions=1024,
@@ -559,6 +559,30 @@ async def test_below_threshold_candidate_is_not_selected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_exact_duplicate_collapse_is_blocked_by_quality_gate() -> None:
+    queries = [
+        _query(
+            order=index,
+            text=f"distinct visual query {index}",
+            preferred_session_id=None,
+            start=None,
+            end=None,
+        )
+        for index in range(22)
+    ]
+    workflow, alignment = _entities(queries)
+    provider = FakeProvider()
+    provider.results = [_candidate(start=285.688, end=346.788, score=0.45)]
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.status == "blocked"
+    assert plan.resolved_queries == 22
+    assert plan.metrics["unique_source_window_count"] == 1
+    assert plan.metrics["reused_source_count"] == 21
+    assert plan.diagnostics["error_category"] == "visual_plan_degenerate_reuse"
+
+
+@pytest.mark.asyncio
 async def test_provenance_alignment_and_strategy_changes_create_new_identity() -> None:
     query = _query()
     workflow, alignment = _entities([query])
@@ -583,7 +607,7 @@ async def test_provenance_alignment_and_strategy_changes_create_new_identity() -
         alignment_changed,
         provider,
         repository,
-        Settings(visual_director_strategy_version="visual_director_v2"),
+        Settings(visual_director_strategy_version="visual_director_v3_test"),
     )
     new_strategy, _ = await strategy_service.ensure(workflow.id)
     assert len({first.id, provenance_changed.id, new_alignment.id, new_strategy.id}) == 4

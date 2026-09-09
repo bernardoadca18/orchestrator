@@ -186,6 +186,14 @@ fallback uses the actual Media Indexer project/session Media Search endpoints an
 TemporalIndex IDs, embedding profile and searched/skipped session summaries. No vectors, host paths,
 video bytes or external raw response bodies are persisted.
 
+Selection is diversity-aware but deterministic. Exact and consecutive reuse is strongly
+disfavored when a semantically close alternative exists; evidence queries remain inside a narrower
+semantic band, and trusted preferred provenance may legitimately reuse a range. VisualPlan metrics
+include exact-window reuse, dominance and union source duration. A configurable quality gate blocks
+large, non-anchored plans that collapse to one dominant window. Stage 17 repeats the same pure check
+over ProductionTimeline placements before render submission, and Stage 18 reports it as
+`visual_diversity`.
+
 Source resolution and narration alignment are independent: either one may be unresolved while the
 other remains usable. `completed_with_gaps` distinguishes required and optional gaps. A temporary
 Media Indexer failure is recorded as a technical source failure, while an empty successful search is

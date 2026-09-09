@@ -46,6 +46,7 @@ def _timeline(workflow_id: uuid.UUID, *, gaps: int = 0) -> SimpleNamespace:
         gap_count=gaps,
         fingerprint="b" * 64,
         error_message=None,
+        placements=[],
     )
 
 
@@ -408,6 +409,52 @@ async def test_completed_remote_promotes_workflow() -> None:
     assert workflow.production_status == "completed"
     assert workflow.production_phase == "completed"
     assert workflow.status == "audio_concluido"
+
+
+@pytest.mark.asyncio
+async def test_pre_render_visual_diversity_gate_blocks_degenerate_timeline() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    timeline.placements = [
+        SimpleNamespace(
+            source_session_id=uuid.UUID(int=1),
+            source_media_id=uuid.UUID(int=2),
+            candidate_start_seconds=285.688,
+            candidate_end_seconds=346.788,
+            timeline_start_seconds=float(index * 30),
+            timeline_end_seconds=float(index * 30 + 30),
+            strategy="media_search",
+        )
+        for index in range(22)
+    ]
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    result = await _service(workflow, timeline, composer).process(workflow.id)
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_error_category == "visual_diversity_gate_failed"
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_pre_render_visual_diversity_gate_passes_diverse_timeline() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    timeline.placements = [
+        SimpleNamespace(
+            source_session_id=uuid.UUID(int=1),
+            source_media_id=uuid.UUID(int=2),
+            candidate_start_seconds=float(index * 20),
+            candidate_end_seconds=float(index * 20 + 20),
+            timeline_start_seconds=float(index * 30),
+            timeline_end_seconds=float(index * 30 + 30),
+            strategy="media_search",
+        )
+        for index in range(22)
+    ]
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    result = await _service(workflow, timeline, composer).process(workflow.id)
+    assert not result.terminal
+    assert composer.create_calls
 
 
 @pytest.mark.asyncio

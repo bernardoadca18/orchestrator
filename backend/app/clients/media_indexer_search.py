@@ -175,6 +175,10 @@ def _safe_provenance(value: dict[str, Any]) -> dict[str, Any]:
         "score_components",
         "cluster_start_seconds",
         "cluster_end_seconds",
+        "semantic_text_strategy",
+        "semantic_source_types",
+        "semantic_support",
+        "overlapping_timeline_note_ids",
     }
     return {key: value[key] for key in sorted(allowed & value.keys())}
 

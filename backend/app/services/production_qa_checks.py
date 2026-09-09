@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from typing import Any, Literal
 
@@ -18,6 +18,10 @@ from app.models.workflow import (
     WorkflowRender,
 )
 from app.services.production_qa_policy import ProductionQAPolicy
+from app.services.visual_diversity import (
+    VisualDiversityPolicy,
+    timeline_visual_diversity,
+)
 
 QAResult = Literal["passed", "warning", "failed", "blocked", "skipped"]
 
@@ -46,6 +50,7 @@ class ProductionQAInputs:
     render: WorkflowRender
     policy: ProductionQAPolicy
     render_profile: ComposerRenderProfile | None
+    visual_diversity_policy: VisualDiversityPolicy = field(default_factory=VisualDiversityPolicy)
     profile_unavailable: bool = False
 
 
@@ -167,6 +172,27 @@ def check_production_workflow_status(inputs: ProductionQAInputs) -> ProductionQA
         message,
         expected="completed",
         actual=status,
+    )
+
+
+def check_visual_diversity(inputs: ProductionQAInputs) -> ProductionQACheck:
+    evaluation = timeline_visual_diversity(
+        inputs.timeline.placements,
+        inputs.visual_diversity_policy,
+    )
+    return ProductionQACheck(
+        "visual_diversity",
+        "visual",
+        "failed" if evaluation.status == "failed" else "passed",
+        "Visual source diversity passed the deterministic policy."
+        if evaluation.status == "passed"
+        else "Visual source diversity is degenerate.",
+        actual=evaluation.metrics,
+        details={
+            "status": evaluation.status,
+            "reasons": list(evaluation.reasons),
+            "policy": evaluation.to_dict()["policy"],
+        },
     )
 
 
@@ -786,6 +812,7 @@ def standard_local_checks(inputs: ProductionQAInputs) -> list[ProductionQACheck]
         check_narration_alignment_coverage(inputs),
         check_visual_plan_status(inputs),
         check_required_visual_sources(inputs),
+        check_visual_diversity(inputs),
         check_production_timeline_status(inputs),
         check_production_timeline_gap_free(inputs),
         check_production_timeline_visual_coverage(inputs),

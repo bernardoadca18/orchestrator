@@ -74,6 +74,11 @@ def test_scoring_has_exact_documented_components() -> None:
         "duration_fit_bonus": 0.02,
         "reuse_overlap": 0.0,
         "reuse_penalty": 0.0,
+        "exact_reuse_count": 0,
+        "exact_reuse_penalty": 0.0,
+        "consecutive_reuse_penalty": 0.0,
+        "source_note_anchored": True,
+        "semantic_band_penalty": 0.0,
     }
 
 
@@ -87,7 +92,33 @@ def test_reuse_penalty_prefers_a_distinct_similarly_relevant_window() -> None:
         already_selected=[previous],
     )
     assert ranked[0].start_seconds == 200
-    assert ranked[1].score_components["reuse_penalty"] == 0.08
+    assert ranked[1].score_components["reuse_penalty"] == 0.38
+
+
+def test_exact_reuse_loses_to_semantically_close_distinct_candidate() -> None:
+    previous = _candidate(100, 120, 0.50)
+    ranked = rank_candidates(
+        [_candidate(100, 120, 0.51), _candidate(200, 220, 0.48)],
+        preferred_session_id=None,
+        source_note_id=None,
+        target_duration_seconds=None,
+        already_selected=[previous],
+    )
+    assert ranked[0].start_seconds == 200
+
+
+def test_evidence_query_does_not_trade_away_semantic_band_for_diversity() -> None:
+    previous = _candidate(100, 120, 0.8)
+    ranked = rank_candidates(
+        [_candidate(100, 120, 0.70), _candidate(200, 220, 0.67)],
+        preferred_session_id=None,
+        source_note_id=None,
+        target_duration_seconds=None,
+        already_selected=[previous],
+        intent="evidence",
+    )
+    assert ranked[0].start_seconds == 100
+    assert ranked[1].score_components["semantic_band_penalty"] == 0.25
 
 
 def test_trusted_provenance_is_hierarchical_and_not_diversity_penalized() -> None:

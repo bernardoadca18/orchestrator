@@ -39,6 +39,11 @@ from app.services.visual_director_algorithm import (
     overlap_ratio,
     rank_candidates,
 )
+from app.services.visual_diversity import (
+    VisualDiversityPolicy,
+    VisualSourceWindow,
+    evaluate_visual_diversity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -279,14 +284,19 @@ class VisualDirectorService:
                 diagnostics=diagnostics,
             )
             plan = await self.repository.reload(plan)
-            if plan.status == "blocked" and scope is None:
-                diagnostics = {
-                    **(plan.diagnostics or {}),
-                    "error_category": "visual_plan_media_scope_missing",
-                }
+            if plan.status == "blocked":
+                diagnostics = dict(plan.diagnostics or {})
+                if scope is None:
+                    diagnostics["error_category"] = "visual_plan_media_scope_missing"
+                    message = "media scope is unavailable"
+                else:
+                    category = str(
+                        diagnostics.get("error_category") or "visual_plan_insufficient_diversity"
+                    )
+                    message = f"Visual Plan failed deterministic quality gate: {category}"
                 await self.repository.mark_blocked(
                     plan,
-                    "media scope is unavailable",
+                    message,
                     diagnostics=diagnostics,
                 )
                 plan = await self.repository.reload(plan)
@@ -484,6 +494,7 @@ class VisualDirectorService:
         }
         script_fingerprint = _sha256(script_value)
         scope_fingerprint = _sha256(scope.to_dict() if scope else None)
+        diversity_policy = self._diversity_policy()
         request = {
             "script_fingerprint": script_fingerprint,
             "narration_alignment_id": str(alignment.id) if alignment else None,
@@ -495,6 +506,17 @@ class VisualDirectorService:
                 "max_alternatives": self.config.visual_director_max_alternatives,
                 "min_semantic_score": self.config.visual_director_min_semantic_score,
                 "candidate_format": "visual_source_v1",
+                "media_search_strategy": (
+                    self.config.visual_director_media_search_strategy_version
+                ),
+                "diversity_policy": {
+                    "version": diversity_policy.version,
+                    "minimum_window_count": diversity_policy.minimum_window_count,
+                    "maximum_reuse_ratio": diversity_policy.maximum_reuse_ratio,
+                    "maximum_dominant_window_ratio": (
+                        diversity_policy.maximum_dominant_window_ratio
+                    ),
+                },
             },
         }
         return _sha256(request), script_fingerprint, scope_fingerprint
@@ -614,6 +636,7 @@ class VisualDirectorService:
                     source_note_id=item.source_note_id,
                     target_duration_seconds=item.target_duration_seconds,
                     already_selected=already_selected,
+                    intent=item.intent,
                 )
                 if (
                     ranked
@@ -694,6 +717,31 @@ class VisualDirectorService:
             if selected_scores
             else None,
         }
+        candidate_counts = [len(item.candidates) for item in resolutions]
+        if candidate_counts:
+            metrics.update(
+                {
+                    "candidate_count_min": min(candidate_counts),
+                    "candidate_count_avg": round(sum(candidate_counts) / len(candidate_counts), 6),
+                    "candidate_count_max": max(candidate_counts),
+                }
+            )
+        selected_windows = []
+        for decision in decisions:
+            source = decision.selected_source
+            if decision.source_resolution_status != "resolved" or not isinstance(source, dict):
+                continue
+            selected_windows.append(
+                VisualSourceWindow(
+                    session_id=str(source["session_id"]),
+                    media_id=str(source["media_id"]),
+                    start_seconds=float(source["source_start_seconds"]),
+                    end_seconds=float(source["source_end_seconds"]),
+                    explicitly_anchored=decision.selection_strategy == "preferred_provenance",
+                )
+            )
+        diversity = evaluate_visual_diversity(selected_windows, self._diversity_policy())
+        metrics.update(diversity.metrics)
         diagnostics = {
             "query_order": [str(item.id) for item in queries],
             "candidate_format_version": "visual_source_v1",
@@ -702,12 +750,19 @@ class VisualDirectorService:
                 "preferred_session_bonus": 0.05,
                 "source_note_bonus": 0.03,
                 "duration_fit_weight": 0.02,
-                "reuse_penalty_weight": 0.08,
+                "overlap_penalty_weight": 0.12,
+                "exact_reuse_penalty": 0.18,
+                "consecutive_exact_reuse_penalty": 0.08,
+                "evidence_semantic_band": 0.02,
             },
+            "visual_diversity": diversity.to_dict(),
         }
         failed = sum(item.source_resolution_status == "failed" for item in decisions)
         resolved = sum(item.source_resolution_status == "resolved" for item in decisions)
-        if not decisions or resolved == len(decisions):
+        if diversity.status == "failed":
+            status = "blocked"
+            diagnostics["error_category"] = diversity.reasons[0]
+        elif not decisions or resolved == len(decisions):
             status = "completed"
         elif failed == len(decisions):
             status = "failed"
@@ -716,6 +771,16 @@ class VisualDirectorService:
         else:
             status = "completed_with_gaps"
         return decisions, provenance, metrics, diagnostics, status
+
+    def _diversity_policy(self) -> VisualDiversityPolicy:
+        return VisualDiversityPolicy(
+            version=self.config.visual_diversity_policy_version,
+            minimum_window_count=self.config.visual_diversity_minimum_window_count,
+            maximum_reuse_ratio=self.config.visual_diversity_maximum_reuse_ratio,
+            maximum_dominant_window_ratio=(
+                self.config.visual_diversity_maximum_dominant_window_ratio
+            ),
+        )
 
     def _structurally_valid_preferred(self, item: QueryContext, scope: MediaScope | None) -> bool:
         if (
@@ -834,6 +899,13 @@ class VisualDirectorService:
     ) -> list[VisualCandidate]:
         candidates: list[VisualCandidate] = []
         for result_set in result_sets:
+            if (
+                result_set.strategy
+                != self.config.visual_director_media_search_strategy_version
+            ):
+                raise VisualDirectorInputError(
+                    "Media Search strategy is incompatible with Visual Director policy"
+                )
             if scope.project_id is not None and result_set.project_id != scope.project_id:
                 raise VisualDirectorInputError("Media Search returned another project")
             for item in result_set.results:

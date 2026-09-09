@@ -50,6 +50,7 @@ from app.services.production_qa_checks import (
     standard_local_checks,
 )
 from app.services.production_qa_policy import ProductionQAPolicy, resolve_qa_policy
+from app.services.visual_diversity import VisualDiversityPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +318,14 @@ class ProductionQAService:
                 render=upstream.render,
                 policy=upstream.policy,
                 render_profile=profile,
+                visual_diversity_policy=VisualDiversityPolicy(
+                    version=self.config.visual_diversity_policy_version,
+                    minimum_window_count=self.config.visual_diversity_minimum_window_count,
+                    maximum_reuse_ratio=self.config.visual_diversity_maximum_reuse_ratio,
+                    maximum_dominant_window_ratio=(
+                        self.config.visual_diversity_maximum_dominant_window_ratio
+                    ),
+                ),
                 profile_unavailable=profile_unavailable,
             )
             checks = standard_local_checks(inputs)

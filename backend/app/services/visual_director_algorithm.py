@@ -83,6 +83,8 @@ def score_candidate(
     source_note_id: UUID | None,
     target_duration_seconds: float | None,
     already_selected: list[VisualCandidate],
+    intent: str | None = None,
+    best_semantic_score: float | None = None,
 ) -> VisualCandidate:
     """Apply the documented weak bonuses and diversity penalty."""
     semantic = candidate.semantic_score or 0.0
@@ -100,12 +102,40 @@ def score_candidate(
     reuse_overlap = max(
         (overlap_ratio(candidate, previous) for previous in already_selected), default=0.0
     )
-    reuse_penalty = 0.08 * reuse_overlap
+    exact_reuse_count = sum(
+        overlap_ratio(candidate, previous) >= 0.95 for previous in already_selected
+    )
+    consecutive_exact_reuse = bool(
+        already_selected and overlap_ratio(candidate, already_selected[-1]) >= 0.95
+    )
+    source_note_anchored = bool(
+        source_note_id is not None and source_note_id in candidate.matched_note_ids
+    )
+    overlap_penalty = 0.12 * reuse_overlap
+    exact_reuse_penalty = min(0.36, 0.18 * exact_reuse_count)
+    consecutive_reuse_penalty = 0.08 if consecutive_exact_reuse else 0.0
+    if source_note_anchored:
+        overlap_penalty *= 0.25
+        exact_reuse_penalty *= 0.25
+        consecutive_reuse_penalty *= 0.25
+    reuse_penalty = overlap_penalty + exact_reuse_penalty + consecutive_reuse_penalty
+    semantic_band_penalty = 0.0
+    if (
+        intent == "evidence"
+        and best_semantic_score is not None
+        and best_semantic_score - semantic > 0.02
+    ):
+        semantic_band_penalty = 0.25
     score = max(
         0.0,
         min(
             1.0,
-            semantic + preferred_session_bonus + source_note_bonus + duration_fit - reuse_penalty,
+            semantic
+            + preferred_session_bonus
+            + source_note_bonus
+            + duration_fit
+            - reuse_penalty
+            - semantic_band_penalty,
         ),
     )
     return replace(
@@ -118,6 +148,11 @@ def score_candidate(
             "duration_fit_bonus": round(duration_fit, 6),
             "reuse_overlap": round(reuse_overlap, 6),
             "reuse_penalty": round(reuse_penalty, 6),
+            "exact_reuse_count": exact_reuse_count,
+            "exact_reuse_penalty": round(exact_reuse_penalty, 6),
+            "consecutive_reuse_penalty": round(consecutive_reuse_penalty, 6),
+            "source_note_anchored": source_note_anchored,
+            "semantic_band_penalty": semantic_band_penalty,
         },
     )
 
@@ -129,7 +164,11 @@ def rank_candidates(
     source_note_id: UUID | None,
     target_duration_seconds: float | None,
     already_selected: list[VisualCandidate],
+    intent: str | None = None,
 ) -> list[VisualCandidate]:
+    best_semantic_score = max(
+        (candidate.semantic_score or 0.0 for candidate in candidates), default=0.0
+    )
     scored = [
         score_candidate(
             candidate,
@@ -137,12 +176,15 @@ def rank_candidates(
             source_note_id=source_note_id,
             target_duration_seconds=target_duration_seconds,
             already_selected=already_selected,
+            intent=intent,
+            best_semantic_score=best_semantic_score,
         )
         for candidate in deduplicate_candidates(candidates)
     ]
     return sorted(
         scored,
         key=lambda item: (
+            bool((item.score_components or {}).get("semantic_band_penalty")),
             -item.selection_score,
             -(item.semantic_score or 0.0),
             str(item.session_id),
