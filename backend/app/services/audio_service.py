@@ -6,6 +6,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import time
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict
@@ -28,6 +29,10 @@ from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco, AudioBlocoTake
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_diagnostics import analyze_audio
+from app.services.block_materialization import (
+    active_block_is_current,
+    active_block_manifest,
+)
 from app.services.content_chunk_diagnostics import analyze_chunk_content
 from app.services.content_coverage import (
     ContentCoverageThresholds,
@@ -37,10 +42,14 @@ from app.services.content_coverage import (
 from app.services.mastering import MasteringConfig, MasteringError, master_narration
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.production_audio import (
+    AudioFileMetadata,
+    BlockAssemblyChunk,
+    BlockAssemblyManifest,
     ProductionAudioError,
     assemble_narration,
     inspect_wav,
     publish_source_block,
+    reassemble_block_from_manifest,
 )
 from app.services.pronunciation import PronunciationPreprocessor
 from app.services.text_normalization import PortugueseTextNormalizer
@@ -275,27 +284,49 @@ class AudioWorkflowService:
                     )
                     active_block = block
                     source_path = source_dir / f"block_{order:03d}_{identity[:12]}_source.wav"
-                    if (
-                        unchanged
-                        and not getattr(block, "requested_take_id", None)
-                        and self._can_reuse(block)
-                    ):
-                        assert block.audio_path is not None
-                        source_paths.append(Path(block.audio_path))
-                        existing_pauses = getattr(block, "pause_diagnostics", None)
-                        if isinstance(existing_pauses, dict) and isinstance(
-                            existing_pauses.get("pause_timeline"), list
-                        ):
-                            block_pause_timelines[order] = [
-                                item
-                                for item in existing_pauses["pause_timeline"]
-                                if isinstance(item, dict)
-                            ]
-                        logger.info(
-                            "reusing completed voice block",
-                            extra={"workflow_id": str(workflow.id), "block_order": order},
-                        )
-                        continue
+                    if unchanged and not getattr(block, "requested_take_id", None):
+                        block_is_current = False
+                        try:
+                            block_is_current = await active_block_is_current(
+                                self.session, block
+                            )
+                        except Exception:
+                            logger.exception(
+                                "active block manifest validation failed",
+                                extra={"block_id": str(block.id)},
+                            )
+                        if not block_is_current:
+                            chunks = await self.repo.listar_chunks(block.id)
+                            if chunks:
+                                source_path = await self._reconcile_active_block(
+                                    block, source_dir
+                                )
+                                source_paths.append(source_path)
+                                logger.warning(
+                                    "reconciled stale block from active physical chunks",
+                                    extra={
+                                        "workflow_id": str(workflow.id),
+                                        "block_order": order,
+                                    },
+                                )
+                                continue
+                        if block_is_current and self._can_reuse(block):
+                            assert block.audio_path is not None
+                            source_paths.append(Path(block.audio_path))
+                            existing_pauses = getattr(block, "pause_diagnostics", None)
+                            if isinstance(existing_pauses, dict) and isinstance(
+                                existing_pauses.get("pause_timeline"), list
+                            ):
+                                block_pause_timelines[order] = [
+                                    item
+                                    for item in existing_pauses["pause_timeline"]
+                                    if isinstance(item, dict)
+                                ]
+                            logger.info(
+                                "reusing completed voice block",
+                                extra={"workflow_id": str(workflow.id), "block_order": order},
+                            )
+                            continue
                     take = await self._ensure_take(block, identity, provenance.chunking_identity)
                     active_take = take
                     await self.repo.atualizar_bloco(
@@ -305,6 +336,7 @@ class AudioWorkflowService:
                     if hasattr(self.repo, "atualizar_take"):
                         await self.repo.atualizar_take(take.id, status="running")
                     while True:
+                        remote_job_started = time.monotonic()
                         try:
                             job = await self._obtain_remote_job(
                                 voice, block, pronunciation.synthesis_text
@@ -333,12 +365,15 @@ class AudioWorkflowService:
                             if hasattr(self.repo, "atualizar_take"):
                                 await self.repo.atualizar_take(take.id, status="running")
                             continue
+                        remote_job_seconds = time.monotonic() - remote_job_started
                         await self._persist_remote_job(block, completed, take)
+                        download_started = time.monotonic()
                         payload = await voice.download_audio(completed.id)
+                        remote_download_seconds = time.monotonic() - download_started
                         take_dir = source_dir / "takes"
                         take_dir.mkdir(parents=True, exist_ok=True)
                         source_path = take_dir / f"take_{take.id}.wav"
-                        metadata = publish_source_block(
+                        remote_metadata = publish_source_block(
                             payload,
                             source_path,
                             expected_sha256=completed.result_sha256,
@@ -350,6 +385,31 @@ class AudioWorkflowService:
                             expected_frame_count=completed.result_frame_count,
                             expected_riff_data_byte_size=(completed.result_riff_data_byte_size),
                         )
+                        (
+                            source_path,
+                            metadata,
+                            selected_chunk_take_ids,
+                            block_manifest,
+                            materialized_provider_metadata,
+                        ) = await self._materialize_remote_chunks(
+                            voice=voice,
+                            block=block,
+                            take=take,
+                            completed=completed,
+                            source_dir=source_dir,
+                            remote_source_path=source_path,
+                            remote_metadata=remote_metadata,
+                        )
+                        performance = materialized_provider_metadata.setdefault(
+                            "orchestrator_performance", {}
+                        )
+                        if isinstance(performance, dict):
+                            performance.update(
+                                {
+                                    "remote_job_seconds": remote_job_seconds,
+                                    "remote_full_download_seconds": remote_download_seconds,
+                                }
+                            )
                         provider_pauses = _provider_inserted_pauses(completed.metadata)
                         pause_diagnostics = analyze_audio(
                             source_path,
@@ -387,7 +447,7 @@ class AudioWorkflowService:
                                 audio_frame_count=metadata.frame_count,
                                 audio_subtype=metadata.subtype,
                                 artifact_integrity=asdict(metadata),
-                                provider_metadata=completed.metadata,
+                                provider_metadata=materialized_provider_metadata,
                                 content_quality=content_quality,
                                 pause_diagnostics=pause_diagnostics,
                                 quality_status=content_quality["status"],
@@ -493,12 +553,17 @@ class AudioWorkflowService:
                             audio_channels=metadata.channels,
                             audio_frame_count=metadata.frame_count,
                             audio_subtype=metadata.subtype,
-                            artifact_integrity=asdict(metadata),
-                            provider_metadata=completed.metadata,
+                            artifact_integrity=materialized_provider_metadata[
+                                "block_assembly"
+                            ],
+                            assembly_manifest_identity=block_manifest.identity,
+                            assembly_manifest=block_manifest.identity_payload(),
+                            provider_metadata=materialized_provider_metadata,
                             content_quality=content_quality,
                             pause_diagnostics=pause_diagnostics,
                             quality_status=content_quality["status"],
                             completed_at=dt.datetime.now(dt.UTC),
+                            chunk_take_ids=selected_chunk_take_ids,
                             block_fields={
                                 "status": "concluido",
                                 "audio_path": str(source_path),
@@ -509,7 +574,11 @@ class AudioWorkflowService:
                                 "audio_byte_size": metadata.byte_size,
                                 "audio_frame_count": metadata.frame_count,
                                 "audio_subtype": metadata.subtype,
-                                "artifact_integrity": asdict(metadata),
+                                "artifact_integrity": materialized_provider_metadata[
+                                    "block_assembly"
+                                ],
+                                "assembly_manifest_identity": block_manifest.identity,
+                                "assembly_manifest": block_manifest.identity_payload(),
                                 "pause_diagnostics": pause_diagnostics,
                                 "erro_mensagem": None,
                             },
@@ -530,82 +599,14 @@ class AudioWorkflowService:
                             audio_byte_size=metadata.byte_size,
                             audio_frame_count=metadata.frame_count,
                             audio_subtype=metadata.subtype,
-                            artifact_integrity=asdict(metadata),
+                            artifact_integrity=materialized_provider_metadata[
+                                "block_assembly"
+                            ],
+                            assembly_manifest_identity=block_manifest.identity,
+                            assembly_manifest=block_manifest.identity_payload(),
                             pause_diagnostics=pause_diagnostics,
                             erro_mensagem=None,
                         )
-                    # Persist chunk artifacts from Voice Service
-                    if hasattr(self.repo, "persistir_chunks"):
-                        try:
-                            chunks_metadata = completed.metadata.get("chunks", [])
-                            if chunks_metadata:
-                                chunk_artifacts = await voice.list_chunks(completed.id)
-                                if len(chunk_artifacts) != len(chunks_metadata):
-                                    raise ProductionAudioError(
-                                        "Voice Service did not return every physical chunk"
-                                    )
-                                chunks_root = source_dir / "chunks"
-                                chunks_root.mkdir(parents=True, exist_ok=True)
-                                chunks_data = []
-                                for artifact in chunk_artifacts:
-                                    chunk_index = artifact["chunk_index"]
-                                    chunk_audio = await voice.download_chunk_audio(
-                                        completed.id, chunk_index
-                                    )
-                                    chunk_path = (
-                                        chunks_root
-                                        / f"chunk_{chunk_index:04d}_{take.id}.wav"
-                                    )
-                                    chunk_metadata = publish_source_block(
-                                        chunk_audio,
-                                        chunk_path,
-                                        expected_sha256=artifact.get("sha256"),
-                                        expected_byte_size=artifact.get("byte_size"),
-                                        expected_duration_seconds=artifact.get(
-                                            "duration_seconds"
-                                        ),
-                                        expected_sample_rate=artifact.get("sample_rate"),
-                                        expected_frame_count=artifact.get("frame_count"),
-                                    )
-                                    chunks_data.append({
-                                        "chunk_index": chunk_index,
-                                        "chunk_id": artifact["chunk_id"],
-                                        "text": artifact.get("text", ""),
-                                        "synthesis_text": artifact.get("synthesis_text", ""),
-                                        "start_char": artifact["start_char"],
-                                        "end_char": artifact["end_char"],
-                                        "boundary": artifact["boundary"],
-                                        "pause_after_frames": artifact[
-                                            "pause_after_frames"
-                                        ],
-                                        "chunking_identity": artifact["chunking_identity"],
-                                        "chunking_strategy_version": artifact[
-                                            "chunking_strategy_version"
-                                        ],
-                                        "voice_profile_identity": artifact[
-                                            "voice_identity"
-                                        ],
-                                        "generation_profile_identity": artifact[
-                                            "generation_identity"
-                                        ],
-                                        "source_job_id": completed.id,
-                                        "seed": artifact["seed"],
-                                        "duration_seconds": chunk_metadata.duration_seconds,
-                                        "sample_rate": chunk_metadata.sample_rate,
-                                        "audio_path": str(chunk_path),
-                                        "audio_sha256": chunk_metadata.sha256,
-                                        "audio_byte_size": chunk_metadata.byte_size,
-                                        "audio_frame_count": chunk_metadata.frame_count,
-                                    })
-                                if chunks_data:
-                                    await self.repo.persistir_chunks(block.id, chunks_data)
-                        except Exception:
-                            logger.exception(
-                                "failed to persist chunk artifacts",
-                                extra={"block_id": str(block.id), "job_id": completed.id},
-                            )
-                            raise
-
                     source_paths.append(source_path)
                     block_pause_timelines[order] = [
                         item
@@ -617,12 +618,14 @@ class AudioWorkflowService:
 
             await self.repo.atualizar_status(workflow.id, "gerando_audio", audio_phase="assembling")
             assembled_path = working_dir / "narration_assembled.wav"
+            final_assembly_started = time.monotonic()
             assembly = assemble_narration(
                 source_paths,
                 assembled_path,
                 sample_rate=self.config.audio_final_sample_rate,
                 silence_ms=self.config.silencio_entre_blocos_ms,
             )
+            final_assembly_seconds = time.monotonic() - final_assembly_started
             for offset in assembly.offsets:
                 offset_block = await self.repo.obter_bloco_por_ordem(workflow.id, offset.order)
                 if offset_block is not None:
@@ -670,7 +673,9 @@ class AudioWorkflowService:
             await self.repo.atualizar_status(workflow.id, "gerando_audio", audio_phase="mastering")
             final_path = root / "narration_final.wav"
             mastering_config = _mastering_config(self.config)
+            mastering_started = time.monotonic()
             mastered = master_narration(assembled_path, final_path, mastering_config)
+            mastering_seconds = time.monotonic() - mastering_started
             if (
                 abs(mastered.metadata.duration_seconds - assembly.metadata.duration_seconds)
                 > self.config.audio_duration_tolerance_seconds
@@ -754,6 +759,10 @@ class AudioWorkflowService:
                     "diagnostics": final_diagnostics,
                 },
                 "inserted_pause_count": len(inserted_final_pauses),
+                "orchestrator_performance": {
+                    "final_assembly_seconds": final_assembly_seconds,
+                    "mastering_seconds": mastering_seconds,
+                },
                 "blocks": manifest_blocks,
             }
             script_duration_contract = (workflow.roteiro_snapshot or {}).get("duration_contract")
@@ -924,6 +933,197 @@ class AudioWorkflowService:
                 audio_phase="failed",
                 erro_mensagem=str(exc),
             )
+
+    async def _reconcile_active_block(
+        self, block: AudioBloco, source_dir: Path
+    ) -> Path:
+        manifest = await active_block_manifest(self.session, block)
+        destination = (
+            source_dir
+            / "materialized"
+            / f"block_{block.ordem:03d}_{manifest.identity[:16]}.wav"
+        )
+        assembly = reassemble_block_from_manifest(manifest, destination)
+        if assembly.integrity is None:
+            raise ProductionAudioError("block reconciliation returned no integrity proof")
+        metadata = assembly.metadata
+        await self.repo.publicar_assembly_chunks_ativos(
+            bloco_id=block.id,
+            audio_path=str(destination),
+            audio_duration_seconds=metadata.duration_seconds,
+            audio_sha256=metadata.sha256,
+            audio_byte_size=metadata.byte_size,
+            audio_sample_rate=metadata.sample_rate,
+            audio_channels=metadata.channels,
+            audio_frame_count=metadata.frame_count,
+            audio_subtype=metadata.subtype,
+            artifact_integrity=assembly.integrity,
+            assembly_manifest_identity=manifest.identity,
+            assembly_manifest=manifest.identity_payload(),
+            reason="stale_or_missing_active_chunk_manifest",
+        )
+        return destination
+
+    async def _materialize_remote_chunks(
+        self,
+        *,
+        voice: VoiceClient,
+        block: AudioBloco,
+        take: AudioBlocoTake,
+        completed: VoiceNarrationJob,
+        source_dir: Path,
+        remote_source_path: Path,
+        remote_metadata: AudioFileMetadata,
+    ) -> tuple[
+        Path,
+        AudioFileMetadata,
+        list[uuid.UUID],
+        BlockAssemblyManifest,
+        dict[str, object],
+    ]:
+        """Persist, assemble, and prove one remote job's physical chunks.
+
+        The remote full-job WAV is retained for forensics only. It never becomes
+        the published AudioBloco once durable physical chunks are available.
+        """
+        chunks_metadata = completed.metadata.get("chunks")
+        if not isinstance(chunks_metadata, list) or not chunks_metadata:
+            raise ProductionAudioError("Voice Service returned no physical chunk provenance")
+        chunk_download_started = time.monotonic()
+        chunk_artifacts = await voice.list_chunks(completed.id)
+        if len(chunk_artifacts) != len(chunks_metadata):
+            raise ProductionAudioError("Voice Service did not return every physical chunk")
+        ordered_artifacts = sorted(chunk_artifacts, key=lambda item: int(item["chunk_index"]))
+        chunks_root = source_dir / "chunks"
+        chunks_root.mkdir(parents=True, exist_ok=True)
+        chunks_data: list[dict[str, object]] = []
+        for expected_index, artifact in enumerate(ordered_artifacts):
+            chunk_index = int(artifact["chunk_index"])
+            if chunk_index != expected_index:
+                raise ProductionAudioError("Voice Service chunk ordering is not contiguous")
+            chunk_audio = await voice.download_chunk_audio(completed.id, chunk_index)
+            chunk_path = chunks_root / f"chunk_{chunk_index:04d}_{take.id}.wav"
+            chunk_metadata = publish_source_block(
+                chunk_audio,
+                chunk_path,
+                expected_sha256=artifact.get("sha256"),
+                expected_byte_size=artifact.get("byte_size"),
+                expected_duration_seconds=artifact.get("duration_seconds"),
+                expected_sample_rate=artifact.get("sample_rate"),
+                expected_channels=artifact.get("channels"),
+                expected_subtype=artifact.get("subtype"),
+                expected_frame_count=artifact.get("frame_count"),
+            )
+            chunks_data.append(
+                {
+                    "chunk_index": chunk_index,
+                    "chunk_id": artifact["chunk_id"],
+                    "text": artifact.get("text", ""),
+                    "synthesis_text": artifact.get("synthesis_text", ""),
+                    "start_char": artifact["start_char"],
+                    "end_char": artifact["end_char"],
+                    "boundary": artifact["boundary"],
+                    "pause_after_frames": artifact["pause_after_frames"],
+                    "chunking_identity": artifact["chunking_identity"],
+                    "chunking_strategy_version": artifact["chunking_strategy_version"],
+                    "voice_profile_identity": artifact["voice_identity"],
+                    "generation_profile_identity": artifact["generation_identity"],
+                    "source_job_id": completed.id,
+                    "seed": artifact["seed"],
+                    "duration_seconds": chunk_metadata.duration_seconds,
+                    "sample_rate": chunk_metadata.sample_rate,
+                    "audio_path": str(chunk_path),
+                    "audio_sha256": chunk_metadata.sha256,
+                    "audio_byte_size": chunk_metadata.byte_size,
+                    "audio_frame_count": chunk_metadata.frame_count,
+                    "audio_channels": chunk_metadata.channels,
+                    "audio_subtype": chunk_metadata.subtype,
+                    "artifact_integrity": asdict(chunk_metadata),
+                    "requested_language": self.config.voice_language,
+                    "resolved_language": completed.metadata.get(
+                        "language", self.config.voice_language
+                    ),
+                    "speaker_similarity": artifact.get("speaker_similarity"),
+                    "speaker_similarity_reference_identity": artifact.get(
+                        "speaker_similarity_reference_identity"
+                    ),
+                    "speaker_similarity_policy_version": artifact.get(
+                        "speaker_similarity_policy_version"
+                    ),
+                    "speaker_identity_status": artifact.get(
+                        "speaker_identity_status"
+                    ),
+                    "speaker_embedding_seconds": artifact.get(
+                        "speaker_embedding_seconds"
+                    ),
+                }
+            )
+        physical_chunk_download_seconds = time.monotonic() - chunk_download_started
+        try:
+            persistence_started = time.monotonic()
+            selections = await self.repo.persistir_job_chunks(
+                block.id, chunks_data, promote=False
+            )
+            chunk_persistence_seconds = time.monotonic() - persistence_started
+        except Exception:
+            logger.exception(
+                "failed to persist physical chunk takes",
+                extra={"block_id": str(block.id), "job_id": completed.id},
+            )
+            raise
+        manifest_chunks: list[BlockAssemblyChunk] = []
+        selected_ids: list[uuid.UUID] = []
+        for (chunk, selected), chunk_data in zip(selections, chunks_data, strict=True):
+            if not selected.audio_path or not selected.audio_sha256:
+                raise ProductionAudioError("persisted physical chunk take is incomplete")
+            manifest_chunks.append(
+                BlockAssemblyChunk(
+                    chunk_id=str(chunk.id),
+                    chunk_index=chunk.chunk_index,
+                    current_take_id=str(selected.id),
+                    audio_path=Path(selected.audio_path),
+                    audio_sha256=selected.audio_sha256,
+                    frame_count=int(selected.audio_frame_count or 0),
+                    sample_rate=int(selected.audio_sample_rate or 0),
+                    channels=int(selected.audio_channels or 0),
+                    subtype=str(selected.audio_subtype or ""),
+                    pause_after_frames=int(cast(int, chunk_data["pause_after_frames"])),
+                )
+            )
+            selected_ids.append(selected.id)
+        manifest = BlockAssemblyManifest(
+            block_id=str(block.id),
+            block_order=block.ordem,
+            chunks=tuple(manifest_chunks),
+        )
+        destination = (
+            source_dir
+            / "materialized"
+            / f"block_{block.ordem:03d}_{manifest.identity[:16]}.wav"
+        )
+        assembly = reassemble_block_from_manifest(manifest, destination)
+        if assembly.integrity is None:
+            raise ProductionAudioError("block assembly returned no integrity proof")
+        provider_metadata: dict[str, object] = {
+            **completed.metadata,
+            "requested_language": self.config.voice_language,
+            "resolved_language": completed.metadata.get(
+                "language", self.config.voice_language
+            ),
+            "remote_full_artifact": {
+                "path": str(remote_source_path),
+                **asdict(remote_metadata),
+            },
+            "block_assembly": assembly.integrity,
+            "assembly_manifest": manifest.identity_payload(),
+            "assembly_manifest_identity": manifest.identity,
+            "orchestrator_performance": {
+                "physical_chunk_download_seconds": physical_chunk_download_seconds,
+                "chunk_persistence_seconds": chunk_persistence_seconds,
+                **(assembly.timings or {}),
+            },
+        }
+        return destination, assembly.metadata, selected_ids, manifest, provider_metadata
 
     async def _ensure_take(
         self, block: AudioBloco, synthesis_identity: str, chunking_identity: str

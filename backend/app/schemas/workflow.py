@@ -69,6 +69,8 @@ class AudioBlocoTakeOut(BaseModel):
     audio_subtype: str | None
     quality_status: str | None
     artifact_integrity: dict | None
+    assembly_manifest_identity: str | None = None
+    assembly_manifest: dict | None = None
     provider_metadata: dict | None
     content_quality: dict | None
     pause_diagnostics: dict | None
@@ -108,6 +110,8 @@ class AudioBlocoOut(BaseModel):
     audio_frame_count: int | None
     audio_subtype: str | None
     artifact_integrity: dict | None
+    assembly_manifest_identity: str | None = None
+    assembly_manifest: dict | None = None
     pause_diagnostics: dict | None
     narration_start_seconds: float | None
     narration_end_seconds: float | None

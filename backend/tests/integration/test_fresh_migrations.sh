@@ -49,7 +49,7 @@ revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestra
     "SELECT version_num FROM alembic_version;")"
 column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_blocos' AND column_name IN ('text_normalizer_version','text_normalizer_identity','initial_resolved_seed','retry_seed_strategy','generation_attempt_history','current_take_id','requested_take_id','voice_chunking_identity','pronunciation_replacements','normalized_text');")"
-test "${revision}" = "016"
+test "${revision}" = "017"
 test "${column_count}" = "10"
 take_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='audio_bloco_takes';")"
@@ -81,6 +81,12 @@ test "${audio_edit_update_table_count}" = "1"
 chunk_edit_take_kind_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM pg_constraint WHERE conname='ck_audio_bloco_take_kind' AND pg_get_constraintdef(oid) LIKE '%chunk_edit_reassembly%';")"
 test "${chunk_edit_take_kind_count}" = "1"
+assembly_manifest_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='audio_blocos' AND column_name IN ('assembly_manifest_identity','assembly_manifest')) OR (table_name='audio_bloco_takes' AND column_name IN ('assembly_manifest_identity','assembly_manifest')));")"
+test "${assembly_manifest_column_count}" = "4"
+chunk_take_provenance_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_chunk_takes' AND column_name IN ('audio_channels','audio_subtype','source_job_id','artifact_integrity','provider_metadata','speaker_similarity','speaker_similarity_reference_identity','speaker_similarity_policy_version','speaker_identity_status');")"
+test "${chunk_take_provenance_count}" = "9"
 
 docker run --rm \
     --network "${network_name}" \
@@ -105,9 +111,9 @@ docker run --rm \
     alembic upgrade head
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT version_num FROM alembic_version;")"
-test "${revision}" = "016"
+test "${revision}" = "017"
 historical_take_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM audio_bloco_takes WHERE id='00000000-0000-0000-0000-000000000005' AND status='completed' AND canonical_text IS NULL AND normalized_text IS NULL AND synthesis_text IS NULL AND pronunciation_glossary_identity IS NULL AND pronunciation_replacements IS NULL AND text_normalizer_version IS NULL AND text_normalizer_identity IS NULL AND audio_sample_rate IS NULL AND audio_channels IS NULL AND audio_frame_count IS NULL AND audio_subtype IS NULL AND quality_status IS NULL AND artifact_integrity IS NULL AND provider_metadata IS NULL AND content_quality IS NULL AND pause_diagnostics IS NULL;")"
 test "${historical_take_count}" = "1"
 
-echo "Fresh/reversible Orchestrator migrations passed: 001 -> 016 -> 012 -> 016"
+echo "Fresh/reversible Orchestrator migrations passed: 001 -> 017 -> 012 -> 017"

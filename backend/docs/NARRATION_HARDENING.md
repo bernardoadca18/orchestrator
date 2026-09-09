@@ -8,11 +8,36 @@ bytes, sample rate, channels, frames, subtype and sample-derived duration. Final
 expected frames, decoded physical duration and the values read back from PostgreSQL before the
 workflow can become `audio_concluido`.
 
+Editorial blocks remain at Qwen's native 24 kHz. Their sole source is the ordered active
+`AudioChunkTake` selection. `orchestrator_native_pcm16_block_v1` hashes a canonical manifest of
+block/order, chunk/take IDs, source SHA/frame/rate/format and frozen pause frames. The assembler
+copies decoded PCM16 without gain or resampling, verifies every chunk output range by PCM hash and
+every pause as exact zeros, then validates and atomically publishes the block. Only complete final
+narration assembly resamples once to 48 kHz. A remote full-job WAV is retained only as forensic
+provenance and is never published as the block after physical chunks exist.
+
 The final and block endpoints reconcile the active file against durable metadata on every request.
 They support full GET, HEAD and Starlette byte ranges (including suffix/tail requests), publish a
-SHA ETag and require cache revalidation. An inconsistent current-take pointer or replaced/truncated
-file returns conflict instead of partial or stale audio. The frontend includes the current SHA in
-the URL and remounts the player when that identity changes.
+SHA ETag and require cache revalidation for mutable block/final URLs. UUID-addressed physical takes
+and candidates use immutable caching. An inconsistent current-take pointer, stale assembly manifest
+or replaced/truncated file returns conflict instead of partial or stale audio. The frontend
+includes the current SHA in the URL and remounts the player when that identity changes.
+
+## Speaker identity diagnostics
+
+Content ASR and speaker identity are independent. Qwen reuses its already loaded speaker encoder
+to attach `speaker_similarity`, reference identity, policy version and
+`passed | warning | unavailable` to every physical chunk/candidate; the Orchestrator persists these
+values and block summaries. Calibration on incident data found known-good chunks at approximately
+`0.988–0.994`, while two suspect chunks scored `0.968901` and `0.980853`. A suspect full block still
+scored `0.994105`, so whole-block similarity is not a safe acceptance gate. Policy
+`qwen_ecapa_warning_v1` uses `0.985` as a chunk-level warning only. Automatic blocking is deferred
+until a broader labeled corpus has clean separation; warnings require operator listening.
+
+Lightweight performance metadata separates remote-job wait, full/chunk download, chunk
+persistence, block write/validation/atomic publication, final assembly and mastering. These
+monotonic durations live in existing take/workflow diagnostic JSON; no monitoring service or
+background worker was added.
 
 Take ASR validation compares the actual synthesis text—not canonical editorial text—with the
 generated source WAV before promotion. Comparison-only normalization expands equivalent numeric

@@ -14,6 +14,11 @@ loudness, true peak, checksum and source immutability. Provenance includes input
 profile and implementation versions, FFmpeg version, identity, processing time and before/after
 metrics (LUFS, LRA, sample/true peak, RMS, crest, DC, silence and physical format).
 
+This optional experiment is downstream of canonical assembly. Physical chunks and editorial
+blocks remain native 24 kHz and receive no gain, crossfade or resampling; complete narration
+assembly performs the one 48 kHz conversion. Neither this experiment nor gain-only production
+mastering can establish or repair speaker identity.
+
 Plan and run:
 
 ```bash

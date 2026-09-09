@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import io
 import uuid
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+import app.services.audio_service as audio_service_module
 from app.clients.voice_client import (
     GenerationProfileDescriptor,
     VoiceNarrationJob,
@@ -28,11 +32,22 @@ from app.services.transcription_service import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _fake_manifest_verifier(monkeypatch):
+    async def verify(_session, block):
+        path = getattr(block, "audio_path", None)
+        identity = getattr(block, "assembly_manifest_identity", None)
+        return bool(path and identity and Path(path).is_file())
+
+    monkeypatch.setattr(audio_service_module, "active_block_is_current", verify)
+
+
 class FakeRepository:
     def __init__(self, workflow) -> None:
         self.workflow = workflow
         self.blocks: dict[int, SimpleNamespace] = {}
         self.transcription = None
+        self.physical_chunks: dict[uuid.UUID, list[SimpleNamespace]] = {}
 
     async def obter_por_id(self, workflow_id, **kwargs):
         return self.workflow if workflow_id == self.workflow.id else None
@@ -100,15 +115,47 @@ class FakeRepository:
         self.transcription = SimpleNamespace(**fields)
         return self.transcription
 
+    async def listar_chunks(self, block_id):
+        return self.physical_chunks.get(block_id, [])
+
+    async def persistir_job_chunks(self, block_id, chunks_data, *, promote=False):
+        selections = []
+        chunks = []
+        for values in chunks_data:
+            chunk = SimpleNamespace(
+                id=uuid.uuid4(),
+                audio_bloco_id=block_id,
+                chunk_index=values["chunk_index"],
+                current_take_id=None,
+                pause_after_frames=values["pause_after_frames"],
+            )
+            take = SimpleNamespace(
+                id=uuid.uuid4(),
+                audio_chunk_id=chunk.id,
+                status="completed",
+                audio_path=values["audio_path"],
+                audio_sha256=values["audio_sha256"],
+                audio_frame_count=values["audio_frame_count"],
+                audio_sample_rate=values["sample_rate"],
+                audio_channels=values["audio_channels"],
+                audio_subtype=values["audio_subtype"],
+            )
+            if promote:
+                chunk.current_take_id = take.id
+            chunks.append(chunk)
+            selections.append((chunk, take))
+        self.physical_chunks[block_id] = chunks
+        return selections
+
 
 class ChunkPersistingRepository(FakeRepository):
     def __init__(self, workflow) -> None:
         super().__init__(workflow)
         self.persisted_chunks: list[tuple[uuid.UUID, list[dict]]] = []
 
-    async def persistir_chunks(self, block_id, chunks_data):
+    async def persistir_job_chunks(self, block_id, chunks_data, *, promote=False):
         self.persisted_chunks.append((block_id, chunks_data))
-        return []
+        return await super().persistir_job_chunks(block_id, chunks_data, promote=promote)
 
 class FakeVoiceClient:
     def __init__(self, audio: bytes) -> None:
@@ -143,6 +190,15 @@ class FakeVoiceClient:
         self.created.append(payload)
         seed = payload.get("seed") or (1000 + len(self.created))
         job = _job(f"job-{len(self.created)}", seed)
+        job = job.model_copy(
+            update={
+                "metadata": {
+                    **job.metadata,
+                    "chunks": [{"index": 0}],
+                    "language": "Portuguese",
+                }
+            }
+        )
         self.jobs[job.id] = job
         return job.model_copy(update={"status": "queued"})
 
@@ -153,6 +209,42 @@ class FakeVoiceClient:
         return self.jobs[job_id]
 
     async def download_audio(self, job_id):
+        return self.audio
+
+    async def list_chunks(self, job_id):
+        with wave.open(io.BytesIO(self.audio), "rb") as wav:
+            frame_count = wav.getnframes()
+            sample_rate = wav.getframerate()
+            channels = wav.getnchannels()
+        text = self.created[int(job_id.rsplit("-", 1)[1]) - 1]["text"]
+        return [
+            {
+                "chunk_id": f"{job_id}_0000",
+                "job_id": job_id,
+                "chunk_index": 0,
+                "text": text,
+                "synthesis_text": text,
+                "start_char": 0,
+                "end_char": len(text),
+                "boundary": "sentence",
+                "pause_after_frames": 0,
+                "chunking_identity": "chunk-v1",
+                "chunking_strategy_version": "qwen3-tts-chunking-v2",
+                "voice_identity": "v" * 64,
+                "generation_identity": "g" * 64,
+                "seed": self.jobs[job_id].resolved_seed,
+                "duration_seconds": frame_count / sample_rate,
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "subtype": "PCM_16",
+                "byte_size": len(self.audio),
+                "sha256": hashlib.sha256(self.audio).hexdigest(),
+                "frame_count": frame_count,
+            }
+        ]
+
+    async def download_chunk_audio(self, job_id, chunk_index):
+        assert chunk_index == 0
         return self.audio
 
 

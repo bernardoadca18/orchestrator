@@ -101,13 +101,20 @@ async def test_regeneration_persists_exact_candidate_without_changing_current_ta
                 "sample_rate": metadata.sample_rate,
                 "duration_seconds": metadata.duration_seconds,
                 "frame_count": metadata.frame_count,
+                "language": "Portuguese",
+                "speaker_similarity": 0.991,
+                "speaker_similarity_reference_identity": "r" * 64,
+                "speaker_similarity_policy_version": "qwen_ecapa_warning_v1",
+                "speaker_identity_status": "passed",
             }
 
         async def download_chunk_candidate_audio(self, job_id, candidate_id):
             self.downloaded.append((job_id, candidate_id))
             return candidate_bytes
 
-    config = SimpleNamespace(audio_storage_path=str(tmp_path / "audio"))
+    config = SimpleNamespace(
+        audio_storage_path=str(tmp_path / "audio"), voice_language="Portuguese"
+    )
     with (
         patch(
             "app.api.routers.workflow.WorkflowRepository",
@@ -131,6 +138,8 @@ async def test_regeneration_persists_exact_candidate_without_changing_current_ta
     assert chunk.current_take_id == current_take_id
     assert take.status == "completed"
     assert take.provider_candidate_id == "b" * 32
+    assert take.speaker_similarity == pytest.approx(0.991)
+    assert take.speaker_identity_status == "passed"
     stored = Path(take.audio_path)
     assert stored.read_bytes() == candidate_bytes
     assert stored.name == f"chunk_0003_take_{candidate_take_id}.wav"

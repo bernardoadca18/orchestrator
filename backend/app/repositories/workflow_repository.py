@@ -635,6 +635,7 @@ class WorkflowRepository:
 
     async def promover_take(self, bloco_id: uuid.UUID, take_id: uuid.UUID, **campos) -> bool:
         block_fields = campos.pop("block_fields", None)
+        chunk_take_ids = campos.pop("chunk_take_ids", None)
         bloco = (
             await self.session.execute(
                 select(AudioBloco).where(AudioBloco.id == bloco_id).with_for_update()
@@ -652,6 +653,54 @@ class WorkflowRepository:
             previous = await self.obter_take(bloco.current_take_id)
             if previous is not None:
                 previous.is_current = False
+        if chunk_take_ids is not None:
+            selected_ids = [uuid.UUID(str(item)) for item in chunk_take_ids]
+            chunks = list(
+                (
+                    await self.session.execute(
+                        select(AudioChunk)
+                        .where(AudioChunk.audio_bloco_id == bloco.id)
+                        .order_by(AudioChunk.chunk_index)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalars()
+            )
+            if len(chunks) != len(selected_ids) or not chunks:
+                raise ValueError("physical chunk selection is incomplete")
+            for chunk, selected_id in zip(chunks, selected_ids, strict=True):
+                selected = (
+                    await self.session.execute(
+                        select(AudioChunkTake)
+                        .where(AudioChunkTake.id == selected_id)
+                        .with_for_update()
+                        .execution_options(populate_existing=True)
+                    )
+                ).scalar_one_or_none()
+                if (
+                    selected is None
+                    or selected.audio_chunk_id != chunk.id
+                    or selected.status not in {"completed", "superseded"}
+                    or not selected.audio_path
+                    or not selected.audio_sha256
+                ):
+                    raise ValueError("physical chunk take cannot be promoted")
+                if chunk.current_take_id is not None and chunk.current_take_id != selected.id:
+                    previous_chunk_take = await self.session.get(
+                        AudioChunkTake, chunk.current_take_id
+                    )
+                    if (
+                        previous_chunk_take is not None
+                        and previous_chunk_take.status == "completed"
+                    ):
+                        previous_chunk_take.status = "superseded"
+                selected.status = "completed"
+                chunk.current_take_id = selected.id
+                chunk.status = "active"
+                chunk.source_job_id = selected.source_job_id or chunk.source_job_id
+                chunk.seed = selected.seed
+                chunk.duration_seconds = selected.audio_duration_seconds
+                chunk.sample_rate = selected.audio_sample_rate
         for chave, valor in campos.items():
             setattr(take, chave, valor)
         take.status = "completed"
@@ -665,6 +714,126 @@ class WorkflowRepository:
         await self.session.refresh(bloco)
         await self.session.refresh(take)
         return True
+
+    async def publicar_assembly_chunks_ativos(
+        self,
+        *,
+        bloco_id: uuid.UUID,
+        audio_path: str,
+        audio_duration_seconds: float,
+        audio_sha256: str,
+        audio_byte_size: int,
+        audio_sample_rate: int,
+        audio_channels: int,
+        audio_frame_count: int,
+        audio_subtype: str,
+        artifact_integrity: dict[str, object],
+        assembly_manifest_identity: str,
+        assembly_manifest: dict[str, object],
+        reason: str,
+    ) -> AudioBlocoTake:
+        """Atomically publish an assembly iff its selected takes are still active."""
+        bloco = (
+            await self.session.execute(
+                select(AudioBloco)
+                .where(AudioBloco.id == bloco_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one()
+        raw_chunks = assembly_manifest.get("chunks")
+        if not isinstance(raw_chunks, list) or not raw_chunks:
+            raise ValueError("assembly manifest has no chunks")
+        chunks = list(
+            (
+                await self.session.execute(
+                    select(AudioChunk)
+                    .where(AudioChunk.audio_bloco_id == bloco.id)
+                    .order_by(AudioChunk.chunk_index)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalars()
+        )
+        if len(chunks) != len(raw_chunks):
+            raise ValueError("active chunk count changed before assembly publication")
+        for chunk, selected in zip(chunks, raw_chunks, strict=True):
+            if (
+                not isinstance(selected, dict)
+                or str(chunk.id) != selected.get("chunk_id")
+                or str(chunk.current_take_id) != selected.get("current_take_id")
+                or chunk.chunk_index != selected.get("chunk_index")
+            ):
+                raise ValueError("active chunk selection changed before assembly publication")
+        previous: AudioBlocoTake | None = None
+        if bloco.current_take_id is not None:
+            previous = await self.obter_take(bloco.current_take_id)
+            if previous is not None:
+                previous.is_current = False
+                if previous.status == "completed":
+                    previous.status = "superseded"
+        max_attempt = (
+            await self.session.execute(
+                select(func.max(AudioBlocoTake.attempt_index)).where(
+                    AudioBlocoTake.audio_bloco_id == bloco.id
+                )
+            )
+        ).scalar_one()
+        now = dt.datetime.now(dt.UTC)
+        take = AudioBlocoTake(
+            audio_bloco_id=bloco.id,
+            attempt_index=(max_attempt if max_attempt is not None else -1) + 1,
+            kind="chunk_edit_reassembly",
+            status="completed",
+            request_key=f"block-assembly:{bloco.id}:{assembly_manifest_identity}",
+            idempotency_key=f"block-assembly:{bloco.id}:{assembly_manifest_identity}",
+            model_id=bloco.model_id,
+            model_revision=bloco.model_revision,
+            chunking_identity=bloco.voice_chunking_identity,
+            synthesis_identity=bloco.synthesis_identity,
+            **_take_text_provenance(bloco),
+            audio_path=audio_path,
+            audio_duration_seconds=audio_duration_seconds,
+            audio_sha256=audio_sha256,
+            audio_byte_size=audio_byte_size,
+            audio_sample_rate=audio_sample_rate,
+            audio_channels=audio_channels,
+            audio_frame_count=audio_frame_count,
+            audio_subtype=audio_subtype,
+            artifact_integrity=artifact_integrity,
+            assembly_manifest_identity=assembly_manifest_identity,
+            assembly_manifest=assembly_manifest,
+            provider_metadata={
+                "source": "active_audio_chunk_takes",
+                "reason": reason,
+                "assembly_manifest_identity": assembly_manifest_identity,
+                "selected_take_ids": [item["current_take_id"] for item in raw_chunks],
+                "block_assembly": artifact_integrity,
+            },
+            is_current=True,
+            completed_at=now,
+        )
+        self.session.add(take)
+        await self.session.flush()
+        bloco.current_take_id = take.id
+        bloco.requested_take_id = None
+        bloco.status = "concluido"
+        bloco.audio_path = audio_path
+        bloco.duracao_segundos = audio_duration_seconds
+        bloco.audio_sha256 = audio_sha256
+        bloco.audio_byte_size = audio_byte_size
+        bloco.audio_sample_rate = audio_sample_rate
+        bloco.audio_channels = audio_channels
+        bloco.audio_frame_count = audio_frame_count
+        bloco.audio_subtype = audio_subtype
+        bloco.artifact_integrity = artifact_integrity
+        bloco.assembly_manifest_identity = assembly_manifest_identity
+        bloco.assembly_manifest = assembly_manifest
+        bloco.audio_materialized_revision = bloco.audio_edit_revision
+        bloco.erro_mensagem = None
+        await self.session.commit()
+        await self.session.refresh(take)
+        return take
 
     async def obter_blocos_orfaos(self) -> Sequence[AudioBloco]:
         """Retorna blocos com status 'gerando' cujo workflow não está concluído nem cancelado."""
@@ -751,17 +920,39 @@ class WorkflowRepository:
         Returns:
             List of persisted AudioChunk objects with their initial takes
         """
+        selections = await self.persistir_job_chunks(
+            bloco_id, chunks_data, promote=True
+        )
+        return [chunk for chunk, _take in selections]
+
+    async def persistir_job_chunks(
+        self,
+        bloco_id: uuid.UUID,
+        chunks_data: list[dict],
+        *,
+        promote: bool,
+    ) -> list[tuple[AudioChunk, AudioChunkTake]]:
+        """Persist one Qwen job's chunks without silently reusing an older job.
+
+        With ``promote=False`` the immutable physical takes are durable but do not
+        become active. The caller can validate a block assembly first and promote
+        every chunk together with the block-level take in one database transaction.
+        """
         bloco = await self.obter_bloco_por_id(bloco_id)
         if bloco is None:
             raise LookupError("audio block not found")
+        if not chunks_data:
+            raise ValueError("physical chunk set is empty")
+        ordered_data = sorted(chunks_data, key=lambda item: int(item["chunk_index"]))
+        indexes = [int(item["chunk_index"]) for item in ordered_data]
+        if len(set(indexes)) != len(indexes):
+            raise ValueError("physical chunk indexes are duplicated")
+        existing = list(await self.listar_chunks(bloco_id))
+        if existing and len(existing) != len(ordered_data):
+            raise ValueError("physical chunk plan count changed for an existing block")
 
-        # Check if chunks already exist for this block
-        existing = await self.listar_chunks(bloco_id)
-        if existing:
-            return list(existing)
-
-        persisted: list[AudioChunk] = []
-        for chunk_meta in chunks_data:
+        persisted: list[tuple[AudioChunk, AudioChunkTake]] = []
+        for position, chunk_meta in enumerate(ordered_data):
             chunk_index = chunk_meta["chunk_index"]
             chunk_id = chunk_meta["chunk_id"]
             canonical_text = chunk_meta.get("text", "")
@@ -770,56 +961,127 @@ class WorkflowRepository:
             duration_seconds = chunk_meta.get("duration_seconds")
             sample_rate = chunk_meta.get("sample_rate")
 
-            chunk = AudioChunk(
-                audio_bloco_id=bloco_id,
-                chunk_index=chunk_index,
-                chunk_id=chunk_id,
-                canonical_text=canonical_text,
-                synthesis_text_snapshot=synthesis_text,
-                start_char=chunk_meta["start_char"],
-                end_char=chunk_meta["end_char"],
-                boundary=chunk_meta["boundary"],
-                pause_after_frames=chunk_meta["pause_after_frames"],
-                chunking_identity=chunk_meta["chunking_identity"],
-                chunking_strategy_version=chunk_meta["chunking_strategy_version"],
-                voice_profile_identity=chunk_meta["voice_profile_identity"],
-                generation_profile_identity=chunk_meta["generation_profile_identity"],
-                source_job_id=chunk_meta["source_job_id"],
-                seed=seed,
-                duration_seconds=duration_seconds,
-                sample_rate=sample_rate,
-                status="pending",
-            )
-            self.session.add(chunk)
-            await self.session.flush()
+            if existing:
+                chunk = existing[position]
+                plan_fields = {
+                    "chunk_index": chunk_index,
+                    "canonical_text": canonical_text,
+                    "synthesis_text_snapshot": synthesis_text,
+                    "start_char": chunk_meta["start_char"],
+                    "end_char": chunk_meta["end_char"],
+                    "boundary": chunk_meta["boundary"],
+                    "pause_after_frames": chunk_meta["pause_after_frames"],
+                    "chunking_identity": chunk_meta["chunking_identity"],
+                    "chunking_strategy_version": chunk_meta["chunking_strategy_version"],
+                    "voice_profile_identity": chunk_meta["voice_profile_identity"],
+                    "generation_profile_identity": chunk_meta[
+                        "generation_profile_identity"
+                    ],
+                }
+                for name, expected in plan_fields.items():
+                    if getattr(chunk, name) != expected:
+                        raise ValueError(
+                            f"physical chunk plan changed at index {chunk_index}: {name}"
+                        )
+            else:
+                chunk = AudioChunk(
+                    audio_bloco_id=bloco_id,
+                    chunk_index=chunk_index,
+                    chunk_id=chunk_id,
+                    canonical_text=canonical_text,
+                    synthesis_text_snapshot=synthesis_text,
+                    start_char=chunk_meta["start_char"],
+                    end_char=chunk_meta["end_char"],
+                    boundary=chunk_meta["boundary"],
+                    pause_after_frames=chunk_meta["pause_after_frames"],
+                    chunking_identity=chunk_meta["chunking_identity"],
+                    chunking_strategy_version=chunk_meta["chunking_strategy_version"],
+                    voice_profile_identity=chunk_meta["voice_profile_identity"],
+                    generation_profile_identity=chunk_meta["generation_profile_identity"],
+                    source_job_id=chunk_meta["source_job_id"],
+                    seed=seed,
+                    duration_seconds=duration_seconds,
+                    sample_rate=sample_rate,
+                    status="pending",
+                )
+                self.session.add(chunk)
+                await self.session.flush()
 
-            # Create initial take
-            take = AudioChunkTake(
-                audio_chunk_id=chunk.id,
-                take_number=1,
-                kind="initial",
-                status="completed",
-                seed=seed,
-                audio_path=chunk_meta.get("audio_path"),
-                audio_sha256=chunk_meta.get("audio_sha256"),
-                audio_byte_size=chunk_meta.get("audio_byte_size"),
-                audio_sample_rate=sample_rate,
-                audio_duration_seconds=duration_seconds,
-                audio_frame_count=chunk_meta.get("audio_frame_count"),
-                completed_at=dt.datetime.now(dt.UTC),
-            )
-            self.session.add(take)
-            await self.session.flush()
-
-            # Set current take and activate chunk
-            chunk.current_take_id = take.id
-            chunk.status = "active"
-
-            persisted.append(chunk)
+            source_job_id = str(chunk_meta["source_job_id"])
+            idempotency_key = f"qwen-job:{source_job_id}:chunk:{chunk_index}"
+            take = (
+                await self.session.execute(
+                    select(AudioChunkTake).where(
+                        AudioChunkTake.idempotency_key == idempotency_key
+                    )
+                )
+            ).scalar_one_or_none()
+            if take is None:
+                max_take_number = (
+                    await self.session.execute(
+                        select(func.max(AudioChunkTake.take_number)).where(
+                            AudioChunkTake.audio_chunk_id == chunk.id
+                        )
+                    )
+                ).scalar_one()
+                max_take_number = max_take_number or 0
+                take = AudioChunkTake(
+                    audio_chunk_id=chunk.id,
+                    take_number=max_take_number + 1,
+                    kind="initial" if max_take_number == 0 else "regeneration",
+                    status="completed",
+                    seed=seed,
+                    audio_path=chunk_meta.get("audio_path"),
+                    audio_sha256=chunk_meta.get("audio_sha256"),
+                    audio_byte_size=chunk_meta.get("audio_byte_size"),
+                    audio_sample_rate=sample_rate,
+                    audio_duration_seconds=duration_seconds,
+                    audio_frame_count=chunk_meta.get("audio_frame_count"),
+                    audio_channels=chunk_meta.get("audio_channels"),
+                    audio_subtype=chunk_meta.get("audio_subtype"),
+                    source_job_id=source_job_id,
+                    artifact_integrity=chunk_meta.get("artifact_integrity"),
+                    speaker_similarity=chunk_meta.get("speaker_similarity"),
+                    speaker_similarity_reference_identity=chunk_meta.get(
+                        "speaker_similarity_reference_identity"
+                    ),
+                    speaker_similarity_policy_version=chunk_meta.get(
+                        "speaker_similarity_policy_version"
+                    ),
+                    speaker_identity_status=chunk_meta.get("speaker_identity_status"),
+                    provider_metadata={
+                        "provider_chunk_id": chunk_id,
+                        "source_job_id": source_job_id,
+                        "requested_language": chunk_meta.get("requested_language"),
+                        "resolved_language": chunk_meta.get("resolved_language"),
+                        "speaker_embedding_seconds": chunk_meta.get(
+                            "speaker_embedding_seconds"
+                        ),
+                    },
+                    idempotency_key=idempotency_key,
+                    completed_at=dt.datetime.now(dt.UTC),
+                )
+                self.session.add(take)
+                await self.session.flush()
+            if take.audio_chunk_id != chunk.id:
+                raise ValueError("Qwen chunk idempotency key belongs to another block")
+            if promote:
+                if chunk.current_take_id is not None and chunk.current_take_id != take.id:
+                    previous = await self.session.get(AudioChunkTake, chunk.current_take_id)
+                    if previous is not None and previous.status == "completed":
+                        previous.status = "superseded"
+                chunk.current_take_id = take.id
+                chunk.status = "active"
+                chunk.source_job_id = source_job_id
+                chunk.seed = seed
+                chunk.duration_seconds = duration_seconds
+                chunk.sample_rate = sample_rate
+            persisted.append((chunk, take))
 
         await self.session.commit()
-        for chunk in persisted:
+        for chunk, take in persisted:
             await self.session.refresh(chunk)
+            await self.session.refresh(take)
         return persisted
 
     async def listar_chunks(self, bloco_id: uuid.UUID) -> Sequence[AudioChunk]:
@@ -1124,11 +1386,37 @@ class WorkflowRepository:
                             {
                                 "chunk_id": str(chunk.id),
                                 "chunk_index": chunk.chunk_index,
+                                "durable_chunk_id": chunk.chunk_id,
                                 "take_id": (
                                     str(chunk.current_take_id)
                                     if chunk.current_take_id is not None
                                     else None
                                 ),
+                                "audio_sha256": next(
+                                    (
+                                        take.audio_sha256
+                                        for take in chunk.takes
+                                        if take.id == chunk.current_take_id
+                                    ),
+                                    None,
+                                ),
+                                "audio_frame_count": next(
+                                    (
+                                        take.audio_frame_count
+                                        for take in chunk.takes
+                                        if take.id == chunk.current_take_id
+                                    ),
+                                    None,
+                                ),
+                                "audio_sample_rate": next(
+                                    (
+                                        take.audio_sample_rate
+                                        for take in chunk.takes
+                                        if take.id == chunk.current_take_id
+                                    ),
+                                    None,
+                                ),
+                                "pause_after_frames": chunk.pause_after_frames,
                             }
                             for chunk in sorted(
                                 block.chunks, key=lambda item: item.chunk_index

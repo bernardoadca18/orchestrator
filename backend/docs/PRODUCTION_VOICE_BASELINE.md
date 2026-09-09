@@ -46,6 +46,15 @@ inspect the workflow ID before running it. Creating a workflow from an approved 
 Known limitations remain: speaker drift can occur, ASR is not speaker verification, pronunciation
 promotion stays a separate reviewed workflow, and post-processing is not part of this freeze.
 
+As of 2026-09-09, this limitation is observable rather than silent: Qwen emits warning-only
+chunk-level speaker similarity diagnostics and the Orchestrator stores them on durable
+`AudioChunkTake` rows. This did not change either frozen production identity or its sampling
+controls. Experimental non-streaming and ICL profiles have new identities and were not promoted.
+
+Block materialization is now bound to a deterministic manifest of active physical chunk takes.
+Blocks stay native 24 kHz PCM16 with sample-exact chunk/pause verification; final narration alone
+performs the single resample to 48 kHz before transparent gain-only mastering.
+
 The pinned runtime deliberately uses `sdpa`; `flash-attn is not installed` is therefore an optional
 capability warning, not a readiness failure. The production artifact path uses the in-process WAV
 stack and does not invoke the SoX executable; an upstream `sox: not found` capability probe is also

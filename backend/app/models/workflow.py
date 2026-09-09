@@ -211,6 +211,8 @@ class AudioBloco(Base):
     audio_frame_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     audio_subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
     artifact_integrity: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    assembly_manifest_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    assembly_manifest: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     pause_diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     narration_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     narration_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -306,6 +308,8 @@ class AudioBlocoTake(Base):
     audio_subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
     quality_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     artifact_integrity: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    assembly_manifest_identity: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    assembly_manifest: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     provider_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     content_quality: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     pause_diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
@@ -418,6 +422,19 @@ class AudioChunkTake(Base):
     audio_sample_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     audio_duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     audio_frame_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    audio_channels: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    audio_subtype: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    source_job_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    artifact_integrity: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    provider_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    speaker_similarity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    speaker_similarity_reference_identity: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    speaker_similarity_policy_version: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    speaker_identity_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     provider_candidate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

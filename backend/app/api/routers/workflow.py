@@ -75,6 +75,7 @@ from app.services.audio_serving import (
     audio_file_response,
     verify_audio_artifact,
 )
+from app.services.block_materialization import active_block_is_current
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
@@ -720,7 +721,7 @@ async def retomar_producao(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
 ):
     repo = WorkflowRepository(session)
-    wf = await repo.obter_por_id(workflow_id)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
     if wf is None:
         raise HTTPException(404, "Workflow não encontrado")
     if wf.production_status not in {None, "blocked"}:
@@ -768,9 +769,22 @@ async def baixar_audio_final(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
 ):
     repo = WorkflowRepository(session)
-    wf = await repo.obter_por_id(workflow_id)
+    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
     if wf is None or not wf.audio_final_path or wf.status != "audio_concluido":
         raise HTTPException(404, "Áudio final ainda não disponível para este workflow")
+    if wf.audio_edit_revision != wf.audio_materialized_revision:
+        raise HTTPException(409, "Áudio final está stale em relação às edições físicas")
+    try:
+        if not all(
+            [await active_block_is_current(session, block) for block in wf.blocos]
+        ):
+            raise HTTPException(
+                409, "Áudio final referencia bloco sem proveniência de assembly atual"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(409, "Proveniência do áudio final falhou") from exc
     try:
         path, metadata = verify_audio_artifact(
             wf.audio_final_path,
@@ -1048,6 +1062,18 @@ async def baixar_audio_bloco(
         ):
             raise HTTPException(409, "Ponteiro do take ativo está inconsistente")
     try:
+        if not await active_block_is_current(session, bloco):
+            raise HTTPException(
+                409,
+                "Áudio do bloco está stale em relação aos physical chunks ativos",
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            409, "Proveniência do assembly do bloco falhou na verificação"
+        ) from exc
+    try:
         path, metadata = verify_audio_artifact(
             bloco.audio_path,
             AudioArtifactExpectation(
@@ -1113,6 +1139,20 @@ async def listar_chunks_bloco(
                     else None,
                     "audio_sha256": take.audio_sha256,
                     "audio_duration_seconds": take.audio_duration_seconds,
+                    "audio_frame_count": take.audio_frame_count,
+                    "audio_sample_rate": take.audio_sample_rate,
+                    "audio_channels": take.audio_channels,
+                    "audio_subtype": take.audio_subtype,
+                    "source_job_id": take.source_job_id,
+                    "provider_metadata": take.provider_metadata,
+                    "speaker_similarity": take.speaker_similarity,
+                    "speaker_similarity_reference_identity": (
+                        take.speaker_similarity_reference_identity
+                    ),
+                    "speaker_similarity_policy_version": (
+                        take.speaker_similarity_policy_version
+                    ),
+                    "speaker_identity_status": take.speaker_identity_status,
                     "created_at": take.created_at.isoformat() if take.created_at else None,
                     "completed_at": take.completed_at.isoformat() if take.completed_at else None,
                     "error_message": take.error_message,
@@ -1272,6 +1312,27 @@ async def regenerar_chunk(
                 audio_sample_rate=local_metadata.sample_rate,
                 audio_duration_seconds=local_metadata.duration_seconds,
                 audio_frame_count=local_metadata.frame_count,
+                audio_channels=local_metadata.channels,
+                audio_subtype=local_metadata.subtype,
+                source_job_id=chunk.source_job_id,
+                artifact_integrity=local_metadata.__dict__,
+                provider_metadata={
+                    "source_job_id": chunk.source_job_id,
+                    "provider_candidate_id": candidate_id,
+                    "requested_language": settings.voice_language,
+                    "resolved_language": result.get("language", settings.voice_language),
+                    "speaker_embedding_seconds": result.get(
+                        "speaker_embedding_seconds"
+                    ),
+                },
+                speaker_similarity=result.get("speaker_similarity"),
+                speaker_similarity_reference_identity=result.get(
+                    "speaker_similarity_reference_identity"
+                ),
+                speaker_similarity_policy_version=result.get(
+                    "speaker_similarity_policy_version"
+                ),
+                speaker_identity_status=result.get("speaker_identity_status"),
                 provider_candidate_id=candidate_id,
                 completed_at=dt.datetime.now(dt.UTC),
             )
@@ -1325,9 +1386,9 @@ async def promover_chunk_take(
     if take.status != "completed":
         raise HTTPException(400, "Take não está pronto para promoção")
 
-    old_final_sha256 = (
-        await repo.obter_por_id(workflow_id)
-    ).audio_final_sha256
+    workflow_before = await repo.obter_por_id(workflow_id)
+    assert workflow_before is not None
+    old_final_sha256 = workflow_before.audio_final_sha256
     success = await repo.promover_chunk_take(take_id, workflow_id=workflow_id)
     if not success:
         raise HTTPException(409, "Take já foi superado ou rejeitado")
@@ -1475,15 +1536,19 @@ async def baixar_chunk_audio(
                 byte_size=take.audio_byte_size,
                 duration_seconds=take.audio_duration_seconds,
                 sample_rate=take.audio_sample_rate,
-                channels=None,
+                channels=getattr(take, "audio_channels", None),
                 frame_count=take.audio_frame_count,
+                subtype=getattr(take, "audio_subtype", None),
             ),
         )
     except AudioServingIntegrityError as exc:
         raise HTTPException(409, "Áudio do take falhou na verificação de integridade") from exc
 
     return audio_file_response(
-        path, metadata, filename=f"chunk_{chunk.chunk_index:04d}_take_{take.take_number:02d}.wav"
+        path,
+        metadata,
+        filename=f"chunk_{chunk.chunk_index:04d}_take_{take.take_number:02d}.wav",
+        immutable=True,
     )
 
 

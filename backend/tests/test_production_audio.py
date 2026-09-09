@@ -8,6 +8,9 @@ import pytest
 import soundfile as sf
 
 from app.services.production_audio import (
+    BLOCK_ASSEMBLER_VERSION,
+    BlockAssemblyChunk,
+    BlockAssemblyManifest,
     BlockDurationQualityError,
     ProductionAudioError,
     assemble_narration,
@@ -15,6 +18,7 @@ from app.services.production_audio import (
     inspect_wav_metadata,
     publish_source_block,
     reassemble_block_from_chunks,
+    reassemble_block_from_manifest,
 )
 
 
@@ -166,3 +170,96 @@ def test_chunk_reassembly_uses_frozen_qwen_pause_frames_exactly(tmp_path: Path) 
     assert np.all(samples[3_200:4_800] == 0)
     assert np.any(samples[4_800:] != 0)
     assert len(samples) == 7_200  # no pause after the final physical chunk
+
+
+def test_manifest_assembly_is_sample_exact_for_tones_and_pauses(tmp_path: Path) -> None:
+    sample_rate = 24_000
+    entries: list[BlockAssemblyChunk] = []
+    expected_chunks: list[np.ndarray] = []
+    pauses = (240, 480, 0)
+    for index, frequency in enumerate((220.0, 440.0, 880.0)):
+        frames = 1_200 + index * 240
+        time = np.arange(frames, dtype=np.float64) / sample_rate
+        path = tmp_path / f"tone-{frequency:.0f}.wav"
+        sf.write(
+            path,
+            0.1 * np.sin(2 * np.pi * frequency * time),
+            sample_rate,
+            format="WAV",
+            subtype="PCM_16",
+        )
+        metadata = inspect_wav(path)
+        decoded, _ = sf.read(path, dtype="int16")
+        expected_chunks.append(decoded)
+        entries.append(
+            BlockAssemblyChunk(
+                chunk_id=f"chunk-{index}",
+                chunk_index=index,
+                current_take_id=f"take-{index}",
+                audio_path=path,
+                audio_sha256=metadata.sha256,
+                frame_count=metadata.frame_count,
+                sample_rate=metadata.sample_rate,
+                channels=metadata.channels,
+                subtype=metadata.subtype,
+                pause_after_frames=pauses[index],
+            )
+        )
+    manifest = BlockAssemblyManifest("block-1", 1, tuple(entries))
+    result = reassemble_block_from_manifest(manifest, tmp_path / "materialized.wav")
+
+    actual, _ = sf.read(tmp_path / "materialized.wav", dtype="int16")
+    cursor = 0
+    for index, expected in enumerate(expected_chunks):
+        assert np.array_equal(actual[cursor : cursor + len(expected)], expected)
+        cursor += len(expected)
+        if index < len(expected_chunks) - 1:
+            assert np.array_equal(actual[cursor : cursor + pauses[index]], np.zeros(pauses[index]))
+            cursor += pauses[index]
+    assert cursor == len(actual) == result.expected_frame_count
+    assert result.manifest_identity == manifest.identity
+    assert result.integrity is not None
+    assert result.integrity["assembler_version"] == BLOCK_ASSEMBLER_VERSION
+    assert all(segment["pcm_match"] for segment in result.integrity["segments"])
+    assert result.timings is not None
+    assert set(result.timings) == {
+        "block_assembly_seconds",
+        "block_validation_seconds",
+        "atomic_publication_seconds",
+        "block_materialization_seconds",
+    }
+    assert all(value >= 0 for value in result.timings.values())
+
+
+def test_active_chunk_manifest_overwrites_competing_historical_full_wav(
+    tmp_path: Path, write_tone
+) -> None:
+    historical = write_tone(tmp_path / "historical-full.wav", frequency=220.0)
+    active = write_tone(tmp_path / "active-current-take.wav", frequency=880.0)
+    destination = tmp_path / "canonical-block.wav"
+    destination.write_bytes(historical.read_bytes())
+    active_metadata = inspect_wav(active)
+    manifest = BlockAssemblyManifest(
+        block_id="block-incident",
+        block_order=1,
+        chunks=(
+            BlockAssemblyChunk(
+                chunk_id="durable-chunk-0",
+                chunk_index=0,
+                current_take_id="active-take-b",
+                audio_path=active,
+                audio_sha256=active_metadata.sha256,
+                frame_count=active_metadata.frame_count,
+                sample_rate=active_metadata.sample_rate,
+                channels=active_metadata.channels,
+                subtype=active_metadata.subtype,
+                pause_after_frames=0,
+            ),
+        ),
+    )
+
+    result = reassemble_block_from_manifest(manifest, destination)
+
+    assert destination.read_bytes() == active.read_bytes()
+    assert result.metadata.sha256 == active_metadata.sha256
+    assert historical.is_file()  # competing source remains historical, never active

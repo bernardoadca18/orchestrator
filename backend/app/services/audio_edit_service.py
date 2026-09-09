@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -26,10 +27,12 @@ from app.services.audio_serving import AudioArtifactExpectation, verify_audio_ar
 from app.services.mastering import MasteringError, master_narration
 from app.services.production_audio import (
     AssemblyResult,
+    BlockAssemblyChunk,
+    BlockAssemblyManifest,
     ProductionAudioError,
     assemble_narration,
     inspect_wav,
-    reassemble_block_from_chunks,
+    reassemble_block_from_manifest,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +62,7 @@ class _RebuiltBlock:
     assembly: AssemblyResult
     pause_frames: tuple[int, ...]
     selected_take_ids: tuple[uuid.UUID, ...]
+    manifest: BlockAssemblyManifest
 
 
 class AudioEditMaterializationService:
@@ -136,6 +140,12 @@ class AudioEditMaterializationService:
                 final_path,
                 final_sha,
                 provider=self.transcription_provider,
+            )
+            await self.repo.atualizar_status(
+                update.workflow_execucao_id,
+                "audio_concluido",
+                audio_phase="completed",
+                erro_mensagem=None,
             )
             await self.repo.atualizar_producao(
                 update.workflow_execucao_id,
@@ -226,15 +236,19 @@ class AudioEditMaterializationService:
             block_paths.append(path)
 
         raw_path = edit_root / "narration_assembled.wav"
+        final_assembly_started = time.monotonic()
         narration = assemble_narration(
             block_paths,
             raw_path,
             sample_rate=self.config.audio_final_sample_rate,
             silence_ms=self.config.silencio_entre_blocos_ms,
         )
+        final_assembly_seconds = time.monotonic() - final_assembly_started
         final_path = edit_root / "narration_final.wav"
         mastering_config = _mastering_config(self.config)
+        mastering_started = time.monotonic()
         mastered = master_narration(raw_path, final_path, mastering_config)
+        mastering_seconds = time.monotonic() - mastering_started
         if (
             abs(mastered.metadata.duration_seconds - narration.metadata.duration_seconds)
             > self.config.audio_duration_tolerance_seconds
@@ -253,6 +267,10 @@ class AudioEditMaterializationService:
             final_metadata,
             mastering_config=asdict(mastering_config),
             mastering_metrics=mastered.to_dict(),
+            performance_metrics={
+                "final_assembly_seconds": final_assembly_seconds,
+                "mastering_seconds": mastering_seconds,
+            },
         )
         return final_path, final_metadata.sha256
 
@@ -281,7 +299,7 @@ class AudioEditMaterializationService:
         if not isinstance(raw_chunks, list) or len(raw_chunks) != len(chunks) or not chunks:
             raise AudioEditMaterializationError("physical chunk snapshot is incomplete")
 
-        chunk_paths: list[Path] = []
+        manifest_chunks: list[BlockAssemblyChunk] = []
         pause_frames: list[int] = []
         selected_take_ids: list[uuid.UUID] = []
         sample_rate: int | None = None
@@ -302,6 +320,11 @@ class AudioEditMaterializationService:
                 raise AudioEditMaterializationError(
                     f"chunk {chunk.chunk_index} has no frozen pause provenance"
                 )
+            if (
+                "pause_after_frames" in raw_chunk
+                and chunk.pause_after_frames != int(raw_chunk["pause_after_frames"])
+            ):
+                raise AudioEditMaterializationError("physical chunk pause plan changed")
             take = await self.session.get(AudioChunkTake, take_id)
             if (
                 take is None
@@ -326,6 +349,19 @@ class AudioEditMaterializationService:
             )
             if metadata.channels != 1:
                 raise AudioEditMaterializationError("selected chunk is not mono")
+            if any(
+                (
+                    "audio_sha256" in raw_chunk
+                    and metadata.sha256 != str(raw_chunk["audio_sha256"]),
+                    "audio_frame_count" in raw_chunk
+                    and metadata.frame_count != int(raw_chunk["audio_frame_count"]),
+                    "audio_sample_rate" in raw_chunk
+                    and metadata.sample_rate != int(raw_chunk["audio_sample_rate"]),
+                )
+            ):
+                raise AudioEditMaterializationError(
+                    "selected chunk artifact differs from frozen edit snapshot"
+                )
             if chunk.sample_rate is not None and metadata.sample_rate != chunk.sample_rate:
                 raise AudioEditMaterializationError(
                     "selected chunk differs from its frozen sample rate"
@@ -334,19 +370,32 @@ class AudioEditMaterializationService:
                 sample_rate = metadata.sample_rate
             elif metadata.sample_rate != sample_rate:
                 raise AudioEditMaterializationError("selected chunks have different sample rates")
-            chunk_paths.append(path)
             pause_frames.append(chunk.pause_after_frames)
             selected_take_ids.append(take.id)
+            manifest_chunks.append(
+                BlockAssemblyChunk(
+                    chunk_id=str(chunk.id),
+                    chunk_index=chunk.chunk_index,
+                    current_take_id=str(take.id),
+                    audio_path=path,
+                    audio_sha256=metadata.sha256,
+                    frame_count=metadata.frame_count,
+                    sample_rate=metadata.sample_rate,
+                    channels=metadata.channels,
+                    subtype=metadata.subtype,
+                    pause_after_frames=chunk.pause_after_frames,
+                )
+            )
         if pause_frames[-1] != 0:
             raise AudioEditMaterializationError("final physical chunk must not append a pause")
         assert sample_rate is not None
-        destination = edit_root / "blocks" / f"block_{order:03d}_r{edit_revision}.wav"
-        assembly = reassemble_block_from_chunks(
-            chunk_paths,
-            destination,
-            sample_rate=sample_rate,
-            pause_frames=pause_frames,
+        manifest = BlockAssemblyManifest(
+            block_id=str(block.id), block_order=order, chunks=tuple(manifest_chunks)
         )
+        destination = (
+            edit_root / "blocks" / f"block_{order:03d}_{manifest.identity[:16]}.wav"
+        )
+        assembly = reassemble_block_from_manifest(manifest, destination)
         return _RebuiltBlock(
             block_id=block_id,
             order=order,
@@ -355,6 +404,7 @@ class AudioEditMaterializationService:
             assembly=assembly,
             pause_frames=tuple(pause_frames),
             selected_take_ids=tuple(selected_take_ids),
+            manifest=manifest,
         )
 
     async def _publish_database_state(
@@ -368,6 +418,7 @@ class AudioEditMaterializationService:
         *,
         mastering_config: dict[str, object],
         mastering_metrics: dict[str, object],
+        performance_metrics: dict[str, float],
     ) -> None:
         locked_workflow = (
             await self.session.execute(
@@ -418,7 +469,9 @@ class AudioEditMaterializationService:
             block.audio_byte_size = metadata.byte_size
             block.audio_frame_count = metadata.frame_count
             block.audio_subtype = metadata.subtype
-            block.artifact_integrity = asdict(metadata)
+            block.artifact_integrity = replacement.assembly.integrity
+            block.assembly_manifest_identity = replacement.manifest.identity
+            block.assembly_manifest = replacement.manifest.identity_payload()
             block.pause_diagnostics = {
                 "version": "frozen_chunk_pause_frames_v1",
                 "pause_after_frames": list(replacement.pause_frames),
@@ -468,13 +521,18 @@ class AudioEditMaterializationService:
                 audio_channels=metadata.channels,
                 audio_frame_count=metadata.frame_count,
                 audio_subtype=metadata.subtype,
-                artifact_integrity=asdict(metadata),
+                artifact_integrity=replacement.assembly.integrity,
+                assembly_manifest_identity=replacement.manifest.identity,
+                assembly_manifest=replacement.manifest.identity_payload(),
                 provider_metadata={
                     "source": "audio_chunk_takes",
                     "audio_edit_update_id": str(update.id),
+                    "assembly_manifest_identity": replacement.manifest.identity,
+                    "block_assembly": replacement.assembly.integrity,
                     "selected_take_ids": [
                         str(item) for item in replacement.selected_take_ids
                     ],
+                    "orchestrator_performance": replacement.assembly.timings,
                 },
                 pause_diagnostics=block.pause_diagnostics,
                 is_current=True,
@@ -511,6 +569,7 @@ class AudioEditMaterializationService:
                 "expected_frame_count": narration.expected_frame_count,
             },
             "mastering": mastering_metrics,
+            "orchestrator_performance": performance_metrics,
             "blocks": [
                 {
                     "block_id": str(item.block_id),

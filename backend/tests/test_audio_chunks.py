@@ -150,6 +150,71 @@ async def test_initial_chunks_and_plan_provenance_survive_reload(session, block)
 
 
 @pytest.mark.asyncio
+async def test_new_full_job_chunks_do_not_leak_old_job_into_promoted_block(
+    session, block
+) -> None:
+    """Regression: rejected/old job A can never remain behind active job B."""
+    from app.repositories.workflow_repository import WorkflowRepository
+
+    repo = WorkflowRepository(session)
+    job_a = "a" * 32
+    job_b = "b" * 32
+    await repo.persistir_chunks(
+        block.id, [_chunk_data(0, job_a), _chunk_data(1, job_a)]
+    )
+    old_chunks = list(await repo.listar_chunks(block.id))
+    old_take_ids = [chunk.current_take_id for chunk in old_chunks]
+    job_b_data = []
+    for index in range(2):
+        item = _chunk_data(index, job_b)
+        item["seed"] = 9_000 + index
+        item["audio_path"] = f"/tmp/job-b-chunk-{index}.wav"
+        item["audio_sha256"] = f"{index + 8:x}" * 64
+        job_b_data.append(item)
+    selections = await repo.persistir_job_chunks(
+        block.id, job_b_data, promote=False
+    )
+    assert [chunk.current_take_id for chunk, _take in selections] == old_take_ids
+    assert all(take.source_job_id == job_b for _chunk, take in selections)
+
+    requested_block, block_take, created = await repo.solicitar_take(
+        workflow_id=block.workflow_execucao_id,
+        ordem=block.ordem,
+        kind="manual_regeneration",
+        request_key=f"job-b-{block.id}",
+        idempotency_key=f"job-b-{block.id}",
+        requested_seed=777,
+    )
+    assert created and requested_block.requested_take_id == block_take.id
+    selected_ids = [take.id for _chunk, take in selections]
+    assert await repo.promover_take(
+        block.id,
+        block_take.id,
+        status="completed",
+        audio_path="/tmp/materialized-job-b.wav",
+        audio_sha256="f" * 64,
+        chunk_take_ids=selected_ids,
+        block_fields={
+            "status": "concluido",
+            "audio_path": "/tmp/materialized-job-b.wav",
+            "audio_sha256": "f" * 64,
+            "assembly_manifest_identity": "e" * 64,
+        },
+    )
+
+    block_id = block.id
+    session.expire_all()
+    active = list(await repo.listar_chunks(block_id))
+    assert [chunk.current_take_id for chunk in active] == selected_ids
+    assert all(chunk.source_job_id == job_b for chunk in active)
+    assert all(
+        next(take for take in chunk.takes if take.id in old_take_ids).status
+        == "superseded"
+        for chunk in active
+    )
+
+
+@pytest.mark.asyncio
 async def test_candidate_creation_is_idempotent_and_does_not_change_current_take(
     session, block
 ) -> None:

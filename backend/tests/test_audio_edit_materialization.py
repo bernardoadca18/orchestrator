@@ -300,12 +300,12 @@ async def test_multiple_promotions_materialize_dirty_blocks_once(
         block_calls: list[list[Path]] = []
         narration_calls: list[list[Path]] = []
         master_calls: list[Path] = []
-        real_block_assembler = reassemble_block_from_chunks
+        real_block_assembler = module.reassemble_block_from_manifest
         real_narration_assembler = assemble_narration
 
-        def count_blocks(paths, destination, **kwargs):
-            block_calls.append(list(paths))
-            return real_block_assembler(paths, destination, **kwargs)
+        def count_blocks(manifest, destination):
+            block_calls.append([item.audio_path for item in manifest.chunks])
+            return real_block_assembler(manifest, destination)
 
         def count_narration(paths, destination, **kwargs):
             narration_calls.append(list(paths))
@@ -315,7 +315,7 @@ async def test_multiple_promotions_materialize_dirty_blocks_once(
             master_calls.append(source)
             return _fake_master(source, destination, config)
 
-        monkeypatch.setattr(module, "reassemble_block_from_chunks", count_blocks)
+        monkeypatch.setattr(module, "reassemble_block_from_manifest", count_blocks)
         monkeypatch.setattr(module, "assemble_narration", count_narration)
         monkeypatch.setattr(module, "master_narration", count_master)
         transcriber = FakeTranscriber()

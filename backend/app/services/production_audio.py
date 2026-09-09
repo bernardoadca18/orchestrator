@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import struct
+import time
 from dataclasses import asdict, dataclass
 from math import gcd
 from pathlib import Path
@@ -65,6 +67,67 @@ class AssemblyResult:
     metadata: AudioFileMetadata
     offsets: tuple[BlockNarrationOffset, ...]
     expected_frame_count: int
+    manifest_identity: str | None = None
+    integrity: dict[str, object] | None = None
+    timings: dict[str, float] | None = None
+
+
+BLOCK_ASSEMBLER_VERSION = "orchestrator_native_pcm16_block_v1"
+
+
+@dataclass(frozen=True)
+class BlockAssemblyChunk:
+    """One immutable active-take selection in a block assembly manifest."""
+
+    chunk_id: str
+    chunk_index: int
+    current_take_id: str
+    audio_path: Path
+    audio_sha256: str
+    frame_count: int
+    sample_rate: int
+    channels: int
+    subtype: str
+    pause_after_frames: int
+
+    def identity_payload(self) -> dict[str, object]:
+        # Filesystem paths are locations, not artifact identities.
+        return {
+            "chunk_id": self.chunk_id,
+            "chunk_index": self.chunk_index,
+            "current_take_id": self.current_take_id,
+            "audio_sha256": self.audio_sha256,
+            "frame_count": self.frame_count,
+            "sample_rate": self.sample_rate,
+            "channels": self.channels,
+            "subtype": self.subtype,
+            "pause_after_frames": self.pause_after_frames,
+        }
+
+
+@dataclass(frozen=True)
+class BlockAssemblyManifest:
+    """Canonical identity of a materialized block and its physical sources."""
+
+    block_id: str
+    block_order: int
+    chunks: tuple[BlockAssemblyChunk, ...]
+    assembler_version: str = BLOCK_ASSEMBLER_VERSION
+
+    def identity_payload(self) -> dict[str, object]:
+        return {
+            "assembler_version": self.assembler_version,
+            "block_id": self.block_id,
+            "block_order": self.block_order,
+            "chunks": [chunk.identity_payload() for chunk in self.chunks],
+        }
+
+    @property
+    def identity(self) -> str:
+        encoded = json.dumps(
+            self.identity_payload(), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -456,7 +519,7 @@ def reassemble_block_from_chunks(
     sample_rate: int,
     pause_frames: list[int] | None = None,
 ) -> AssemblyResult:
-    """Reassemble a block WAV from its active chunk takes in order.
+    """Compatibility wrapper around the canonical manifest-based assembler.
 
     Args:
         chunk_paths: Ordered list of chunk WAV paths (active takes)
@@ -469,11 +532,99 @@ def reassemble_block_from_chunks(
     """
     if not chunk_paths:
         raise ProductionAudioError("cannot reassemble from empty chunk list")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    offsets: list[BlockNarrationOffset] = []
-    current_frame = 0
-    temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp.wav"
+    resolved_pauses = pause_frames or [0] * len(chunk_paths)
+    if len(resolved_pauses) != len(chunk_paths):
+        raise ProductionAudioError("pause plan length differs from chunk count")
+    chunks: list[BlockAssemblyChunk] = []
+    for index, path in enumerate(chunk_paths):
+        metadata = inspect_wav(path)
+        chunks.append(
+            BlockAssemblyChunk(
+                chunk_id=f"legacy:{index}:{metadata.sha256}",
+                chunk_index=index,
+                current_take_id=f"legacy:{metadata.sha256}",
+                audio_path=path,
+                audio_sha256=metadata.sha256,
+                frame_count=metadata.frame_count,
+                sample_rate=metadata.sample_rate,
+                channels=metadata.channels,
+                subtype=metadata.subtype,
+                pause_after_frames=resolved_pauses[index],
+            )
+        )
+    manifest = BlockAssemblyManifest(
+        block_id="legacy",
+        block_order=0,
+        chunks=tuple(chunks),
+    )
+    if any(chunk.sample_rate != sample_rate for chunk in chunks):
+        raise ProductionAudioError(
+            "block assembly preserves native sample rate; resampling belongs to final narration"
+        )
+    return reassemble_block_from_manifest(manifest, destination)
+
+
+def _pcm16_sha256(samples: np.ndarray) -> str:
+    canonical = np.asarray(samples, dtype="<i2")
+    return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+
+
+def _fsync_file_and_directory(path: Path) -> None:
+    with path.open("rb") as stream:
+        os.fsync(stream.fileno())
+    directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _validate_block_manifest(manifest: BlockAssemblyManifest) -> int:
+    if manifest.assembler_version != BLOCK_ASSEMBLER_VERSION:
+        raise ProductionAudioError("unsupported block assembler version")
+    if not manifest.chunks:
+        raise ProductionAudioError("cannot reassemble from empty chunk manifest")
+    expected_frames = 0
+    expected_rate = manifest.chunks[0].sample_rate
+    for expected_index, chunk in enumerate(manifest.chunks):
+        if chunk.chunk_index != expected_index:
+            raise ProductionAudioError("block manifest chunk ordering is not contiguous")
+        if chunk.frame_count <= 0 or chunk.pause_after_frames < 0:
+            raise ProductionAudioError("block manifest contains invalid frame counts")
+        if (
+            chunk.sample_rate != expected_rate
+            or chunk.channels != 1
+            or chunk.subtype != "PCM_16"
+        ):
+            raise ProductionAudioError(
+                "block assembly requires one native-rate mono PCM16 contract"
+            )
+        if expected_index == len(manifest.chunks) - 1 and chunk.pause_after_frames != 0:
+            raise ProductionAudioError("final physical chunk must not append a pause")
+        expected_frames += chunk.frame_count
+        if expected_index < len(manifest.chunks) - 1:
+            expected_frames += chunk.pause_after_frames
+    return expected_frames
+
+
+def reassemble_block_from_manifest(
+    manifest: BlockAssemblyManifest, destination: Path
+) -> AssemblyResult:
+    """Materialize and prove a block from exactly the active physical take manifest.
+
+    The block remains at the Qwen-native sample rate. No resampling, channel mixing,
+    gain, crossfade, or other signal transform is allowed at this boundary.
+    """
+    operation_started = time.monotonic()
+    expected_frames = _validate_block_manifest(manifest)
+    sample_rate = manifest.chunks[0].sample_rate
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.parent / f".{destination.name}.{uuid4().hex}.tmp.wav"
+    offsets: list[BlockNarrationOffset] = []
+    expected_segment_hashes: list[str] = []
+    current_frame = 0
+    try:
+        write_started = time.monotonic()
         with sf.SoundFile(
             str(temporary),
             mode="w",
@@ -482,83 +633,137 @@ def reassemble_block_from_chunks(
             format="WAV",
             subtype="PCM_16",
         ) as output:
-            for idx, path in enumerate(chunk_paths):
+            for chunk in manifest.chunks:
+                physical = inspect_wav(chunk.audio_path)
+                if (
+                    physical.sha256 != chunk.audio_sha256
+                    or physical.frame_count != chunk.frame_count
+                    or physical.sample_rate != chunk.sample_rate
+                    or physical.channels != chunk.channels
+                    or physical.subtype != chunk.subtype
+                ):
+                    raise ProductionAudioError(
+                        f"chunk {chunk.chunk_index} differs from assembly manifest provenance"
+                    )
                 start_frame = current_frame
+                digest = hashlib.sha256()
                 try:
-                    with sf.SoundFile(str(path), mode="r") as source:
-                        source_rate = int(source.samplerate)
-                        if source.frames <= 0 or source.channels <= 0 or source_rate <= 0:
-                            raise ProductionAudioError("chunk WAV contains invalid samples")
-                        if source_rate == sample_rate:
-                            chunk_frames = 0
-                            for samples in source.blocks(
-                                blocksize=IO_BLOCK_FRAMES,
-                                dtype="float64",
-                                always_2d=True,
-                            ):
-                                if not np.all(np.isfinite(samples)):
-                                    raise ProductionAudioError(
-                                        "chunk WAV contains invalid samples"
-                                    )
-                                mono = np.mean(samples, axis=1, dtype=np.float64)
-                                output.write(mono)
-                                chunk_frames += len(mono)
-                        else:
-                            samples = source.read(dtype="float64", always_2d=True)
-                            if samples.size == 0 or not np.all(np.isfinite(samples)):
-                                raise ProductionAudioError(
-                                    "chunk WAV contains invalid samples"
-                                )
-                            mono = np.mean(samples, axis=1, dtype=np.float64)
-                            divisor = gcd(source_rate, sample_rate)
-                            resampled = resample_poly(
-                                mono,
-                                sample_rate // divisor,
-                                source_rate // divisor,
-                            )
-                            output.write(resampled)
-                            chunk_frames = len(resampled)
-                except ProductionAudioError:
-                    raise
+                    with sf.SoundFile(str(chunk.audio_path), mode="r") as source:
+                        copied_frames = 0
+                        for samples in source.blocks(
+                            blocksize=IO_BLOCK_FRAMES, dtype="int16", always_2d=True
+                        ):
+                            mono = samples[:, 0]
+                            digest.update(np.asarray(mono, dtype="<i2").tobytes(order="C"))
+                            output.write(mono)
+                            copied_frames += len(mono)
                 except (OSError, RuntimeError) as exc:
                     raise ProductionAudioError("chunk WAV is unreadable") from exc
-                if chunk_frames <= 0:
-                    raise ProductionAudioError("chunk WAV contains invalid samples")
-                current_frame += chunk_frames
+                if copied_frames != chunk.frame_count:
+                    raise ProductionAudioError("decoded chunk frame count changed during assembly")
+                expected_segment_hashes.append(digest.hexdigest())
+                current_frame += copied_frames
                 offsets.append(
                     BlockNarrationOffset(
-                        order=idx,
+                        order=chunk.chunk_index,
                         start_seconds=start_frame / sample_rate,
                         end_seconds=current_frame / sample_rate,
                     )
                 )
-                # Insert pause between chunks if specified
-                if pause_frames and idx < len(chunk_paths) - 1:
-                    pause = pause_frames[idx] if idx < len(pause_frames) else 0
-                    if pause > 0:
-                        silence = np.zeros(pause, dtype=np.float64)
-                        output.write(silence)
-                        current_frame += pause
+                if chunk.pause_after_frames and chunk.chunk_index < len(manifest.chunks) - 1:
+                    remaining = chunk.pause_after_frames
+                    silence = np.zeros(min(IO_BLOCK_FRAMES, remaining), dtype=np.int16)
+                    while remaining:
+                        frames = min(remaining, len(silence))
+                        output.write(silence[:frames])
+                        remaining -= frames
+                    current_frame += chunk.pause_after_frames
+        write_seconds = time.monotonic() - write_started
+
+        validation_started = time.monotonic()
         metadata = inspect_wav(temporary)
         if (
             metadata.sample_rate != sample_rate
             or metadata.channels != 1
             or metadata.subtype != "PCM_16"
+            or metadata.frame_count != expected_frames
+            or current_frame != expected_frames
         ):
-            raise ProductionAudioError("reassembled block format is not canonical")
-        if metadata.frame_count != current_frame:
-            raise ProductionAudioError(
-                "reassembled WAV sample count differs from expected timeline"
-            )
+            raise ProductionAudioError("reassembled block physical contract is invalid")
+
+        segments: list[dict[str, object]] = []
+        with sf.SoundFile(str(temporary), mode="r") as assembled:
+            cursor = 0
+            for chunk, expected_pcm_sha in zip(
+                manifest.chunks, expected_segment_hashes, strict=True
+            ):
+                assembled.seek(cursor)
+                samples = assembled.read(chunk.frame_count, dtype="int16", always_2d=True)[:, 0]
+                actual_pcm_sha = _pcm16_sha256(samples)
+                if len(samples) != chunk.frame_count or actual_pcm_sha != expected_pcm_sha:
+                    raise ProductionAudioError(
+                        f"chunk {chunk.chunk_index} PCM segment differs after assembly"
+                    )
+                segment = {
+                    **chunk.identity_payload(),
+                    "start_frame": cursor,
+                    "end_frame": cursor + chunk.frame_count,
+                    "expected_pcm_sha256": expected_pcm_sha,
+                    "actual_pcm_sha256": actual_pcm_sha,
+                    "pcm_match": True,
+                }
+                cursor += chunk.frame_count
+                if chunk.chunk_index < len(manifest.chunks) - 1:
+                    pause = assembled.read(
+                        chunk.pause_after_frames, dtype="int16", always_2d=True
+                    )[:, 0]
+                    if len(pause) != chunk.pause_after_frames or np.any(pause != 0):
+                        raise ProductionAudioError(
+                            f"pause after chunk {chunk.chunk_index} is not exact silence"
+                        )
+                    segment["pause_start_frame"] = cursor
+                    segment["pause_end_frame"] = cursor + chunk.pause_after_frames
+                    segment["pause_is_exact_silence"] = True
+                    cursor += chunk.pause_after_frames
+                segments.append(segment)
+            if cursor != expected_frames:
+                raise ProductionAudioError("block validation cursor differs from manifest")
+        validation_seconds = time.monotonic() - validation_started
+
+        integrity: dict[str, object] = {
+            "version": "block_assembly_integrity_v1",
+            "status": "passed",
+            "assembler_version": manifest.assembler_version,
+            "manifest_identity": manifest.identity,
+            "chunk_count": len(manifest.chunks),
+            "expected_frame_count": expected_frames,
+            "actual_frame_count": metadata.frame_count,
+            "sample_rate": metadata.sample_rate,
+            "channels": metadata.channels,
+            "subtype": metadata.subtype,
+            "duration_seconds": metadata.duration_seconds,
+            "block_sha256": metadata.sha256,
+            "segments": segments,
+        }
+        _fsync_file_and_directory(temporary)
+        publication_started = time.monotonic()
         os.replace(temporary, destination)
+        _fsync_file_and_directory(destination)
         published = inspect_wav(destination)
         if published != metadata:
-            destination.unlink(missing_ok=True)
             raise ProductionAudioError("reassembled WAV changed during atomic publication")
+        return AssemblyResult(
+            metadata=published,
+            offsets=tuple(offsets),
+            expected_frame_count=expected_frames,
+            manifest_identity=manifest.identity,
+            integrity=integrity,
+            timings={
+                "block_assembly_seconds": write_seconds,
+                "block_validation_seconds": validation_seconds,
+                "atomic_publication_seconds": time.monotonic() - publication_started,
+                "block_materialization_seconds": time.monotonic() - operation_started,
+            },
+        )
     finally:
         temporary.unlink(missing_ok=True)
-    return AssemblyResult(
-        metadata=published,
-        offsets=tuple(offsets),
-        expected_frame_count=current_frame,
-    )

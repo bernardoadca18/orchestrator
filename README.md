@@ -15,8 +15,9 @@ canonical script block
   -> deterministic pronunciation glossary
   -> synthesis text
   -> Qwen Voice Service async job
-  -> immutable native source WAV + take-level ASR content gate
-  -> deterministic block assembly (pause, 48 kHz mono PCM16)
+  -> immutable native 24 kHz physical chunks + take-level ASR content gate
+  -> deterministic native 24 kHz block assembly from active chunk takes
+  -> one 24 -> 48 kHz conversion during final narration assembly
   -> transparent whole-narration gain mastering
   -> final WAV identity
   -> Faster-Whisper word timestamps
@@ -31,6 +32,13 @@ resolved `pause_after_frames`, chunker/profile identities, exact synthesis text 
 so the assembler reproduces that historical Qwen generation without consulting current pause
 defaults. Independent speech blocks are never crossfaded;
 resampling still occurs once at final assembly.
+
+The only canonical block source is the ordered `AudioChunk.current_take_id` set. A versioned
+assembly manifest records chunk/take IDs, SHA, decoded frame count, native rate/format and frozen
+pause frames; its canonical JSON SHA is persisted on the block and block take. Materialization
+copies PCM16 samples, proves each output range and exact-zero pause sample-by-sample, validates the
+complete WAV, fsyncs, then atomically replaces the destination. A remote full-job WAV remains
+forensic evidence only and can never compete with durable active chunks as the published block.
 
 The final mastering policy measures Integrated LUFS, sample peak and real True Peak (FFmpeg EBU
 R128), applies constant gain toward -16 LUFS constrained by -1 dBTP, reopens/reanalyses a temporary
@@ -58,9 +66,12 @@ seed, category and retry strategy remain durable. Permanent profile/contract fai
 retried. A changed text/normalizer/glossary/profile identity starts a new take under the configured
 seed policy.
 
-A completed block is reused only when its synthesis identity is current and the local WAV reopens
-with the persisted checksum, size, rate, channels, sample count and subtype. Serving performs the
-same reconciliation and uses SHA-addressed cache revalidation plus byte ranges. Thus a failure in block 8 does not replace
+A completed block is reused only when its synthesis identity and assembly-manifest identity match
+the live active chunk set and the local WAV reopens with the persisted checksum, size, rate,
+channels, sample count and subtype. Missing or stale canonical WAVs are rebuilt without calling
+Qwen. Serving performs the same reconciliation and uses SHA ETags plus `no-cache` revalidation for
+mutable block/final URLs; UUID-addressed immutable chunk candidates receive immutable caching.
+Thus a failure in block 8 does not replace
 valid takes 1–7. Missing local output is redownloaded from the same remote job when available.
 
 Chunk regeneration requires an idempotency key and derives one explicit manual seed from the
@@ -88,13 +99,20 @@ previous SHA until that operation completes, while downstream production blocker
 as an independent state.
 
 Alembic lineage is linear: revision `014` adds production-error history, revision `015` adds the
-chunk/take tables, and revision `016` adds exact pause provenance plus durable edit revisions and
-batch update operations.
+chunk/take tables, revision `016` adds exact pause provenance plus durable edit revisions and batch
+update operations, and revision `017` adds assembly manifests plus physical-take artifact/speaker
+provenance.
 
 The take-level content gate compares Faster-Whisper against the actual synthesis text and persists
 WER/CER, deletions, insertions, repetitions, missing spans and premature-ending evidence before a
 take becomes current. See `backend/docs/NARRATION_HARDENING.md` for integrity, diagnostics,
 x-vector benchmark and experimental prosody-transfer operation.
+
+Speaker identity is a separate diagnostic: each physical take may persist similarity, frozen
+reference identity, policy version and `passed | warning | unavailable`. Block/provider metadata
+summarizes minimum, median and low-score chunks. The calibrated `qwen_ecapa_warning_v1` threshold
+is warning-only because full-block scores can hide a single wrong chunk and measured distributions
+overlap; content correctness never substitutes for speaker identity.
 
 ## Pronunciation resolution and laboratory
 

@@ -68,6 +68,7 @@ def audio_file_response(
     metadata: AudioFileMetadata,
     *,
     filename: str,
+    immutable: bool = False,
 ) -> FileResponse:
     return FileResponse(
         path,
@@ -77,7 +78,11 @@ def audio_file_response(
         stat_result=path.stat(),
         headers={
             "ETag": f'"{metadata.sha256}"',
-            "Cache-Control": "private, no-cache, must-revalidate",
+            "Cache-Control": (
+                "private, max-age=31536000, immutable"
+                if immutable
+                else "private, no-cache, must-revalidate"
+            ),
             "X-Audio-SHA256": metadata.sha256,
             "X-Audio-Duration-Seconds": f"{metadata.duration_seconds:.9f}",
             "X-Audio-Frame-Count": str(metadata.frame_count),
