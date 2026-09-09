@@ -170,6 +170,7 @@ class FakeRenderRepo:
 
     async def reset_for_explicit_retry(self, render: SimpleNamespace):
         render.status = "pending"
+        render.started_at = dt.datetime.now(dt.UTC)
 
 
 class FakeStage:
@@ -561,8 +562,10 @@ async def test_explicit_failed_render_retry_omits_original_key() -> None:
     service = _service(workflow, timeline, composer, renders)
     render = await service._ensure_local_render(workflow, timeline)
     render.status = "failed"
+    render.started_at = dt.datetime.now(dt.UTC) - dt.timedelta(hours=2)
     render.composer_render_id = remote.id
     await service.explicit_retry(workflow)
+    assert not service._timed_out(render)
     await service.process(workflow.id)
     assert composer.get_calls == 1
     assert composer.create_calls == [None]

@@ -133,5 +133,6 @@ class WorkflowRenderRepository:
         render.frames_rendered = 0
         render.error_category = None
         render.error_message = None
+        render.started_at = dt.datetime.now(dt.UTC)
         render.completed_at = None
         await self.session.commit()
