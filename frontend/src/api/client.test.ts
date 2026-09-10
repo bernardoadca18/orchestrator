@@ -38,6 +38,26 @@ test("a server error is not treated as a missing artifact", async () => {
   });
 });
 
+test("explicit production resume uses the canonical operator endpoint", async () => {
+  let requestedUrl = "";
+  let requestedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    requestedInit = init;
+    return new Response(JSON.stringify({ production_status: "queued", production_phase: "render" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  };
+
+  const result = await api.retomarProducao("workflow-1");
+
+  assert.match(requestedUrl, /\/workflow\/workflow-1\/resume-production$/);
+  assert.equal(requestedInit?.method, "POST");
+  assert.equal(result.production_status, "queued");
+  assert.equal(result.production_phase, "render");
+});
+
 test("network failures retain their category", async () => {
   globalThis.fetch = async () => { throw new TypeError("offline"); };
 

@@ -25,7 +25,7 @@ def main() -> int:
             workflow = client.get(f"/workflow/{args.workflow_id}")
             workflow.raise_for_status()
             state = workflow.json()
-            if state.get("production_status") in {None, "blocked"}:
+            if state.get("production_status") in {None, "blocked", "cancelled"}:
                 resumed = client.post(f"/workflow/{args.workflow_id}/resume-production")
                 resumed.raise_for_status()
             deadline = time.monotonic() + args.timeout_seconds

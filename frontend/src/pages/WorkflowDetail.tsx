@@ -225,6 +225,17 @@ export default function WorkflowDetail() {
     catch (e) { setErro((e as Error).message); }
   }
 
+  async function resumeProduction() {
+    if (!id) return;
+    try {
+      setErro(null);
+      await api.retomarProducao(id);
+      await carregar();
+    } catch (e) {
+      setErro((e as Error).message);
+    }
+  }
+
   const statusColors: Record<string, string> = {
     agendada: "#6c757d",
     gerando_audio: "#007bff",
@@ -430,8 +441,12 @@ export default function WorkflowDetail() {
 
           <button onClick={regenerateNarration}>Regenerar narração completa</button>
 
-          {(workflow.production_status === "blocked" || workflow.production_status === null) && (
-            <button onClick={() => api.retomarProducao(workflow.id).then(() => carregar())}>
+          {(
+            workflow.production_status === "blocked"
+            || workflow.production_status === "cancelled"
+            || workflow.production_status === null
+          ) && (
+            <button onClick={resumeProduction}>
               Retomar produção
             </button>
           )}

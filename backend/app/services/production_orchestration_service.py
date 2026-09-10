@@ -260,9 +260,27 @@ class ProductionOrchestrationService:
         )
 
     async def resume(self, workflow: WorkflowExecucao) -> None:
+        source_status = workflow.production_status
+        # The legacy status is an independent cancellation guard. Restore only
+        # the state justified by the durable audio artifact; never claim that
+        # audio completed when it is not reusable.
+        if source_status == "cancelled" and workflow.status == "cancelada":
+            workflow.status = (
+                "audio_concluido" if self._audio_artifact_is_reusable(workflow) else "agendada"
+            )
+
         phase = workflow.production_phase
-        if workflow.production_status is None:
+        if source_status in {None, "cancelled"}:
             phase = await self._earliest_missing_phase(workflow)
+
+        # A cancelled render may have finished or failed remotely while polls
+        # were correctly ignoring it. Mark its local mirror pending inside the
+        # same transaction so the resumed worker performs mandatory GET-before-
+        # POST reconciliation and may retry a confirmed remote failure.
+        if source_status == "cancelled" and phase == "render":
+            render = await self._current_render_for_timeline(workflow.id)
+            if render is not None and render.status != "completed":
+                await self.renders.reset_for_explicit_retry(render, commit=False)
         await self.workflows.atualizar_producao(
             workflow.id, status="queued", phase=phase or "audio"
         )
@@ -271,6 +289,9 @@ class ProductionOrchestrationService:
         workflow = await self.workflows.obter_por_id(workflow_id)
         if workflow is None or workflow.production_phase not in {"render", "completed"}:
             return None
+        return await self._current_render_for_timeline(workflow_id)
+
+    async def _current_render_for_timeline(self, workflow_id: uuid.UUID) -> WorkflowRender | None:
         timeline = await self.timelines.current(workflow_id)
         if timeline is None:
             return None
@@ -471,12 +492,17 @@ class ProductionOrchestrationService:
     def _audio_is_reusable(workflow: WorkflowExecucao) -> bool:
         return bool(
             workflow.status == "audio_concluido"
+            and ProductionOrchestrationService._audio_artifact_is_reusable(workflow)
+        )
+
+    @staticmethod
+    def _audio_artifact_is_reusable(workflow: WorkflowExecucao) -> bool:
+        return bool(
             # A valid consolidated artifact remains reusable when alignment/ASR
             # could not validate it. The next Stage 17 phase owns that decision;
             # treating it as an audio-generation failure discards valid work and
             # creates a misleading active error.
-            and getattr(workflow, "audio_phase", "completed")
-            in {"completed", "quality_unvalidated"}
+            getattr(workflow, "audio_phase", "completed") in {"completed", "quality_unvalidated"}
             and workflow.audio_final_path
             and workflow.audio_final_sha256
             and workflow.duracao_audio_segundos

@@ -169,9 +169,15 @@ class FakeRenderRepo:
         render.error_category = category
         render.error_message = message
 
-    async def reset_for_explicit_retry(self, render: SimpleNamespace):
+    async def reset_for_explicit_retry(self, render: SimpleNamespace, *, commit: bool = True):
         render.status = "pending"
+        render.phase = "pending"
+        render.progress = 0.0
+        render.frames_rendered = 0
+        render.error_category = None
+        render.error_message = None
         render.started_at = dt.datetime.now(dt.UTC)
+        render.completed_at = None
 
 
 class FakeStage:
@@ -648,6 +654,121 @@ async def test_cancelled_poll_cannot_promote_completed_remote() -> None:
     assert result.terminal
     assert composer.get_calls == 0
     assert workflow.production_status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancelled_resume_reuses_current_upstream_at_render() -> None:
+    workflow = _workflow(phase="render", status="cancelled")
+    workflow.status = "cancelada"
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline, "queued"))
+    service = _service(workflow, timeline, composer)
+
+    await service.resume(workflow)
+    result = await service.process(workflow.id)
+
+    assert workflow.status == "audio_concluido"
+    assert workflow.production_status == "running"
+    assert workflow.production_phase == "render"
+    assert result.poll_render_id is not None
+    service.audio_processor.assert_not_awaited()
+    service.alignments.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()
+    service.timelines.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancelled_resume_reconciles_compatible_remote_completion() -> None:
+    workflow = _workflow(phase="render", status="cancelled")
+    timeline = _timeline(workflow.id)
+    remote = _remote(workflow.id, timeline, "completed")
+    composer = FakeComposer(remote)
+    renders = FakeRenderRepo()
+    service = _service(workflow, timeline, composer, renders)
+    render = await service._ensure_local_render(workflow, timeline)
+    render.status = "rendering"
+    render.composer_render_id = remote.id
+
+    await service.resume(workflow)
+    result = await service.process(workflow.id)
+
+    assert result.terminal
+    assert result.qa_workflow_id == workflow.id
+    assert composer.get_calls == 1
+    assert composer.create_calls == []
+    assert workflow.production_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancelled_resume_retries_confirmed_remote_failure() -> None:
+    workflow = _workflow(phase="render", status="cancelled")
+    timeline = _timeline(workflow.id)
+    failed = _remote(workflow.id, timeline, "failed")
+    replacement = _remote(workflow.id, timeline, "queued")
+    composer = SequenceComposer([failed, replacement])
+    renders = FakeRenderRepo()
+    service = _service(workflow, timeline, composer, renders)
+    render = await service._ensure_local_render(workflow, timeline)
+    render.status = "rendering"
+    render.composer_render_id = failed.id
+
+    await service.resume(workflow)
+    result = await service.process(workflow.id)
+
+    assert result.poll_render_id == render.id
+    assert composer.get_calls == 1
+    assert composer.create_calls == [None]
+    assert render.composer_render_id == replacement.id
+    assert workflow.production_status == "running"
+
+
+@pytest.mark.asyncio
+async def test_explicit_cancelled_resume_still_blocks_stale_gap_timeline() -> None:
+    workflow = _workflow(phase="render", status="cancelled")
+    timeline = _timeline(workflow.id, gaps=1)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+
+    await service.resume(workflow)
+    result = await service.process(workflow.id)
+
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_error_category == "stale_render_input"
+    assert composer.get_calls == 0
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_blocked_resume_preserves_the_blocked_phase() -> None:
+    workflow = _workflow(phase="visual_plan", status="blocked")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+
+    await service.resume(workflow)
+
+    assert workflow.production_status == "queued"
+    assert workflow.production_phase == "visual_plan"
+    service.alignments.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()
+    service.timelines.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_without_reusable_audio_returns_to_audio_queue() -> None:
+    workflow = _workflow(phase="render", status="cancelled")
+    workflow.status = "cancelada"
+    workflow.audio_final_sha256 = None
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+
+    await service.resume(workflow)
+
+    assert workflow.status == "agendada"
+    assert workflow.production_status == "queued"
+    assert workflow.production_phase == "audio"
 
 
 @pytest.mark.asyncio

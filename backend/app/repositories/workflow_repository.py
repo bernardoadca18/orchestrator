@@ -142,6 +142,19 @@ class WorkflowRepository:
             stmt = stmt.execution_options(populate_existing=True)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
+    async def obter_por_id_para_atualizacao(
+        self, workflow_id: uuid.UUID
+    ) -> WorkflowExecucao | None:
+        """Lock one workflow so an explicit state transition has a single winner."""
+
+        stmt = (
+            select(WorkflowExecucao)
+            .where(WorkflowExecucao.id == workflow_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
     async def listar(self, status: str | None = None) -> Sequence[WorkflowExecucao]:
         stmt = select(WorkflowExecucao).order_by(WorkflowExecucao.criado_em.desc())
         if status:

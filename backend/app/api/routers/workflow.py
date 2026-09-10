@@ -720,13 +720,26 @@ async def repetir_workflow(
 async def retomar_producao(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
 ):
+    from sqlalchemy.exc import IntegrityError
+
     repo = WorkflowRepository(session)
-    wf = await repo.obter_por_id(workflow_id, com_blocos=True)
+    wf = await repo.obter_por_id_para_atualizacao(workflow_id)
     if wf is None:
         raise HTTPException(404, "Workflow não encontrado")
-    if wf.production_status not in {None, "blocked"}:
-        raise HTTPException(409, "A produção não está bloqueada nem em modo legado")
-    await ProductionOrchestrationService(session).resume(wf)
+    if wf.production_status not in {None, "blocked", "cancelled"}:
+        raise HTTPException(409, "A produção não está bloqueada, cancelada nem em modo legado")
+    roteiro_id = wf.roteiro_id
+    try:
+        await ProductionOrchestrationService(session).resume(wf)
+    except IntegrityError as exc:
+        await session.rollback()
+        active = await repo.obter_ativo_por_roteiro(roteiro_id)
+        detail = (
+            f"Outro workflow já está ativo para este roteiro (id={active.id})"
+            if active is not None
+            else "A retomada conflitou com outra transição de produção"
+        )
+        raise HTTPException(409, detail) from exc
     processar_producao_workflow.delay(str(wf.id))
     resumed = await repo.obter_por_id(wf.id)
     assert resumed is not None

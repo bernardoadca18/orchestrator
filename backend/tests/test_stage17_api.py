@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 from fastapi import HTTPException, Request
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 
 from app.api.routers.workflow import (
     baixar_video_final,
@@ -16,12 +18,14 @@ from app.api.routers.workflow import (
     repetir_workflow,
     retomar_producao,
 )
+from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.workflow import WorkflowOut
 
 
 def _workflow(status: str | None = "blocked") -> SimpleNamespace:
     return SimpleNamespace(
         id=uuid.uuid4(),
+        roteiro_id=uuid.uuid4(),
         status="audio_concluido",
         production_status=status,
         production_phase="production_timeline",
@@ -84,16 +88,124 @@ async def test_render_endpoint_returns_current_semantic_render() -> None:
 
 
 @pytest.mark.asyncio
-async def test_resume_only_accepts_blocked_or_legacy() -> None:
+async def test_resume_rejects_running_production() -> None:
     workflow = _workflow("running")
     repository = MagicMock()
-    repository.obter_por_id = AsyncMock(return_value=workflow)
+    repository.obter_por_id_para_atualizacao = AsyncMock(return_value=workflow)
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         pytest.raises(HTTPException) as error,
     ):
         await retomar_producao(workflow.id, MagicMock())
     assert error.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_resume_transition_locks_the_workflow_row() -> None:
+    workflow = _workflow("cancelled")
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = workflow
+    session = MagicMock()
+    session.execute = AsyncMock(return_value=result)
+
+    locked = await WorkflowRepository(session).obter_por_id_para_atualizacao(workflow.id)
+
+    assert locked is workflow
+    statement = session.execute.await_args.args[0]
+    compiled = str(statement.compile(dialect=postgresql.dialect()))
+    assert "FOR UPDATE" in compiled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_status", ["cancelled", "blocked", None])
+async def test_resume_accepts_explicit_cancelled_blocked_and_legacy(
+    source_status: str | None,
+) -> None:
+    workflow = _workflow(source_status)
+    workflow.production_phase = "render"
+    repository = MagicMock()
+    repository.obter_por_id_para_atualizacao = AsyncMock(return_value=workflow)
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    service = MagicMock()
+
+    async def resume(current):
+        current.production_status = "queued"
+
+    service.resume = AsyncMock(side_effect=resume)
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch(
+            "app.api.routers.workflow.ProductionOrchestrationService",
+            return_value=service,
+        ),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+    ):
+        result = await retomar_producao(workflow.id, MagicMock())
+
+    assert result.production_status == "queued"
+    service.resume.assert_awaited_once_with(workflow)
+    enqueue.assert_called_once_with(str(workflow.id))
+
+
+@pytest.mark.asyncio
+async def test_repeated_resume_after_cancelled_transition_does_not_enqueue_twice() -> None:
+    workflow = _workflow("cancelled")
+    repository = MagicMock()
+    repository.obter_por_id_para_atualizacao = AsyncMock(return_value=workflow)
+    repository.obter_por_id = AsyncMock(return_value=workflow)
+    service = MagicMock()
+
+    async def resume(current):
+        current.production_status = "queued"
+
+    service.resume = AsyncMock(side_effect=resume)
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch(
+            "app.api.routers.workflow.ProductionOrchestrationService",
+            return_value=service,
+        ),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+    ):
+        await retomar_producao(workflow.id, MagicMock())
+        with pytest.raises(HTTPException) as error:
+            await retomar_producao(workflow.id, MagicMock())
+
+    assert error.value.status_code == 409
+    service.resume.assert_awaited_once()
+    enqueue.assert_called_once_with(str(workflow.id))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_resume_conflicting_with_an_active_workflow_returns_409() -> None:
+    workflow = _workflow("cancelled")
+    workflow.roteiro_id = uuid.uuid4()
+    active = SimpleNamespace(id=uuid.uuid4())
+    repository = MagicMock()
+    repository.obter_por_id_para_atualizacao = AsyncMock(return_value=workflow)
+    repository.obter_ativo_por_roteiro = AsyncMock(return_value=active)
+    service = MagicMock()
+    service.resume = AsyncMock(
+        side_effect=IntegrityError("UPDATE workflow_execucoes", {}, Exception("unique"))
+    )
+    session = MagicMock()
+    session.rollback = AsyncMock()
+
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
+        patch(
+            "app.api.routers.workflow.ProductionOrchestrationService",
+            return_value=service,
+        ),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+        pytest.raises(HTTPException) as error,
+    ):
+        await retomar_producao(workflow.id, session)
+
+    assert error.value.status_code == 409
+    assert str(active.id) in error.value.detail
+    session.rollback.assert_awaited_once()
+    enqueue.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -151,9 +263,7 @@ async def test_stale_transcription_is_not_exposed_as_current() -> None:
     workflow.audio_final_sha256 = "b" * 64
     repository = MagicMock()
     repository.obter_por_id = AsyncMock(return_value=workflow)
-    repository.obter_transcricao = AsyncMock(
-        return_value=SimpleNamespace(audio_sha256="a" * 64)
-    )
+    repository.obter_transcricao = AsyncMock(return_value=SimpleNamespace(audio_sha256="a" * 64))
     with (
         patch("app.api.routers.workflow.WorkflowRepository", return_value=repository),
         pytest.raises(HTTPException) as error,

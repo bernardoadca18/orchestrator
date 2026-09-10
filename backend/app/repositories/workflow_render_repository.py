@@ -126,7 +126,9 @@ class WorkflowRenderRepository:
         render.completed_at = dt.datetime.now(dt.UTC)
         await self.session.commit()
 
-    async def reset_for_explicit_retry(self, render: WorkflowRender) -> None:
+    async def reset_for_explicit_retry(
+        self, render: WorkflowRender, *, commit: bool = True
+    ) -> None:
         render.status = "pending"
         render.phase = "pending"
         render.progress = 0.0
@@ -135,4 +137,8 @@ class WorkflowRenderRepository:
         render.error_message = None
         render.started_at = dt.datetime.now(dt.UTC)
         render.completed_at = None
-        await self.session.commit()
+        if commit:
+            await self.session.commit()
+            await self.session.refresh(render)
+        else:
+            await self.session.flush()
