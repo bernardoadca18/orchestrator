@@ -1,0 +1,43 @@
+{
+  "schema": "neovids_accent_poc_report_v1",
+  "manifest_identity": "13883c4628d9e491c1181af57813a16057f58bdd8a64c2236d5ae435506c9dca",
+  "feature_version": "pt_locale_mfcc_prosody_v1",
+  "feature_identity": "c446800cb101c6677d867d5ea00a0cdca7074ea03e5320ceb1a6c17775698ec7",
+  "classifier": "standardized_nearest_centroid",
+  "split_strategy": "leave_one_generation_job_out",
+  "sample_count": 16,
+  "groups_by_label": {
+    "PT_BR_GOOD": [
+      "1ee67bff4476490b9476011ca83c1eba"
+    ],
+    "PT_PT_BAD": []
+  },
+  "skipped_holdout_groups": [
+    "1ee67bff4476490b9476011ca83c1eba"
+  ],
+  "confusion_matrix": {
+    "tp": 0,
+    "fp": 0,
+    "fn": 0,
+    "tn": 0
+  },
+  "prediction_counts": {},
+  "pt_pt_recall": null,
+  "pt_pt_precision": null,
+  "pt_br_false_positive_rate": null,
+  "pt_pt_false_negative_rate": null,
+  "minimum_groups_per_class": 3,
+  "thresholds": {
+    "pt_br_confident_max_score": 0.35,
+    "likely_pt_pt_min_score": 0.65
+  },
+  "evidence_gates": {
+    "minimum_pt_pt_recall": 0.9,
+    "maximum_pt_br_false_positive_rate": 0.1,
+    "sample_count_sufficient": false,
+    "metrics_pass": false
+  },
+  "poc_result": "INCONCLUSIVE",
+  "safe_for_shadow_mode": true,
+  "safe_for_enforcement": false
+}

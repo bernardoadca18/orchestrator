@@ -1,0 +1,30 @@
+{
+  "schema": "neovids_mastering_v3_experiment_v1",
+  "authoritative_publication": false,
+  "workflow_id": "f853f74c-4390-4f60-96f0-505a1de061b1",
+  "input": {
+    "path": "../audio/experiments/mastering-v3/20260910T131352Z-narration-post-v1/A_raw.wav",
+    "sha256": "b06a18c88674b069fc71377e826367617f68623ae81193671cbef1d26dd23faa",
+    "integrated_lufs": -22.279,
+    "true_peak_dbtp": -2.709778378832163,
+    "sample_peak_dbfs": -2.7120151239377615
+  },
+  "candidate": {
+    "path": "D_mastering_v3_production_candidate.wav",
+    "sha256": "07705888df16f57565b6c7b1ec2ba924aa0eb2e5f0192b2a4109345b28ff92df",
+    "config_identity": "759a4589e970d0e7110e6926db9ff1ca1802876cb7f41d4662be7311833f611a",
+    "processing_identity": "39132f4f9fbe58d593f22a0c91341fede78089605b53a2e011c5653d23f40ad8",
+    "integrated_lufs": -15.972,
+    "true_peak_dbtp": -1.0415276033654721,
+    "sample_peak_dbfs": -1.0481692023297615,
+    "duration_seconds": 713.18,
+    "frame_count": 34232640,
+    "sample_rate": 48000,
+    "channels": 1,
+    "subtype": "PCM_16",
+    "clipping_sample_count": 0,
+    "compressor_peak_reduction_db": 4.460221621167837,
+    "objective_status": "pass"
+  },
+  "other_listening_candidates": "../audio/experiments/mastering-v3/20260910T131352Z-narration-post-v1/manifest.json"
+}

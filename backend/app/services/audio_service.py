@@ -28,6 +28,7 @@ from app.clients.voice_client import (
 from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco, AudioBlocoTake
 from app.repositories.workflow_repository import WorkflowRepository
+from app.services.accent_qa import AccentDetector, aggregate_accent_diagnostics
 from app.services.audio_diagnostics import analyze_audio
 from app.services.block_materialization import (
     active_block_is_current,
@@ -59,11 +60,14 @@ from app.services.transcription_service import (
 )
 
 logger = logging.getLogger(__name__)
-QUALITY_RETRY_CATEGORIES = frozenset({
-    "chunk_quality_guard",
-    "content_quality_guard",
-    "speaker_similarity_guard",
-})
+QUALITY_RETRY_CATEGORIES = frozenset(
+    {
+        "chunk_quality_guard",
+        "content_quality_guard",
+        "speaker_similarity_guard",
+        "accent_quality_guard",
+    }
+)
 QUALITY_RETRY_SEED_STRATEGY = "qwen-orchestrator-quality-retry-v1"
 MANUAL_TAKE_SEED_STRATEGY = "qwen-orchestrator-manual-take-v1"
 MANUAL_CHUNK_SEED_STRATEGY = "qwen-orchestrator-manual-chunk-v1"
@@ -121,6 +125,13 @@ def _mastering_config(config: Settings) -> MasteringConfig:
         min_acceptable_lufs=config.audio_min_acceptable_lufs,
         max_acceptable_lufs=config.audio_max_acceptable_lufs,
         duration_tolerance_seconds=config.audio_duration_tolerance_seconds,
+        compressor_enabled=config.audio_mastering_compressor_enabled,
+        compressor_threshold_db=config.audio_mastering_compressor_threshold_db,
+        compressor_ratio=config.audio_mastering_compressor_ratio,
+        compressor_attack_ms=config.audio_mastering_compressor_attack_ms,
+        compressor_release_ms=config.audio_mastering_compressor_release_ms,
+        compressor_knee=config.audio_mastering_compressor_knee,
+        loudness_range_target_lu=config.audio_mastering_loudness_range_target_lu,
     )
 
 
@@ -175,6 +186,7 @@ class AudioWorkflowService:
         transcription_provider: NarrationTranscriptionProvider | None = None,
         alignment_service_factory: Callable[[AsyncSession], NarrationAlignmentService]
         | None = None,
+        accent_detector: AccentDetector | None = None,
     ) -> None:
         self.session = session
         self.repo = WorkflowRepository(session)
@@ -188,6 +200,9 @@ class AudioWorkflowService:
         )
         self.transcription_provider = transcription_provider
         self.alignment_service_factory = alignment_service_factory or NarrationAlignmentService
+        self.accent_detector = accent_detector or AccentDetector(
+            config.audio_accent_qa_model_path, config.audio_accent_qa_mode
+        )
 
     async def process(self, workflow_id: uuid.UUID) -> None:
         workflow = await self.repo.obter_por_id(workflow_id, com_blocos=True)
@@ -287,9 +302,7 @@ class AudioWorkflowService:
                     if unchanged and not getattr(block, "requested_take_id", None):
                         block_is_current = False
                         try:
-                            block_is_current = await active_block_is_current(
-                                self.session, block
-                            )
+                            block_is_current = await active_block_is_current(self.session, block)
                         except Exception:
                             logger.exception(
                                 "active block manifest validation failed",
@@ -298,9 +311,7 @@ class AudioWorkflowService:
                         if not block_is_current:
                             chunks = await self.repo.listar_chunks(block.id)
                             if chunks:
-                                source_path = await self._reconcile_active_block(
-                                    block, source_dir
-                                )
+                                source_path = await self._reconcile_active_block(block, source_dir)
                                 source_paths.append(source_path)
                                 logger.warning(
                                     "reconciled stale block from active physical chunks",
@@ -391,6 +402,7 @@ class AudioWorkflowService:
                             selected_chunk_take_ids,
                             block_manifest,
                             materialized_provider_metadata,
+                            accent_quality,
                         ) = await self._materialize_remote_chunks(
                             voice=voice,
                             block=block,
@@ -449,8 +461,11 @@ class AudioWorkflowService:
                                 artifact_integrity=asdict(metadata),
                                 provider_metadata=materialized_provider_metadata,
                                 content_quality=content_quality,
+                                accent_quality=accent_quality,
                                 pause_diagnostics=pause_diagnostics,
-                                quality_status=content_quality["status"],
+                                quality_status=self._combined_quality_status(
+                                    content_quality, accent_quality
+                                ),
                             )
                         if hasattr(self.repo, "obter_bloco_por_id"):
                             current = await self.repo.obter_bloco_por_id(block.id)
@@ -486,6 +501,31 @@ class AudioWorkflowService:
                             if hasattr(self.repo, "atualizar_take"):
                                 await self.repo.atualizar_take(take.id, status="running")
                             continue
+
+                        if accent_quality.get("retry_required") is True:
+                            failure = VoiceJobFailedError(
+                                "accent_quality_guard",
+                                "generated speech classified as likely PT-PT",
+                            )
+                            failure.diagnostics = accent_quality  # type: ignore[attr-defined]
+                            take = await self._prepare_quality_retry(block, take, failure)
+                            active_take = take
+                            if hasattr(self.repo, "atualizar_take"):
+                                await self.repo.atualizar_take(take.id, status="running")
+                            continue
+                        if accent_quality.get("blocks_promotion") is True:
+                            if hasattr(self.repo, "atualizar_take"):
+                                await self.repo.atualizar_take(
+                                    take.id,
+                                    status="failed",
+                                    error_category="accent_human_review_required",
+                                    error_message="accent detector unavailable in enforce mode",
+                                    error_diagnostics=accent_quality,
+                                    quality_status="needs_human_review",
+                                )
+                            raise VoiceClientError(
+                                "accent_human_review_required: candidate was not promoted"
+                            )
 
                         # Voice profile provenance guard.
                         # The Voice Service returns the voice_identity in metadata, representing
@@ -526,9 +566,9 @@ class AudioWorkflowService:
 
                         break
                     # Use actual identity from Voice Service if available
-                    actual_voice_identity = completed.metadata.get(
-                        "voice_identity"
-                    ) or getattr(block, "voice_profile_identity", None)
+                    actual_voice_identity = completed.metadata.get("voice_identity") or getattr(
+                        block, "voice_profile_identity", None
+                    )
                     if hasattr(self.repo, "promover_take"):
                         promoted = await self.repo.promover_take(
                             block.id,
@@ -553,15 +593,16 @@ class AudioWorkflowService:
                             audio_channels=metadata.channels,
                             audio_frame_count=metadata.frame_count,
                             audio_subtype=metadata.subtype,
-                            artifact_integrity=materialized_provider_metadata[
-                                "block_assembly"
-                            ],
+                            artifact_integrity=materialized_provider_metadata["block_assembly"],
                             assembly_manifest_identity=block_manifest.identity,
                             assembly_manifest=block_manifest.identity_payload(),
                             provider_metadata=materialized_provider_metadata,
                             content_quality=content_quality,
+                            accent_quality=accent_quality,
                             pause_diagnostics=pause_diagnostics,
-                            quality_status=content_quality["status"],
+                            quality_status=self._combined_quality_status(
+                                content_quality, accent_quality
+                            ),
                             completed_at=dt.datetime.now(dt.UTC),
                             chunk_take_ids=selected_chunk_take_ids,
                             block_fields={
@@ -599,9 +640,7 @@ class AudioWorkflowService:
                             audio_byte_size=metadata.byte_size,
                             audio_frame_count=metadata.frame_count,
                             audio_subtype=metadata.subtype,
-                            artifact_integrity=materialized_provider_metadata[
-                                "block_assembly"
-                            ],
+                            artifact_integrity=materialized_provider_metadata["block_assembly"],
                             assembly_manifest_identity=block_manifest.identity,
                             assembly_manifest=block_manifest.identity_payload(),
                             pause_diagnostics=pause_diagnostics,
@@ -934,14 +973,10 @@ class AudioWorkflowService:
                 erro_mensagem=str(exc),
             )
 
-    async def _reconcile_active_block(
-        self, block: AudioBloco, source_dir: Path
-    ) -> Path:
+    async def _reconcile_active_block(self, block: AudioBloco, source_dir: Path) -> Path:
         manifest = await active_block_manifest(self.session, block)
         destination = (
-            source_dir
-            / "materialized"
-            / f"block_{block.ordem:03d}_{manifest.identity[:16]}.wav"
+            source_dir / "materialized" / f"block_{block.ordem:03d}_{manifest.identity[:16]}.wav"
         )
         assembly = reassemble_block_from_manifest(manifest, destination)
         if assembly.integrity is None:
@@ -980,6 +1015,7 @@ class AudioWorkflowService:
         list[uuid.UUID],
         BlockAssemblyManifest,
         dict[str, object],
+        dict[str, object],
     ]:
         """Persist, assemble, and prove one remote job's physical chunks.
 
@@ -997,6 +1033,7 @@ class AudioWorkflowService:
         chunks_root = source_dir / "chunks"
         chunks_root.mkdir(parents=True, exist_ok=True)
         chunks_data: list[dict[str, object]] = []
+        accent_items: list[dict[str, object]] = []
         for expected_index, artifact in enumerate(ordered_artifacts):
             chunk_index = int(artifact["chunk_index"])
             if chunk_index != expected_index:
@@ -1014,6 +1051,8 @@ class AudioWorkflowService:
                 expected_subtype=artifact.get("subtype"),
                 expected_frame_count=artifact.get("frame_count"),
             )
+            accent_diagnostic = self.accent_detector.analyze(chunk_path)
+            accent_items.append(accent_diagnostic)
             chunks_data.append(
                 {
                     "chunk_index": chunk_index,
@@ -1050,20 +1089,15 @@ class AudioWorkflowService:
                     "speaker_similarity_policy_version": artifact.get(
                         "speaker_similarity_policy_version"
                     ),
-                    "speaker_identity_status": artifact.get(
-                        "speaker_identity_status"
-                    ),
-                    "speaker_embedding_seconds": artifact.get(
-                        "speaker_embedding_seconds"
-                    ),
+                    "speaker_identity_status": artifact.get("speaker_identity_status"),
+                    "speaker_embedding_seconds": artifact.get("speaker_embedding_seconds"),
+                    "accent_quality": accent_diagnostic,
                 }
             )
         physical_chunk_download_seconds = time.monotonic() - chunk_download_started
         try:
             persistence_started = time.monotonic()
-            selections = await self.repo.persistir_job_chunks(
-                block.id, chunks_data, promote=False
-            )
+            selections = await self.repo.persistir_job_chunks(block.id, chunks_data, promote=False)
             chunk_persistence_seconds = time.monotonic() - persistence_started
         except Exception:
             logger.exception(
@@ -1097,9 +1131,7 @@ class AudioWorkflowService:
             chunks=tuple(manifest_chunks),
         )
         destination = (
-            source_dir
-            / "materialized"
-            / f"block_{block.ordem:03d}_{manifest.identity[:16]}.wav"
+            source_dir / "materialized" / f"block_{block.ordem:03d}_{manifest.identity[:16]}.wav"
         )
         assembly = reassemble_block_from_manifest(manifest, destination)
         if assembly.integrity is None:
@@ -1107,9 +1139,7 @@ class AudioWorkflowService:
         provider_metadata: dict[str, object] = {
             **completed.metadata,
             "requested_language": self.config.voice_language,
-            "resolved_language": completed.metadata.get(
-                "language", self.config.voice_language
-            ),
+            "resolved_language": completed.metadata.get("language", self.config.voice_language),
             "remote_full_artifact": {
                 "path": str(remote_source_path),
                 **asdict(remote_metadata),
@@ -1117,13 +1147,24 @@ class AudioWorkflowService:
             "block_assembly": assembly.integrity,
             "assembly_manifest": manifest.identity_payload(),
             "assembly_manifest_identity": manifest.identity,
+            "accent_quality": aggregate_accent_diagnostics(
+                accent_items, self.config.audio_accent_qa_mode
+            ),
             "orchestrator_performance": {
                 "physical_chunk_download_seconds": physical_chunk_download_seconds,
                 "chunk_persistence_seconds": chunk_persistence_seconds,
                 **(assembly.timings or {}),
             },
         }
-        return destination, assembly.metadata, selected_ids, manifest, provider_metadata
+        accent_quality = cast(dict[str, object], provider_metadata["accent_quality"])
+        return (
+            destination,
+            assembly.metadata,
+            selected_ids,
+            manifest,
+            provider_metadata,
+            accent_quality,
+        )
 
     async def _ensure_take(
         self, block: AudioBloco, synthesis_identity: str, chunking_identity: str
@@ -1228,7 +1269,9 @@ class AudioWorkflowService:
         }
         if isinstance(diagnostics, dict):
             entry["quality_classification"] = diagnostics.get("classification")
-            entry["retry_reason"] = diagnostics.get("retry_reason")
+            entry["retry_reason"] = diagnostics.get("retry_reason") or diagnostics.get(
+                "reason_code"
+            )
         if not any(
             item.get("job_id") == block.job_id_voz
             and item.get("generation_attempt") == block.generation_attempt
@@ -1237,6 +1280,9 @@ class AudioWorkflowService:
         ):
             history.append(entry)
         if block.generation_attempt >= self.config.voice_quality_max_retries:
+            exhausted_status = (
+                "needs_human_review" if failure.category == "accent_quality_guard" else "rejected"
+            )
             if hasattr(self.repo, "atualizar_take"):
                 await self.repo.atualizar_take(
                     take.id,
@@ -1247,14 +1293,23 @@ class AudioWorkflowService:
                         "history": history,
                         "last_failure": diagnostics,
                     },
-                    quality_status="rejected",
+                    quality_status=exhausted_status,
                 )
             await self.repo.atualizar_bloco(
                 block.id,
                 generation_attempt_history=history,
-                erro_mensagem="quality_retry_exhausted: voice quality retry limit was exhausted",
+                erro_mensagem=(
+                    "accent_human_review_required: automatic retry budget was exhausted"
+                    if failure.category == "accent_quality_guard"
+                    else "quality_retry_exhausted: voice quality retry limit was exhausted"
+                ),
             )
             block.generation_attempt_history = history
+            if failure.category == "accent_quality_guard":
+                raise VoiceJobFailedError(
+                    "accent_human_review_required",
+                    "automatic accent retry budget was exhausted",
+                )
             raise VoiceJobFailedError(
                 "quality_retry_exhausted",
                 "voice quality retry limit was exhausted",
@@ -1346,6 +1401,20 @@ class AudioWorkflowService:
         block.job_id_voz = job.id
         block.resolved_seed = job.resolved_seed
         block.initial_resolved_seed = initial_seed
+
+    @staticmethod
+    def _combined_quality_status(
+        content_quality: dict[str, object], accent_quality: dict[str, object]
+    ) -> str:
+        content_status = str(content_quality.get("status", "unavailable"))
+        if content_status == "rejected" or accent_quality.get("blocks_promotion") is True:
+            return "rejected"
+        if content_status != "passed" or accent_quality.get("classification") in {
+            "likely_pt_pt",
+            "uncertain",
+        }:
+            return "warning"
+        return "passed"
 
     @staticmethod
     def _can_reuse(block: AudioBloco) -> bool:

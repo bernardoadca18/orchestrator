@@ -140,6 +140,8 @@ export interface AudioChunkTake {
   error_message: string | null;
   created_at: string | null;
   completed_at: string | null;
+  accent_quality: Record<string, unknown> | null;
+  quality_rejection_reason: string | null;
 }
 
 export interface AudioChunkRegeneration {
@@ -237,6 +239,7 @@ export interface AudioBlocoTake {
   artifact_integrity: Record<string, unknown> | null;
   provider_metadata: Record<string, unknown> | null;
   content_quality: Record<string, unknown> | null;
+  accent_quality: Record<string, unknown> | null;
   pause_diagnostics: Record<string, unknown> | null;
   is_current: boolean;
   created_at: string;

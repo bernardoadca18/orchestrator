@@ -157,6 +157,7 @@ class ChunkPersistingRepository(FakeRepository):
         self.persisted_chunks.append((block_id, chunks_data))
         return await super().persistir_job_chunks(block_id, chunks_data, promote=promote)
 
+
 class FakeVoiceClient:
     def __init__(self, audio: bytes) -> None:
         self.audio = audio
@@ -178,9 +179,7 @@ class FakeVoiceClient:
                 identity="v" * 64,
                 clone_mode="x_vector_only",
                 reference_id="ref_full_processed_raw.wav",
-                audio_sha256=(
-                    "8856924e05f76d1a3a5b8554218f80b5e1a898aebfe211ec1b65b60eabdbc70b"
-                ),
+                audio_sha256=("8856924e05f76d1a3a5b8554218f80b5e1a898aebfe211ec1b65b60eabdbc70b"),
             ),
             GenerationProfileDescriptor(name=generation, version="2", identity="g" * 64),
             chunking_identity=self.chunking_identity,
@@ -363,6 +362,25 @@ class FakeAlignmentService:
 class FailingAlignmentService:
     async def ensure(self, workflow_id: uuid.UUID):
         raise RuntimeError("alignment unavailable")
+
+
+class ScriptedAccentDetector:
+    def __init__(self, classifications: list[str], mode: str) -> None:
+        self.classifications = classifications
+        self.mode = mode
+        self.calls = 0
+
+    def analyze(self, _path: Path) -> dict[str, object]:
+        classification = self.classifications[min(self.calls, len(self.classifications) - 1)]
+        self.calls += 1
+        likely = classification == "likely_pt_pt"
+        return {
+            "classification": classification,
+            "detector_status": "available",
+            "reason_code": "accent_likely_pt_pt" if likely else "accent_pt_br_confident",
+            "retry_required": self.mode == "enforce" and likely,
+            "blocks_promotion": self.mode == "enforce" and likely,
+        }
 
 
 def _job(job_id: str, seed: int) -> VoiceNarrationJob:
@@ -866,6 +884,97 @@ async def test_content_quality_retry_is_bounded(tmp_path: Path, write_tone) -> N
     )
 
 
+@pytest.mark.asyncio
+async def test_accent_shadow_persists_signal_without_retry(tmp_path: Path, write_tone) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = ChunkPersistingRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    detector = ScriptedAccentDetector(["likely_pt_pt"], "shadow")
+    service = AudioWorkflowService(
+        object(),
+        config=_config(tmp_path, glossary),
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+        accent_detector=detector,  # type: ignore[arg-type]
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    assert workflow.status == "audio_concluido"
+    assert len(voice.created) == 1
+    assert repo.persisted_chunks[0][1][0]["accent_quality"]["classification"] == ("likely_pt_pt")
+
+
+@pytest.mark.asyncio
+async def test_accent_enforce_retries_with_deterministic_seed_before_promotion(
+    tmp_path: Path, write_tone
+) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = ChunkPersistingRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    config = _config(tmp_path, glossary)
+    config.audio_accent_qa_mode = "enforce"
+    detector = ScriptedAccentDetector(["likely_pt_pt", "pt_br_confident"], "enforce")
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+        accent_detector=detector,  # type: ignore[arg-type]
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    block = repo.blocks[0]
+    assert workflow.status == "audio_concluido"
+    assert len(voice.created) == 2
+    assert voice.created[1]["seed"] == derive_quality_retry_seed(303, 1)
+    assert block.generation_attempt_history[0]["error_category"] == "accent_quality_guard"
+    assert block.generation_attempt_history[0]["retry_reason"] == "accent_likely_pt_pt"
+    assert all(chunk.current_take_id is None for chunk in repo.physical_chunks[block.id])
+
+
+@pytest.mark.asyncio
+async def test_accent_retry_exhaustion_requires_human_review(tmp_path: Path, write_tone) -> None:
+    tone = write_tone(tmp_path / "voice.wav", duration=1.0)
+    glossary = _write_glossary(tmp_path)
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = ChunkPersistingRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    config = _config(tmp_path, glossary)
+    config.audio_accent_qa_mode = "enforce"
+    config.voice_quality_max_retries = 1
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+        accent_detector=ScriptedAccentDetector(["likely_pt_pt"], "enforce"),  # type: ignore[arg-type]
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    assert workflow.status == "erro"
+    assert len(voice.created) == 2
+    assert repo.blocks[0].erro_mensagem.startswith("accent_human_review_required")
+
+
 def test_low_confidence_asr_is_inconclusive_not_content_rejection(
     tmp_path: Path, write_tone
 ) -> None:
@@ -888,6 +997,14 @@ def test_low_confidence_asr_is_inconclusive_not_content_rejection(
     assert report["reasons"] == ["asr_low_confidence"]
     assert report["asr"]["confidence_status"] == "low_confidence"
     assert report["metrics"]["raw_content_coverage"]["status"] == "rejected"
+
+
+def test_accent_warning_never_masks_blocking_content_quality() -> None:
+    combined = AudioWorkflowService._combined_quality_status(
+        {"status": "rejected"},
+        {"classification": "uncertain", "blocks_promotion": False},
+    )
+    assert combined == "rejected"
 
 
 @pytest.mark.asyncio

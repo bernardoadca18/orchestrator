@@ -101,6 +101,14 @@ function TakeQualityDetails({ report }: { report: Record<string, unknown> | null
   </>;
 }
 
+function AccentQuality({ report }: { report: Record<string, unknown> | null }) {
+  if (!report) return null;
+  const classification = typeof report.classification === "string" ? report.classification : "uncertain";
+  const status = report.detector_status === "available" ? classification : "detector unavailable";
+  const reason = typeof report.reason_code === "string" ? ` (${report.reason_code})` : "";
+  return <div>Accent: {status}{reason}</div>;
+}
+
 export default function WorkflowDetail() {
   const { id } = useParams<{ id: string }>();
   const workflowId = id ?? "";
@@ -510,6 +518,7 @@ export default function WorkflowDetail() {
                           {take.error_category ? ` — ${take.error_category}: ${take.error_message || ""}` : ""}
                           {take.is_current ? " (atual)" : ""}
                           <TakeQualityDetails report={take.content_quality} />
+                          <AccentQuality report={take.accent_quality} />
                           {take.synthesis_text ? <details>
                             <summary>Proveniência do take</summary>
                             <div>Canônico: {take.canonical_text || "—"}</div>

@@ -788,9 +788,7 @@ async def baixar_audio_final(
     if wf.audio_edit_revision != wf.audio_materialized_revision:
         raise HTTPException(409, "Áudio final está stale em relação às edições físicas")
     try:
-        if not all(
-            [await active_block_is_current(session, block) for block in wf.blocos]
-        ):
+        if not all([await active_block_is_current(session, block) for block in wf.blocos]):
             raise HTTPException(
                 409, "Áudio final referencia bloco sem proveniência de assembly atual"
             )
@@ -1083,9 +1081,7 @@ async def baixar_audio_bloco(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(
-            409, "Proveniência do assembly do bloco falhou na verificação"
-        ) from exc
+        raise HTTPException(409, "Proveniência do assembly do bloco falhou na verificação") from exc
     try:
         path, metadata = verify_audio_artifact(
             bloco.audio_path,
@@ -1147,8 +1143,7 @@ async def listar_chunks_bloco(
                     ),
                     "seed": take.seed,
                     "audio_url": f"/workflow/{workflow_id}/chunks/{take.id}/audio"
-                    if take.audio_path
-                    and take.status in {"completed", "superseded", "rejected"}
+                    if take.audio_path and take.status in {"completed", "superseded", "rejected"}
                     else None,
                     "audio_sha256": take.audio_sha256,
                     "audio_duration_seconds": take.audio_duration_seconds,
@@ -1162,10 +1157,10 @@ async def listar_chunks_bloco(
                     "speaker_similarity_reference_identity": (
                         take.speaker_similarity_reference_identity
                     ),
-                    "speaker_similarity_policy_version": (
-                        take.speaker_similarity_policy_version
-                    ),
+                    "speaker_similarity_policy_version": (take.speaker_similarity_policy_version),
                     "speaker_identity_status": take.speaker_identity_status,
+                    "accent_quality": take.accent_quality,
+                    "quality_rejection_reason": take.quality_rejection_reason,
                     "created_at": take.created_at.isoformat() if take.created_at else None,
                     "completed_at": take.completed_at.isoformat() if take.completed_at else None,
                     "error_message": take.error_message,
@@ -1192,6 +1187,7 @@ async def regenerar_chunk(
     """
     from app.clients.voice_client import VoiceClient
     from app.core.config import settings
+    from app.services.accent_qa import AccentDetector
     from app.services.audio_service import derive_manual_chunk_seed
     from app.services.production_audio import (
         ProductionAudioError,
@@ -1199,9 +1195,7 @@ async def regenerar_chunk(
     )
 
     if idempotency_key is None or not (1 <= len(idempotency_key) <= 200):
-        raise HTTPException(
-            400, "Idempotency-Key válido é obrigatório para regenerar um chunk"
-        )
+        raise HTTPException(400, "Idempotency-Key válido é obrigatório para regenerar um chunk")
 
     repo = WorkflowRepository(session)
     bloco = await repo.obter_bloco_por_id(bloco_id)
@@ -1221,11 +1215,14 @@ async def regenerar_chunk(
     existing = await repo.obter_chunk_take_por_idempotency(idempotency_key)
     if existing is not None:
         if existing.audio_chunk_id != chunk.id:
-            raise HTTPException(
-                409, "Idempotency-Key já foi usado para outro chunk"
-            )
+            raise HTTPException(409, "Idempotency-Key já foi usado para outro chunk")
         take = existing
         new_seed = take.seed
+        if take.status == "rejected" and take.quality_rejection_reason == "accent_likely_pt_pt":
+            raise HTTPException(
+                422,
+                "Take já rejeitado pelo accent QA; o take ativo foi preservado",
+            )
     else:
         new_seed = derive_manual_chunk_seed(
             block_id=bloco.id,
@@ -1248,9 +1245,7 @@ async def regenerar_chunk(
 
     try:
         if take.status != "completed":
-            await repo.atualizar_chunk_take(
-                take.id, status="running", error_message=None
-            )
+            await repo.atualizar_chunk_take(take.id, status="running", error_message=None)
             async with VoiceClient(settings) as voice:
                 result = await voice.regenerate_chunk(
                     chunk.source_job_id,
@@ -1263,22 +1258,16 @@ async def regenerar_chunk(
                         "Voice Service candidate changed the frozen synthesis text"
                     )
                 if result.get("seed") != new_seed:
-                    raise ProductionAudioError(
-                        "Voice Service candidate returned a different seed"
-                    )
+                    raise ProductionAudioError("Voice Service candidate returned a different seed")
                 if (
                     result.get("job_id") != chunk.source_job_id
                     or result.get("chunk_index") != chunk_index
                     or result.get("status") != "completed"
                 ):
-                    raise ProductionAudioError(
-                        "Voice Service candidate identity is inconsistent"
-                    )
+                    raise ProductionAudioError("Voice Service candidate identity is inconsistent")
                 candidate_id = result.get("candidate_id")
                 if not isinstance(candidate_id, str) or not candidate_id:
-                    raise ProductionAudioError(
-                        "Voice Service candidate identity is missing"
-                    )
+                    raise ProductionAudioError("Voice Service candidate identity is missing")
                 if (
                     take.provider_candidate_id is not None
                     and take.provider_candidate_id != candidate_id
@@ -1316,9 +1305,19 @@ async def regenerar_chunk(
                     expected_frame_count=result.get("frame_count"),
                 )
 
+            accent_quality = AccentDetector(
+                getattr(
+                    settings,
+                    "audio_accent_qa_model_path",
+                    Path("config/accent_detector_model.json"),
+                ),
+                getattr(settings, "audio_accent_qa_mode", "shadow"),
+            ).analyze(chunk_path)
+            rejected_by_accent = accent_quality.get("blocks_promotion") is True
+
             await repo.atualizar_chunk_take(
                 take.id,
-                status="completed",
+                status="rejected" if rejected_by_accent else "completed",
                 audio_path=str(chunk_path),
                 audio_sha256=local_metadata.sha256,
                 audio_byte_size=local_metadata.byte_size,
@@ -1334,21 +1333,26 @@ async def regenerar_chunk(
                     "provider_candidate_id": candidate_id,
                     "requested_language": settings.voice_language,
                     "resolved_language": result.get("language", settings.voice_language),
-                    "speaker_embedding_seconds": result.get(
-                        "speaker_embedding_seconds"
-                    ),
+                    "speaker_embedding_seconds": result.get("speaker_embedding_seconds"),
                 },
                 speaker_similarity=result.get("speaker_similarity"),
                 speaker_similarity_reference_identity=result.get(
                     "speaker_similarity_reference_identity"
                 ),
-                speaker_similarity_policy_version=result.get(
-                    "speaker_similarity_policy_version"
-                ),
+                speaker_similarity_policy_version=result.get("speaker_similarity_policy_version"),
                 speaker_identity_status=result.get("speaker_identity_status"),
+                accent_quality=accent_quality,
+                quality_rejection_reason=(
+                    str(accent_quality.get("reason_code")) if rejected_by_accent else None
+                ),
                 provider_candidate_id=candidate_id,
                 completed_at=dt.datetime.now(dt.UTC),
             )
+            if rejected_by_accent:
+                raise HTTPException(
+                    422,
+                    "Take rejeitado pelo accent QA; o take ativo foi preservado",
+                )
 
         await session.refresh(take)
         await session.refresh(chunk)
@@ -1362,12 +1366,13 @@ async def regenerar_chunk(
             "status": "candidate",
             "audio_url": f"/workflow/{workflow_id}/chunks/{take.id}/audio",
             "duration_seconds": take.audio_duration_seconds,
+            "accent_quality": take.accent_quality,
         }
 
     except Exception as exc:
-        await repo.atualizar_chunk_take(take.id, status="failed", error_message=str(exc))
         if isinstance(exc, HTTPException):
             raise
+        await repo.atualizar_chunk_take(take.id, status="failed", error_message=str(exc))
         raise HTTPException(500, f"Falha na regeneração do chunk: {exc}") from exc
 
 
@@ -1382,6 +1387,8 @@ async def promover_chunk_take(
     Selection is transactional and durable, but materialization is deferred to
     the explicit batch Update Pipeline operation.
     """
+    from app.core.config import settings
+
     repo = WorkflowRepository(session)
 
     take = await session.get(AudioChunkTake, take_id)
@@ -1398,6 +1405,12 @@ async def promover_chunk_take(
 
     if take.status != "completed":
         raise HTTPException(400, "Take não está pronto para promoção")
+    if (
+        getattr(settings, "audio_accent_qa_mode", "shadow") == "enforce"
+        and isinstance(take.accent_quality, dict)
+        and take.accent_quality.get("classification") == "likely_pt_pt"
+    ):
+        raise HTTPException(409, "Take bloqueado pelo accent QA")
 
     workflow_before = await repo.obter_por_id(workflow_id)
     assert workflow_before is not None
@@ -1452,9 +1465,7 @@ async def aplicar_edicoes_pendentes(
         created=created,
         audio_edit_revision=workflow.audio_edit_revision,
         audio_materialized_revision=workflow.audio_materialized_revision,
-        audio_edits_pending=(
-            workflow.audio_edit_revision > workflow.audio_materialized_revision
-        ),
+        audio_edits_pending=(workflow.audio_edit_revision > workflow.audio_materialized_revision),
         final_audio_sha256=workflow.audio_final_sha256,
     )
 

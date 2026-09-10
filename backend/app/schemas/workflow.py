@@ -73,6 +73,7 @@ class AudioBlocoTakeOut(BaseModel):
     assembly_manifest: dict | None = None
     provider_metadata: dict | None
     content_quality: dict | None
+    accent_quality: dict | None = None
     pause_diagnostics: dict | None
     is_current: bool
     created_at: dt.datetime

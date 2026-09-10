@@ -312,6 +312,7 @@ class AudioBlocoTake(Base):
     assembly_manifest: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     provider_metadata: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     content_quality: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    accent_quality: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     pause_diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[dt.datetime] = mapped_column(
@@ -431,10 +432,10 @@ class AudioChunkTake(Base):
     speaker_similarity_reference_identity: Mapped[str | None] = mapped_column(
         String(64), nullable=True
     )
-    speaker_similarity_policy_version: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
+    speaker_similarity_policy_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
     speaker_identity_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    accent_quality: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    quality_rejection_reason: Mapped[str | None] = mapped_column(String(100), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
     provider_candidate_id: Mapped[str | None] = mapped_column(String(64), nullable=True)

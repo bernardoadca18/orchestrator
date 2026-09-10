@@ -933,9 +933,7 @@ class WorkflowRepository:
         Returns:
             List of persisted AudioChunk objects with their initial takes
         """
-        selections = await self.persistir_job_chunks(
-            bloco_id, chunks_data, promote=True
-        )
+        selections = await self.persistir_job_chunks(bloco_id, chunks_data, promote=True)
         return [chunk for chunk, _take in selections]
 
     async def persistir_job_chunks(
@@ -957,6 +955,12 @@ class WorkflowRepository:
         if not chunks_data:
             raise ValueError("physical chunk set is empty")
         ordered_data = sorted(chunks_data, key=lambda item: int(item["chunk_index"]))
+        if promote and any(
+            isinstance(item.get("accent_quality"), dict)
+            and item["accent_quality"].get("blocks_promotion") is True
+            for item in ordered_data
+        ):
+            raise ValueError("accent-rejected physical chunks cannot be promoted")
         indexes = [int(item["chunk_index"]) for item in ordered_data]
         if len(set(indexes)) != len(indexes):
             raise ValueError("physical chunk indexes are duplicated")
@@ -973,6 +977,10 @@ class WorkflowRepository:
             seed = chunk_meta["seed"]
             duration_seconds = chunk_meta.get("duration_seconds")
             sample_rate = chunk_meta.get("sample_rate")
+            accent_quality = chunk_meta.get("accent_quality")
+            accent_rejected = (
+                isinstance(accent_quality, dict) and accent_quality.get("blocks_promotion") is True
+            )
 
             if existing:
                 chunk = existing[position]
@@ -987,9 +995,7 @@ class WorkflowRepository:
                     "chunking_identity": chunk_meta["chunking_identity"],
                     "chunking_strategy_version": chunk_meta["chunking_strategy_version"],
                     "voice_profile_identity": chunk_meta["voice_profile_identity"],
-                    "generation_profile_identity": chunk_meta[
-                        "generation_profile_identity"
-                    ],
+                    "generation_profile_identity": chunk_meta["generation_profile_identity"],
                 }
                 for name, expected in plan_fields.items():
                     if getattr(chunk, name) != expected:
@@ -1024,9 +1030,7 @@ class WorkflowRepository:
             idempotency_key = f"qwen-job:{source_job_id}:chunk:{chunk_index}"
             take = (
                 await self.session.execute(
-                    select(AudioChunkTake).where(
-                        AudioChunkTake.idempotency_key == idempotency_key
-                    )
+                    select(AudioChunkTake).where(AudioChunkTake.idempotency_key == idempotency_key)
                 )
             ).scalar_one_or_none()
             if take is None:
@@ -1042,7 +1046,7 @@ class WorkflowRepository:
                     audio_chunk_id=chunk.id,
                     take_number=max_take_number + 1,
                     kind="initial" if max_take_number == 0 else "regeneration",
-                    status="completed",
+                    status="rejected" if accent_rejected else "completed",
                     seed=seed,
                     audio_path=chunk_meta.get("audio_path"),
                     audio_sha256=chunk_meta.get("audio_sha256"),
@@ -1062,14 +1066,18 @@ class WorkflowRepository:
                         "speaker_similarity_policy_version"
                     ),
                     speaker_identity_status=chunk_meta.get("speaker_identity_status"),
+                    accent_quality=accent_quality,
+                    quality_rejection_reason=(
+                        str(accent_quality.get("reason_code"))
+                        if accent_rejected and isinstance(accent_quality, dict)
+                        else None
+                    ),
                     provider_metadata={
                         "provider_chunk_id": chunk_id,
                         "source_job_id": source_job_id,
                         "requested_language": chunk_meta.get("requested_language"),
                         "resolved_language": chunk_meta.get("resolved_language"),
-                        "speaker_embedding_seconds": chunk_meta.get(
-                            "speaker_embedding_seconds"
-                        ),
+                        "speaker_embedding_seconds": chunk_meta.get("speaker_embedding_seconds"),
                     },
                     idempotency_key=idempotency_key,
                     completed_at=dt.datetime.now(dt.UTC),
@@ -1151,9 +1159,7 @@ class WorkflowRepository:
             existing = await self.obter_chunk_take_por_idempotency(idempotency_key)
             if existing is not None:
                 if existing.audio_chunk_id != chunk_id or existing.seed != seed:
-                    raise ValueError(
-                        "Idempotency-Key was already used with different chunk inputs"
-                    )
+                    raise ValueError("Idempotency-Key was already used with different chunk inputs")
                 return existing
 
         # Determine next take number
@@ -1179,12 +1185,8 @@ class WorkflowRepository:
         await self.session.refresh(take)
         return take
 
-    async def obter_chunk_take_por_idempotency(
-        self, idempotency_key: str
-    ) -> AudioChunkTake | None:
-        stmt = select(AudioChunkTake).where(
-            AudioChunkTake.idempotency_key == idempotency_key
-        )
+    async def obter_chunk_take_por_idempotency(self, idempotency_key: str) -> AudioChunkTake | None:
+        stmt = select(AudioChunkTake).where(AudioChunkTake.idempotency_key == idempotency_key)
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
     async def atualizar_chunk_take(self, take_id: uuid.UUID, **campos) -> None:
@@ -1232,7 +1234,9 @@ class WorkflowRepository:
             raise LookupError("workflow not found")
         chunk = (
             await self.session.execute(
-                select(AudioChunk).where(AudioChunk.id == chunk.id).with_for_update()
+                select(AudioChunk)
+                .where(AudioChunk.id == chunk.id)
+                .with_for_update()
                 .execution_options(populate_existing=True)
             )
         ).scalar_one()
@@ -1279,18 +1283,14 @@ class WorkflowRepository:
         """Create/replay one batch update without launching duplicate work."""
         workflow = (
             await self.session.execute(
-                select(WorkflowExecucao)
-                .where(WorkflowExecucao.id == workflow_id)
-                .with_for_update()
+                select(WorkflowExecucao).where(WorkflowExecucao.id == workflow_id).with_for_update()
             )
         ).scalar_one_or_none()
         if workflow is None:
             raise LookupError("workflow not found")
         existing = (
             await self.session.execute(
-                select(AudioEditUpdate).where(
-                    AudioEditUpdate.idempotency_key == idempotency_key
-                )
+                select(AudioEditUpdate).where(AudioEditUpdate.idempotency_key == idempotency_key)
             )
         ).scalar_one_or_none()
         if existing is not None:
@@ -1310,15 +1310,19 @@ class WorkflowRepository:
             return existing, False
 
         active = (
-            await self.session.execute(
-                select(AudioEditUpdate)
-                .where(
-                    AudioEditUpdate.workflow_execucao_id == workflow_id,
-                    AudioEditUpdate.status.in_(["pending", "running"]),
+            (
+                await self.session.execute(
+                    select(AudioEditUpdate)
+                    .where(
+                        AudioEditUpdate.workflow_execucao_id == workflow_id,
+                        AudioEditUpdate.status.in_(["pending", "running"]),
+                    )
+                    .order_by(AudioEditUpdate.created_at.desc())
                 )
-                .order_by(AudioEditUpdate.created_at.desc())
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
         if active is not None:
             return active, False
         if workflow.audio_edit_revision <= workflow.audio_materialized_revision:
@@ -1365,25 +1369,18 @@ class WorkflowRepository:
         if update.status == "failed":
             return None
         if update.edit_snapshot is None:
-            update.target_revision = max(
-                update.target_revision, workflow.audio_edit_revision
-            )
+            update.target_revision = max(update.target_revision, workflow.audio_edit_revision)
             blocks = list(
                 (
                     await self.session.execute(
                         select(AudioBloco)
                         .where(
                             AudioBloco.workflow_execucao_id == workflow.id,
-                            AudioBloco.audio_edit_revision
-                            > AudioBloco.audio_materialized_revision,
+                            AudioBloco.audio_edit_revision > AudioBloco.audio_materialized_revision,
                             AudioBloco.audio_edit_revision <= update.target_revision,
                         )
                         .order_by(AudioBloco.ordem)
-                        .options(
-                            selectinload(AudioBloco.chunks).selectinload(
-                                AudioChunk.takes
-                            )
-                        )
+                        .options(selectinload(AudioBloco.chunks).selectinload(AudioChunk.takes))
                     )
                 ).scalars()
             )
@@ -1431,9 +1428,7 @@ class WorkflowRepository:
                                 ),
                                 "pause_after_frames": chunk.pause_after_frames,
                             }
-                            for chunk in sorted(
-                                block.chunks, key=lambda item: item.chunk_index
-                            )
+                            for chunk in sorted(block.chunks, key=lambda item: item.chunk_index)
                         ],
                     }
                     for block in blocks
@@ -1469,9 +1464,7 @@ class WorkflowRepository:
         update.completed_at = dt.datetime.now(dt.UTC)
         await self.session.commit()
 
-    async def get_audio_edit_update(
-        self, update_id: uuid.UUID
-    ) -> AudioEditUpdate | None:
+    async def get_audio_edit_update(self, update_id: uuid.UUID) -> AudioEditUpdate | None:
         return await self.session.get(AudioEditUpdate, update_id)
 
     async def recoverable_audio_edit_updates(self) -> Sequence[AudioEditUpdate]:

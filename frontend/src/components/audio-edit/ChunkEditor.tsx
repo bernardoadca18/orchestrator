@@ -15,6 +15,14 @@ function takeLabel(take: AudioChunkTake): string {
   return `Take ${take.take_number} · ${take.kind} · ${take.status}`;
 }
 
+function accentLabel(report: Record<string, unknown> | null): string {
+  if (!report) return "Accent: não medido";
+  if (report.detector_status !== "available") return "Accent: detector indisponível";
+  if (report.classification === "pt_br_confident") return "Accent: PT-BR confident";
+  if (report.classification === "likely_pt_pt") return "Accent: likely PT-PT";
+  return "Accent: uncertain";
+}
+
 function TakeAudio({ workflowId, take }: { workflowId: string; take: AudioChunkTake }) {
   if (!take.audio_url || !take.audio_sha256) {
     return <span className="audio-edit-muted">Áudio indisponível</span>;
@@ -145,6 +153,7 @@ export function ChunkEditor({
             <div className="audio-edit-meta">
               {duration(activeTake.audio_duration_seconds)} · seed {activeTake.seed} · SHA {shortSha(activeTake.audio_sha256)}
             </div>
+            <div className="audio-edit-meta">{accentLabel(activeTake.accent_quality)}</div>
           </>
         ) : <p className="audio-edit-error">Nenhum take atual selecionado.</p>}
       </section>
@@ -159,6 +168,7 @@ export function ChunkEditor({
           <div className="audio-edit-meta">
             {duration(take.audio_duration_seconds)} · seed {take.seed} · SHA {shortSha(take.audio_sha256)}
           </div>
+          <div className="audio-edit-meta">{accentLabel(take.accent_quality)}</div>
           {take.error_message && <p className="audio-edit-error">{take.error_message}</p>}
           {take.status === "candidate" && (
             <div className="audio-edit-actions">
@@ -192,6 +202,7 @@ export function ChunkEditor({
               <div className="audio-edit-meta">
                 {duration(take.audio_duration_seconds)} · seed {take.seed} · {take.created_at ? new Date(take.created_at).toLocaleString("pt-BR") : "data indisponível"}
               </div>
+              <div className="audio-edit-meta">{accentLabel(take.accent_quality)}</div>
               {take.error_message && <p className="audio-edit-error">{take.error_message}</p>}
             </div>
           ))}

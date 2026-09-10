@@ -1,4 +1,4 @@
-"""Create a small, opt-in narration-stem A/B/C listening package."""
+"""Create a small, opt-in narration-stem A/B/C/D listening package."""
 
 from __future__ import annotations
 
@@ -6,9 +6,11 @@ import argparse
 import json
 import os
 import shutil
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 
+from app.services.mastering import MasteringConfig, master_narration
 from app.services.narration_postprocessing import (
     BALANCED,
     CONSERVATIVE,
@@ -33,7 +35,10 @@ def main() -> int:
     source_metadata = inspect_wav(source)
     print(f"Input: {source}")
     print(f"SHA-256: {source_metadata.sha256}")
-    print("Candidates: A raw, B conservative (-17 LUFS), C balanced (-16 LUFS)")
+    print(
+        "Candidates: A raw, B conservative (-17 LUFS), C balanced (-16 LUFS), "
+        "D production mastering v3 (-16 LUFS/-1 dBTP)"
+    )
     print(f"Output: {args.output}")
     if not args.run:
         print("PLAN ONLY: zero audio processing performed. Add --run to execute.")
@@ -46,6 +51,11 @@ def main() -> int:
     shutil.copy2(source, raw_copy)
     if inspect_wav(raw_copy).sha256 != source_metadata.sha256:
         raise RuntimeError("raw A/B copy checksum mismatch")
+    v3 = master_narration(
+        source,
+        run_dir / "D_mastering_v3.wav",
+        MasteringConfig(),
+    )
     candidates = [
         {"display_id": "A", "profile": "raw", "wav": raw_copy.name},
         {
@@ -60,9 +70,16 @@ def main() -> int:
             "display_id": "C",
             "profile": BALANCED.name,
             "wav": "C_balanced.wav",
-            "provenance": process_narration_stem(
-                source, run_dir / "C_balanced.wav", BALANCED
-            ),
+            "provenance": process_narration_stem(source, run_dir / "C_balanced.wav", BALANCED),
+        },
+        {
+            "display_id": "D",
+            "profile": "transparent_dynamics_v3_ffmpeg_loudnorm",
+            "wav": "D_mastering_v3.wav",
+            "provenance": {
+                **v3.to_dict(),
+                "artifact": asdict(v3.metadata),
+            },
         },
     ]
     manifest = {
@@ -75,9 +92,10 @@ def main() -> int:
     }
     _atomic_json(run_dir / "manifest.json", manifest)
     (run_dir / "LISTENING.md").write_text(
-        "# Narration stem A/B/C\n\n"
+        "# Narration stem A/B/C/D\n\n"
         "Use matched playback volume. Compare naturalness, clarity, fatigue, pumping, "
         "sibilance and retained prosody. A is raw. B is conservative. C is balanced. "
+        "D is the exact production mastering-v3 policy candidate. "
         "Higher loudness alone is not a preference signal. No candidate is promoted "
         "automatically; this is not final-program mastering.\n",
         encoding="utf-8",
