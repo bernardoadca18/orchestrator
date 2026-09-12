@@ -185,7 +185,12 @@ def _inspect_source_wav(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         info = sf.info(str(path))
     except (OSError, RuntimeError) as exc:
         raise ProductionAudioError("reference WAV is unreadable") from exc
-    if info.format != "WAV" or info.frames <= 0 or info.channels <= 0 or info.samplerate <= 0:
+    if (
+    info.format not in {"WAV", "WAVEX"}
+        or info.frames <= 0
+        or info.channels <= 0
+        or info.samplerate <= 0
+    ):
         raise ProductionAudioError("reference WAV is empty or not a supported WAV")
     file_size = path.stat().st_size
     with path.open("rb") as stream:
