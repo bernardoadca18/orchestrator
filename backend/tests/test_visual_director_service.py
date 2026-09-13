@@ -509,9 +509,7 @@ async def test_required_and_optional_no_results_are_explicit_gaps() -> None:
 
 @pytest.mark.asyncio
 async def test_hybrid_image_only_result_is_selected_without_temporal_fields() -> None:
-    workflow, alignment = _entities(
-        [_query(preferred_session_id=None, start=None, end=None)]
-    )
+    workflow, alignment = _entities([_query(preferred_session_id=None, start=None, end=None)])
     workflow.roteiro_snapshot["media_context"]["static_images"] = {
         "enabled": True,
         "asset_classes": ["official_screenshot"],
@@ -532,10 +530,32 @@ async def test_hybrid_image_only_result_is_selected_without_temporal_fields() ->
 
 
 @pytest.mark.asyncio
+async def test_empty_image_filters_issue_one_request_and_combinations_are_bounded() -> None:
+    workflow, alignment = _entities([_query(preferred_session_id=None, start=None, end=None)])
+    workflow.roteiro_snapshot["media_context"]["static_images"] = {"enabled": True}
+    provider = FakeProvider()
+    provider.image_results = [_image_candidate()]
+    service, _ = _service(workflow, alignment, provider)
+    await service.ensure(workflow.id)
+    assert len(provider.image_search_calls) == 1
+    assert provider.image_search_calls[0][2].to_dict() == {}
+
+    workflow.roteiro_snapshot["media_context"]["static_images"] = {
+        "enabled": True,
+        "asset_classes": ["a", "b", "c"],
+        "collections": ["one", "two", "three"],
+        "source_classes": ["official", "licensed", "press"],
+    }
+    with pytest.raises(
+        VisualDirectorInputError,
+        match="static image filter combinations exceed configured limit",
+    ):
+        await service.ensure(workflow.id, force=True)
+
+
+@pytest.mark.asyncio
 async def test_hybrid_image_failure_degrades_to_video_branch() -> None:
-    workflow, alignment = _entities(
-        [_query(preferred_session_id=None, start=None, end=None)]
-    )
+    workflow, alignment = _entities([_query(preferred_session_id=None, start=None, end=None)])
     workflow.roteiro_snapshot["media_context"]["static_images"] = {"enabled": True}
     provider = FakeProvider()
     provider.results = [_candidate()]

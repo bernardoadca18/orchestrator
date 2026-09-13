@@ -704,12 +704,13 @@ def check_hybrid_source_contracts(inputs: ProductionQAInputs) -> ProductionQAChe
                 placement.source_image_semantic_index_id
                 and len(str(provenance.get("expected_sha256", ""))) == 64
                 and int(provenance.get("expected_byte_size", -1)) >= 0
-                and provenance.get("content_type")
-                in {"image/jpeg", "image/png", "image/webp"}
+                and provenance.get("content_type") in {"image/jpeg", "image/png", "image/webp"}
+                and presentation.get("policy_version") == "static_image_presentation_v1"
                 and presentation.get("fit") in {"cover", "contain"}
                 and presentation.get("background") in {"black", "blurred_fill"}
-                and presentation.get("motion")
-                in {"none", "slow_zoom_in", "slow_zoom_out"}
+                and presentation.get("motion") in {"none", "slow_zoom_in", "slow_zoom_out"}
+                and isinstance(presentation.get("zoom_amount"), int | float)
+                and 0 <= presentation["zoom_amount"] <= 0.1
             ):
                 failures.append(f"placement_{placement.order}:image_contract")
             if (

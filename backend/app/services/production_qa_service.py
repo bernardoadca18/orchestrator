@@ -235,7 +235,13 @@ class ProductionQAService:
             alignment = await self.alignments.current(workflow_id)
         transcription = getattr(workflow, "transcricao", None)
         policy = resolve_qa_policy(
-            workflow.perfil_producao, getattr(timeline, "schema_version", None)
+            workflow.perfil_producao,
+            getattr(timeline, "schema_version", None),
+            static_image_minimum_hold_seconds=(self.config.static_image_minimum_hold_seconds),
+            static_image_maximum_hold_seconds=(self.config.static_image_maximum_hold_seconds),
+            static_image_maximum_consecutive_seconds=(
+                self.config.static_image_maximum_consecutive_seconds
+            ),
         )
         fingerprint = self._request_fingerprint(
             workflow,

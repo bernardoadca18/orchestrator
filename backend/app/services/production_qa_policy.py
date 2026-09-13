@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
+
+from app.core.config import (
+    STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS,
+    STATIC_IMAGE_MAXIMUM_HOLD_SECONDS,
+    STATIC_IMAGE_MINIMUM_HOLD_SECONDS,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +49,15 @@ class ProductionQAPolicy:
 
 GENERIC_POLICY = ProductionQAPolicy(name="generic_v1", version="1")
 
+GENERIC_HYBRID_POLICY = ProductionQAPolicy(
+    name="generic_hybrid_v2",
+    version="2",
+    supported_source_types=("video_segment", "static_image"),
+    static_image_minimum_hold_seconds=STATIC_IMAGE_MINIMUM_HOLD_SECONDS,
+    static_image_maximum_hold_seconds=STATIC_IMAGE_MAXIMUM_HOLD_SECONDS,
+    static_image_maximum_consecutive_seconds=STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS,
+)
+
 GAME_ANALYSIS_POLICY = ProductionQAPolicy(
     name="game_analysis_qa_v1",
     version="1",
@@ -60,9 +75,9 @@ GAME_ANALYSIS_HYBRID_POLICY = ProductionQAPolicy(
     require_visual_plan=True,
     require_required_visual_queries_resolved=True,
     supported_source_types=("video_segment", "static_image"),
-    static_image_minimum_hold_seconds=2.0,
-    static_image_maximum_hold_seconds=8.0,
-    static_image_maximum_consecutive_seconds=15.0,
+    static_image_minimum_hold_seconds=STATIC_IMAGE_MINIMUM_HOLD_SECONDS,
+    static_image_maximum_hold_seconds=STATIC_IMAGE_MAXIMUM_HOLD_SECONDS,
+    static_image_maximum_consecutive_seconds=STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS,
 )
 
 
@@ -81,10 +96,23 @@ KNOWN_IDEAS_HUB_PROFILES = frozenset(
 
 
 def resolve_qa_policy(
-    perfil_producao: str | None, timeline_schema_version: str | None = None
+    perfil_producao: str | None,
+    timeline_schema_version: str | None = None,
+    *,
+    static_image_minimum_hold_seconds: float = STATIC_IMAGE_MINIMUM_HOLD_SECONDS,
+    static_image_maximum_hold_seconds: float = STATIC_IMAGE_MAXIMUM_HOLD_SECONDS,
+    static_image_maximum_consecutive_seconds: float = (STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS),
 ) -> ProductionQAPolicy:
+    hybrid = timeline_schema_version == "production_timeline_schema_v2"
     if perfil_producao == "game_analysis":
-        if timeline_schema_version == "production_timeline_schema_v2":
-            return GAME_ANALYSIS_HYBRID_POLICY
-        return GAME_ANALYSIS_POLICY
-    return GENERIC_POLICY
+        base = GAME_ANALYSIS_HYBRID_POLICY if hybrid else GAME_ANALYSIS_POLICY
+    else:
+        base = GENERIC_HYBRID_POLICY if hybrid else GENERIC_POLICY
+    if not hybrid:
+        return base
+    return replace(
+        base,
+        static_image_minimum_hold_seconds=static_image_minimum_hold_seconds,
+        static_image_maximum_hold_seconds=static_image_maximum_hold_seconds,
+        static_image_maximum_consecutive_seconds=(static_image_maximum_consecutive_seconds),
+    )

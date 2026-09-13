@@ -19,6 +19,7 @@ from app.services.production_qa_checks import (
 from app.services.production_qa_policy import (
     GAME_ANALYSIS_HYBRID_POLICY,
     GAME_ANALYSIS_POLICY,
+    GENERIC_HYBRID_POLICY,
     GENERIC_POLICY,
     resolve_qa_policy,
 )
@@ -170,6 +171,60 @@ def _checks(inputs: ProductionQAInputs) -> dict[str, ProductionQACheck]:
     return {item.code: item for item in standard_local_checks(inputs)}
 
 
+def _hybrid_placements() -> list[SimpleNamespace]:
+    project_id = uuid.uuid4()
+    return [
+        SimpleNamespace(
+            order=0,
+            source_type="video_segment",
+            source_project_id=project_id,
+            source_session_id=uuid.uuid4(),
+            source_media_id=uuid.uuid4(),
+            source_image_semantic_index_id=None,
+            candidate_start_seconds=10.0,
+            candidate_end_seconds=20.0,
+            source_start_seconds=10.0,
+            source_end_seconds=15.0,
+            timeline_start_seconds=0.0,
+            timeline_end_seconds=5.0,
+            playback_rate=1.0,
+            presentation=None,
+            source_provenance={},
+            visual_decision_id=None,
+            strategy="media_search",
+        ),
+        SimpleNamespace(
+            order=1,
+            source_type="static_image",
+            source_project_id=project_id,
+            source_session_id=None,
+            source_media_id=uuid.uuid4(),
+            source_image_semantic_index_id=uuid.uuid4(),
+            candidate_start_seconds=None,
+            candidate_end_seconds=None,
+            source_start_seconds=None,
+            source_end_seconds=None,
+            timeline_start_seconds=5.0,
+            timeline_end_seconds=10.0,
+            playback_rate=None,
+            presentation={
+                "policy_version": "static_image_presentation_v1",
+                "fit": "contain",
+                "background": "blurred_fill",
+                "motion": "slow_zoom_in",
+                "zoom_amount": 0.04,
+            },
+            source_provenance={
+                "expected_sha256": "9" * 64,
+                "expected_byte_size": 321,
+                "content_type": "image/png",
+            },
+            visual_decision_id=None,
+            strategy="static_image_hold",
+        ),
+    ]
+
+
 def test_healthy_artifact_chain_passes_every_mandatory_local_check() -> None:
     checks = standard_local_checks(_inputs())
     assert all(item.result in {"passed", "skipped"} for item in checks)
@@ -318,14 +373,59 @@ def test_wrong_render_profile_and_duration_fail() -> None:
     assert checks["render_duration_consistency"].result == "failed"
 
 
-def test_unknown_and_null_profiles_use_generic_policy() -> None:
-    assert resolve_qa_policy(None) == GENERIC_POLICY
-    assert resolve_qa_policy("future_unknown_profile") == GENERIC_POLICY
-    assert resolve_qa_policy("game_analysis") == GAME_ANALYSIS_POLICY
+@pytest.mark.parametrize(
+    "profile",
+    [
+        None,
+        "future_unknown_profile",
+        "faceless_general",
+        "faceless_informational",
+        "faceless_pop_culture",
+        "faceless_pop_culture_lists",
+    ],
+)
+def test_generic_profile_timeline_policy_matrix(profile: str | None) -> None:
+    assert resolve_qa_policy(profile, "production_timeline_schema_v1") == GENERIC_POLICY
+    hybrid = resolve_qa_policy(profile, "production_timeline_schema_v2")
+    assert hybrid == GENERIC_HYBRID_POLICY
+    assert hybrid.supported_source_types == ("video_segment", "static_image")
+    assert hybrid.require_narration_alignment is GENERIC_POLICY.require_narration_alignment
     assert (
-        resolve_qa_policy("game_analysis", "production_timeline_schema_v2")
-        == GAME_ANALYSIS_HYBRID_POLICY
+        hybrid.require_required_visual_queries_resolved
+        is GENERIC_POLICY.require_required_visual_queries_resolved
     )
+
+
+def test_game_analysis_timeline_policy_matrix_preserves_editorial_requirements() -> None:
+    assert (
+        resolve_qa_policy("game_analysis", "production_timeline_schema_v1") == GAME_ANALYSIS_POLICY
+    )
+    hybrid = resolve_qa_policy("game_analysis", "production_timeline_schema_v2")
+    assert hybrid == GAME_ANALYSIS_HYBRID_POLICY
+    assert hybrid.supported_source_types == ("video_segment", "static_image")
+    assert hybrid.require_transcription
+    assert hybrid.require_narration_alignment
+    assert hybrid.require_visual_plan
+    assert hybrid.require_required_visual_queries_resolved
+
+
+def test_hybrid_policy_identity_tracks_material_hard_limit_changes() -> None:
+    original = resolve_qa_policy(None, "production_timeline_schema_v2")
+    changed = resolve_qa_policy(
+        None,
+        "production_timeline_schema_v2",
+        static_image_maximum_hold_seconds=7.5,
+    )
+    assert original.identity != changed.identity
+
+
+def test_valid_generic_hybrid_timeline_can_be_publication_ready() -> None:
+    inputs = replace(_inputs(), policy=GENERIC_HYBRID_POLICY)
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements = _hybrid_placements()
+    checks = standard_local_checks(inputs)
+    assert all(item.result not in {"failed", "blocked"} for item in checks)
+    assert aggregate_checks(checks).publication_ready is True
 
 
 def test_hybrid_qa_accepts_non_temporal_image_identity_and_rejects_fake_time() -> None:
@@ -346,9 +446,11 @@ def test_hybrid_qa_accepts_non_temporal_image_identity_and_rejects_fake_time() -
         source_end_seconds=None,
         playback_rate=None,
         presentation={
+            "policy_version": "static_image_presentation_v1",
             "fit": "contain",
             "background": "blurred_fill",
             "motion": "none",
+            "zoom_amount": 0.0,
         },
         source_provenance={
             "expected_sha256": "a" * 64,
@@ -361,6 +463,34 @@ def test_hybrid_qa_accepts_non_temporal_image_identity_and_rejects_fake_time() -
     assert check_hybrid_source_contracts(inputs).result == "passed"
     placement.source_start_seconds = 0
     assert check_hybrid_source_contracts(inputs).result == "failed"
+
+
+@pytest.mark.parametrize("source_type", ["gameplay", "unknown_source"])
+def test_v2_rejects_legacy_and_unknown_source_types(source_type: str) -> None:
+    inputs = replace(_inputs(), policy=GENERIC_HYBRID_POLICY)
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements[0].source_type = source_type
+    inputs.timeline.placements[0].order = 0
+    assert _checks(inputs)["production_timeline_source_types"].result == "failed"
+    assert check_hybrid_source_contracts(inputs).result == "failed"
+
+
+def test_v2_rejects_video_without_temporal_range() -> None:
+    inputs = replace(_inputs(), policy=GENERIC_HYBRID_POLICY)
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements = _hybrid_placements()
+    inputs.timeline.placements[0].source_end_seconds = None
+    assert check_hybrid_source_contracts(inputs).result == "failed"
+
+
+def test_v1_remains_gameplay_only_and_skips_hybrid_contract() -> None:
+    inputs = replace(_inputs(), policy=GENERIC_POLICY)
+    inputs.timeline.schema_version = "production_timeline_schema_v1"
+    assert _checks(inputs)["production_timeline_source_types"].result == "passed"
+    inputs.timeline.placements[0].source_type = "static_image"
+    checks = _checks(inputs)
+    assert checks["production_timeline_source_types"].result == "failed"
+    assert checks["hybrid_source_contracts"].result == "skipped"
 
 
 def test_standard_delivery_requires_exact_one_byte_range_contract() -> None:

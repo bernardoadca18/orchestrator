@@ -7,6 +7,11 @@ from typing import Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+STATIC_IMAGE_MINIMUM_HOLD_SECONDS = 2.0
+STATIC_IMAGE_PREFERRED_HOLD_SECONDS = 5.0
+STATIC_IMAGE_MAXIMUM_HOLD_SECONDS = 8.0
+STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS = 15.0
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -149,10 +154,10 @@ class Settings(BaseSettings):
     production_timeline_gap_fill_enabled: bool = True
     production_timeline_coalesce_contiguous: bool = True
     static_image_presentation_policy_version: str = "static_image_presentation_v1"
-    static_image_minimum_hold_seconds: float = 2.0
-    static_image_preferred_hold_seconds: float = 5.0
-    static_image_maximum_hold_seconds: float = 8.0
-    static_image_maximum_consecutive_seconds: float = 15.0
+    static_image_minimum_hold_seconds: float = STATIC_IMAGE_MINIMUM_HOLD_SECONDS
+    static_image_preferred_hold_seconds: float = STATIC_IMAGE_PREFERRED_HOLD_SECONDS
+    static_image_maximum_hold_seconds: float = STATIC_IMAGE_MAXIMUM_HOLD_SECONDS
+    static_image_maximum_consecutive_seconds: float = STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS
 
     # --- API -----------------------------------------------------------------
     api_port: int = 8001

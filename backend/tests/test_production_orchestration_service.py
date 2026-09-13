@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -19,6 +20,9 @@ from app.services.production_orchestration_service import (
     GAP_MESSAGE,
     ProductionOrchestrationService,
 )
+from app.services.production_qa_checks import check_hybrid_source_contracts
+from app.services.production_qa_policy import resolve_qa_policy
+from tests.test_production_qa_checks import _inputs
 
 
 def _workflow(*, phase: str = "audio", status: str = "queued") -> SimpleNamespace:
@@ -293,12 +297,14 @@ def _static_placement(*, duration: float = 3.0) -> SimpleNamespace:
             "fit": "contain",
             "background": "blurred_fill",
             "motion": "slow_zoom_in",
+            "zoom_amount": 0.04,
         },
         source_provenance={
             "expected_sha256": "a" * 64,
             "expected_byte_size": 123,
             "content_type": "image/png",
         },
+        visual_decision_id=None,
     )
 
 
@@ -330,6 +336,65 @@ async def test_hybrid_pre_render_gate_validates_static_contract_and_asset_identi
 
     timeline.placements[0] = _static_placement(duration=9)
     assert "placement_0_image_hold_invalid" in service._hybrid_timeline_errors(timeline)
+
+
+@pytest.mark.parametrize(
+    ("duration", "valid"),
+    [(2.0, True), (8.0, True), (1.999, False), (8.001, False)],
+)
+def test_stage17_and_stage18_share_static_image_hard_limits(duration: float, valid: bool) -> None:
+    workflow = _workflow()
+    timeline = _timeline(workflow.id)
+    timeline.schema_version = "production_timeline_schema_v2"
+    timeline.placements = [_static_placement(duration=duration)]
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    stage17_valid = not service._hybrid_timeline_errors(timeline)
+
+    inputs = replace(
+        _inputs(),
+        policy=resolve_qa_policy(
+            "faceless_general",
+            "production_timeline_schema_v2",
+            static_image_minimum_hold_seconds=(service.config.static_image_minimum_hold_seconds),
+            static_image_maximum_hold_seconds=(service.config.static_image_maximum_hold_seconds),
+            static_image_maximum_consecutive_seconds=(
+                service.config.static_image_maximum_consecutive_seconds
+            ),
+        ),
+    )
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements = timeline.placements
+    stage18_valid = check_hybrid_source_contracts(inputs).result == "passed"
+    assert stage17_valid is valid
+    assert stage18_valid is valid
+
+
+@pytest.mark.parametrize(("total_duration", "valid"), [(15.0, True), (15.001, False)])
+def test_stage17_and_stage18_share_consecutive_still_limit(
+    total_duration: float, valid: bool
+) -> None:
+    workflow = _workflow()
+    timeline = _timeline(workflow.id)
+    timeline.schema_version = "production_timeline_schema_v2"
+    first = _static_placement(duration=7.5)
+    second = _static_placement(duration=total_duration - 7.5)
+    second.order = 1
+    second.timeline_start_seconds = 7.5
+    second.timeline_end_seconds = total_duration
+    second.source_media_id = uuid.UUID(int=13)
+    timeline.placements = [first, second]
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    stage17_valid = not service._hybrid_timeline_errors(timeline)
+
+    inputs = replace(
+        _inputs(),
+        policy=resolve_qa_policy("faceless_general", "production_timeline_schema_v2"),
+    )
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements = timeline.placements
+    stage18_valid = check_hybrid_source_contracts(inputs).result == "passed"
+    assert stage17_valid is valid
+    assert stage18_valid is valid
 
 
 @pytest.mark.asyncio

@@ -91,6 +91,49 @@ accent_diagnostics_column_count="$(docker exec "${db_container}" psql -U orchest
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='audio_bloco_takes' AND column_name='accent_quality') OR (table_name='audio_chunk_takes' AND column_name IN ('accent_quality','quality_rejection_reason')));")"
 test "${accent_diagnostics_column_count}" = "3"
 
+# Downgrade 019 must fail before mutation when non-lossless V2 data exists.
+docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
+    "INSERT INTO workflow_execucoes (id, ideia_id, roteiro_id, roteiro_snapshot, status) VALUES ('10000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000003', '{}'::jsonb, 'agendada'); INSERT INTO production_timelines (id, workflow_execucao_id, script_fingerprint, strategy_version, schema_version, validator_version, policy, request_fingerprint, fingerprint, status, duration_seconds) VALUES ('20000000-0000-0000-0000-000000000001', '10000000-0000-0000-0000-000000000001', repeat('a', 64), 'production_timeline_v2', 'production_timeline_schema_v2', 'production_timeline_validator_v2', '{}'::jsonb, repeat('b', 64), repeat('c', 64), 'completed', 3); INSERT INTO timeline_placements (id, production_timeline_id, \"order\", visual_query_ids, visual_decision_ids, source_type, source_project_id, source_media_id, source_image_semantic_index_id, timeline_start_seconds, timeline_end_seconds, playback_rate, transition, strategy, importance, source_provenance, presentation) VALUES ('30000000-0000-0000-0000-000000000001', '20000000-0000-0000-0000-000000000001', 0, '[]'::jsonb, '[]'::jsonb, 'static_image', '40000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000002', '40000000-0000-0000-0000-000000000003', 0, 3, NULL, 'cut', 'static_image_hold', 'required', '{\"expected_sha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"expected_byte_size\":1,\"content_type\":\"image/png\"}'::jsonb, '{\"policy_version\":\"static_image_presentation_v1\",\"fit\":\"contain\",\"background\":\"blurred_fill\",\"motion\":\"none\",\"zoom_amount\":0}'::jsonb);" >/dev/null
+set +e
+static_downgrade_output="$(docker run --rm --network "${network_name}" --env "DATABASE_URL=${database_url}" --env PYTHONPATH=/app "${backend_image}" alembic downgrade 018 2>&1)"
+static_downgrade_status=$?
+set -e
+test "${static_downgrade_status}" -ne 0
+case "${static_downgrade_output}" in
+    *"Unsafe downgrade 019 -> 018 blocked before modifying data"*"static_image_placements=1"*) ;;
+    *) echo "Static-image downgrade did not fail with the expected message" >&2; exit 1 ;;
+esac
+static_rows="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT count(*) FROM timeline_placements WHERE source_type='static_image';")"
+revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
+test "${static_rows}" = "1"
+test "${revision}" = "019"
+
+docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
+    "DELETE FROM production_timelines WHERE id='20000000-0000-0000-0000-000000000001'; INSERT INTO production_timelines (id, workflow_execucao_id, script_fingerprint, strategy_version, schema_version, validator_version, policy, request_fingerprint, fingerprint, status, duration_seconds) VALUES ('20000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', repeat('a', 64), 'production_timeline_v2', 'production_timeline_schema_v2', 'production_timeline_validator_v2', '{}'::jsonb, repeat('d', 64), repeat('e', 64), 'completed', 3); INSERT INTO timeline_placements (id, production_timeline_id, \"order\", visual_query_ids, visual_decision_ids, source_type, source_project_id, source_session_id, source_media_id, timeline_start_seconds, timeline_end_seconds, candidate_start_seconds, candidate_end_seconds, source_start_seconds, source_end_seconds, playback_rate, transition, strategy, importance, source_provenance) VALUES ('30000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000002', 0, '[]'::jsonb, '[]'::jsonb, 'video_segment', '40000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000004', '40000000-0000-0000-0000-000000000005', 0, 3, 10, 20, 10, 13, 1, 'cut', 'media_search', 'required', '{}'::jsonb);" >/dev/null
+set +e
+video_downgrade_output="$(docker run --rm --network "${network_name}" --env "DATABASE_URL=${database_url}" --env PYTHONPATH=/app "${backend_image}" alembic downgrade 018 2>&1)"
+video_downgrade_status=$?
+set -e
+test "${video_downgrade_status}" -ne 0
+case "${video_downgrade_output}" in
+    *"Unsafe downgrade 019 -> 018 blocked before modifying data"*"video_segment_placements=1"*) ;;
+    *) echo "Video-segment downgrade did not fail with the expected message" >&2; exit 1 ;;
+esac
+video_rows="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT count(*) FROM timeline_placements WHERE source_type='video_segment';")"
+revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
+test "${video_rows}" = "1"
+test "${revision}" = "019"
+
+# With no V2 artifacts, the same downgrade remains reversible.
+docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
+    "DELETE FROM production_timelines WHERE id='20000000-0000-0000-0000-000000000002'; DELETE FROM workflow_execucoes WHERE id='10000000-0000-0000-0000-000000000001';" >/dev/null
+docker run --rm --network "${network_name}" --env "DATABASE_URL=${database_url}" --env PYTHONPATH=/app "${backend_image}" alembic downgrade 018 >/dev/null
+revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
+test "${revision}" = "018"
+docker run --rm --network "${network_name}" --env "DATABASE_URL=${database_url}" --env PYTHONPATH=/app "${backend_image}" alembic upgrade head >/dev/null
+revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
+test "${revision}" = "019"
+
 docker run --rm \
     --network "${network_name}" \
     --env "DATABASE_URL=${database_url}" \

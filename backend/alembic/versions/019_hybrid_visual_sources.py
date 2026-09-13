@@ -16,15 +16,9 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.drop_constraint(
-        "ck_timeline_placement_source_range", "timeline_placements", type_="check"
-    )
-    op.drop_constraint(
-        "ck_timeline_placement_playback_rate", "timeline_placements", type_="check"
-    )
-    op.drop_constraint(
-        "ck_timeline_placement_source_type", "timeline_placements", type_="check"
-    )
+    op.drop_constraint("ck_timeline_placement_source_range", "timeline_placements", type_="check")
+    op.drop_constraint("ck_timeline_placement_playback_rate", "timeline_placements", type_="check")
+    op.drop_constraint("ck_timeline_placement_source_type", "timeline_placements", type_="check")
     for column in (
         "source_session_id",
         "candidate_start_seconds",
@@ -38,9 +32,7 @@ def upgrade() -> None:
         "timeline_placements",
         sa.Column("source_image_semantic_index_id", postgresql.UUID(as_uuid=True)),
     )
-    op.add_column(
-        "timeline_placements", sa.Column("presentation", postgresql.JSONB())
-    )
+    op.add_column("timeline_placements", sa.Column("presentation", postgresql.JSONB()))
     op.create_check_constraint(
         "ck_timeline_placement_source_type",
         "timeline_placements",
@@ -70,20 +62,38 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DELETE FROM timeline_placements WHERE source_type = 'static_image'")
-    op.execute(
-        "UPDATE timeline_placements SET source_type = 'gameplay' "
-        "WHERE source_type = 'video_segment'"
+    connection = op.get_bind()
+    incompatible = connection.execute(
+        sa.text(
+            """
+            SELECT
+                (SELECT count(*) FROM production_timelines
+                 WHERE schema_version = 'production_timeline_schema_v2') AS v2_timelines,
+                (SELECT count(*) FROM timeline_placements
+                 WHERE source_type = 'static_image') AS static_images,
+                (SELECT count(*) FROM timeline_placements
+                 WHERE source_type = 'video_segment') AS video_segments,
+                (SELECT count(*) FROM timeline_placements
+                 WHERE source_type NOT IN ('gameplay', 'static_image', 'video_segment'))
+                    AS other_incompatible
+            """
+        )
+    ).one()
+    v2_timelines, static_images, video_segments, other_incompatible = (
+        int(value) for value in incompatible
     )
-    op.drop_constraint(
-        "ck_timeline_placement_presentation", "timeline_placements", type_="check"
-    )
-    op.drop_constraint(
-        "ck_timeline_placement_source_union", "timeline_placements", type_="check"
-    )
-    op.drop_constraint(
-        "ck_timeline_placement_source_type", "timeline_placements", type_="check"
-    )
+    if any((v2_timelines, static_images, video_segments, other_incompatible)):
+        raise RuntimeError(
+            "Unsafe downgrade 019 -> 018 blocked before modifying data: "
+            f"v2_timelines={v2_timelines}, static_image_placements={static_images}, "
+            f"video_segment_placements={video_segments}, "
+            f"other_incompatible_placements={other_incompatible}. "
+            "V2 source meaning cannot be restored losslessly as V1 gameplay. "
+            "Explicit administrative migration or data remediation is required."
+        )
+    op.drop_constraint("ck_timeline_placement_presentation", "timeline_placements", type_="check")
+    op.drop_constraint("ck_timeline_placement_source_union", "timeline_placements", type_="check")
+    op.drop_constraint("ck_timeline_placement_source_type", "timeline_placements", type_="check")
     op.drop_column("timeline_placements", "presentation")
     op.drop_column("timeline_placements", "source_image_semantic_index_id")
     for column in (

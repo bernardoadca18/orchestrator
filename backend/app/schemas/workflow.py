@@ -629,7 +629,7 @@ TimelineSourceOut = Annotated[
 
 class StaticImagePresentationOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    policy_version: str
+    policy_version: Literal["static_image_presentation_v1"]
     fit: Literal["cover", "contain"]
     background: Literal["black", "blurred_fill"]
     motion: Literal["none", "slow_zoom_in", "slow_zoom_out"]
@@ -730,6 +730,16 @@ class ProductionTimelineOut(BaseModel):
     started_at: dt.datetime | None
     completed_at: dt.datetime | None
     created_at: dt.datetime
+
+    @model_validator(mode="after")
+    def validate_schema_source_types(self) -> ProductionTimelineOut:
+        placements = self.tracks.primary_visual.placements
+        if self.schema_version == "production_timeline_schema_v2":
+            if any(isinstance(item.source, TimelineGameplaySourceOut) for item in placements):
+                raise ValueError("ProductionTimeline V2 forbids legacy gameplay sources")
+        elif any(not isinstance(item.source, TimelineGameplaySourceOut) for item in placements):
+            raise ValueError("ProductionTimeline V1 accepts only gameplay sources")
+        return self
 
 
 class ProductionTimelineEnsureOut(BaseModel):

@@ -23,9 +23,31 @@ placement order.
 
 Before submission, Stage 17 checks the source union, hold/presentation limits, multimodal
 diversity, and current Media Indexer metadata for every image (project, kind, checksum, size,
-MIME). Stable failures block before Composer. Stage 18 selects `game_analysis_qa_v2` for hybrid
-timelines and rechecks identity, source types, holds, and diversity without search, vision, or
-artifact regeneration.
+MIME). Stable failures block before Composer. Stage 18 resolves editorial profile requirements
+independently from structural timeline capability:
+
+| Production profile | Timeline V1 | Timeline V2 |
+| --- | --- | --- |
+| `game_analysis` | `game_analysis_qa_v1`, `gameplay` | `game_analysis_qa_v2`, `video_segment \| static_image` |
+| known faceless profile | `generic_v1`, `gameplay` | `generic_hybrid_v2`, `video_segment \| static_image` |
+| `None` or future/unknown profile | `generic_v1`, `gameplay` | `generic_hybrid_v2`, `video_segment \| static_image` |
+
+The generic hybrid policy preserves generic V1 editorial requirements and adds only V2
+structural invariants. Game analysis retains transcription, alignment, VisualPlan, and
+required-query gates. Stage 17 and Stage 18 receive the same configured 2/8/15-second hard
+limits; the Composer renders the frozen hold without duplicating the tunable editorial policy.
+
+The QA engine strategy remains `production_qa_v2`. Reuse is safe because the request fingerprint
+includes the complete `policy_identity`, ProductionTimeline fingerprint, render identity, QA
+mode, and engine strategy. Any material policy or timeline change creates a distinct report; the
+engine name is not cosmetically re-versioned.
+
+Migration `019` keeps its forward schema unchanged. Its downgrade is intentionally fail-closed:
+if any V2 ProductionTimeline, `static_image`, `video_segment`, or other non-V1 placement exists,
+`019 -> 018` aborts before DDL or data mutation and reports exact incompatible row counts. An
+administrator must explicitly migrate or remediate those historical artifacts before retrying.
+Editing the already-applied revision is limited to this reverse-path safety fix; no applied
+forward operation or stored row is changed.
 
 For a future real smoke, approve a script scoped to an existing MediaProject with at least one
 ready video MediaSession and one completed ImageSemanticIndex, enable `static_images`, then run

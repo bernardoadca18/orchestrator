@@ -185,8 +185,7 @@ class ProductionOrchestrationService:
                             workflow,
                             "render",
                             "image_asset_validation_failed",
-                            "Static image integrity validation failed: "
-                            + ", ".join(image_errors),
+                            "Static image integrity validation failed: " + ", ".join(image_errors),
                         )
                         return OrchestrationResult(terminal=True)
                     diversity = timeline_visual_diversity(
@@ -373,19 +372,13 @@ class ProductionOrchestrationService:
                 self.config.visual_diversity_maximum_dominant_window_ratio
             ),
             maximum_dominant_static_ratio=(
-                self.config.visual_diversity_maximum_dominant_static_ratio
-                if hybrid
-                else 1.0
+                self.config.visual_diversity_maximum_dominant_static_ratio if hybrid else 1.0
             ),
             maximum_static_reuse_count=(
-                self.config.visual_diversity_maximum_static_reuse_count
-                if hybrid
-                else 2**31 - 1
+                self.config.visual_diversity_maximum_static_reuse_count if hybrid else 2**31 - 1
             ),
             maximum_consecutive_static_seconds=(
-                self.config.static_image_maximum_consecutive_seconds
-                if hybrid
-                else float("inf")
+                self.config.static_image_maximum_consecutive_seconds if hybrid else float("inf")
             ),
         )
 
@@ -419,12 +412,18 @@ class ProductionOrchestrationService:
                     item.source_image_semantic_index_id
                     and provenance.get("expected_sha256")
                     and provenance.get("expected_byte_size") is not None
-                    and provenance.get("content_type")
-                    in {"image/jpeg", "image/png", "image/webp"}
+                    and provenance.get("content_type") in {"image/jpeg", "image/png", "image/webp"}
                 ):
                     errors.append(f"placement_{item.order}_image_identity_invalid")
-                if presentation.get("policy_version") != (
-                    self.config.static_image_presentation_policy_version
+                zoom_amount = presentation.get("zoom_amount")
+                if not (
+                    presentation.get("policy_version")
+                    == self.config.static_image_presentation_policy_version
+                    and presentation.get("fit") in {"cover", "contain"}
+                    and presentation.get("background") in {"black", "blurred_fill"}
+                    and presentation.get("motion") in {"none", "slow_zoom_in", "slow_zoom_out"}
+                    and isinstance(zoom_amount, int | float)
+                    and 0 <= zoom_amount <= 0.1
                 ):
                     errors.append(f"placement_{item.order}_presentation_invalid")
                 if not (
@@ -454,9 +453,7 @@ class ProductionOrchestrationService:
             previous_end = item.timeline_end_seconds
         return sorted(set(errors))
 
-    async def _validate_static_image_assets(
-        self, timeline: ProductionTimeline
-    ) -> list[str]:
+    async def _validate_static_image_assets(self, timeline: ProductionTimeline) -> list[str]:
         expected: dict[uuid.UUID, tuple[uuid.UUID, str, int, str]] = {}
         for item in timeline.placements:
             if getattr(item, "source_type", "gameplay") != "static_image":

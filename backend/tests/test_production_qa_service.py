@@ -15,7 +15,7 @@ from app.services.production_qa_service import (
     ProductionQAPreconditionError,
     ProductionQAService,
 )
-from tests.test_production_qa_checks import _inputs
+from tests.test_production_qa_checks import _hybrid_placements, _inputs
 
 
 class FakeWorkflowRepository:
@@ -187,6 +187,28 @@ async def test_standard_qa_passes_and_is_idempotently_reused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_faceless_pop_culture_lists_v2_can_be_publication_ready() -> None:
+    service, inputs, _, _ = _service()
+    inputs.workflow.perfil_producao = "faceless_pop_culture_lists"
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements = _hybrid_placements()
+    result = await service.ensure(inputs.workflow.id)
+    assert result.report.policy_name == "generic_hybrid_v2"
+    assert result.report.status in {"passed", "passed_with_warnings"}
+    assert result.report.publication_ready is True
+
+
+@pytest.mark.asyncio
+async def test_faceless_pop_culture_lists_v1_remains_generic_gameplay() -> None:
+    service, inputs, _, _ = _service()
+    inputs.workflow.perfil_producao = "faceless_pop_culture_lists"
+    result = await service.ensure(inputs.workflow.id)
+    assert result.report.policy_name == "generic_v1"
+    assert result.report.status == "passed"
+    assert result.report.publication_ready is True
+
+
+@pytest.mark.asyncio
 async def test_force_reruns_qa_only_without_rebuilding_upstream() -> None:
     service, inputs, repository, composer = _service()
     await service.ensure(inputs.workflow.id)
@@ -286,3 +308,17 @@ async def test_mode_and_changed_upstream_identity_create_distinct_reports() -> N
     inputs.render.output_sha256 = "1" * 64
     changed = await service.ensure(inputs.workflow.id)
     assert changed.report.id not in {standard.report.id, deep.report.id}
+
+
+@pytest.mark.asyncio
+async def test_material_hybrid_policy_change_creates_a_distinct_report() -> None:
+    repository = InMemoryQARepository()
+    service, inputs, _, _ = _service(qa_repo=repository)
+    inputs.workflow.perfil_producao = "faceless_general"
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    inputs.timeline.placements = _hybrid_placements()
+    first = await service.ensure(inputs.workflow.id)
+    service.config = Settings(static_image_maximum_hold_seconds=7.5)
+    changed = await service.ensure(inputs.workflow.id)
+    assert first.report.id != changed.report.id
+    assert first.report.policy_identity != changed.report.policy_identity
