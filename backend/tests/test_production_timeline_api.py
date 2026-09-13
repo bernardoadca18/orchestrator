@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -9,6 +10,9 @@ from fastapi.testclient import TestClient
 from app.core.database import get_db
 from app.main import app
 from app.models.workflow import ProductionTimeline, TimelineGap, TimelinePlacement
+from app.schemas.workflow import PresentationSpecOut
+
+PRESENTATION_FIXTURE = Path(__file__).parent / "fixtures" / "presentation_spec_v1_contract.json"
 
 
 def _timeline() -> ProductionTimeline:
@@ -155,3 +159,49 @@ def test_production_timeline_get_returns_404_without_current_artifact() -> None:
     finally:
         app.dependency_overrides.clear()
     assert response.status_code == 404
+
+
+def test_composer_render_input_returns_one_coherent_versioned_package() -> None:
+    timeline = _timeline()
+    timeline_service = MagicMock()
+    timeline_service.current = AsyncMock(return_value=timeline)
+    workflow_repository = MagicMock()
+    workflow_repository.obter_por_id = AsyncMock(return_value=MagicMock())
+    presentation = PresentationSpecOut.model_validate_json(
+        PRESENTATION_FIXTURE.read_text(encoding="utf-8")
+    )
+
+    async def fake_db():
+        yield MagicMock()
+
+    app.dependency_overrides[get_db] = fake_db
+    try:
+        with (
+            patch(
+                "app.api.routers.workflow.ProductionTimelineService",
+                return_value=timeline_service,
+            ),
+            patch(
+                "app.api.routers.workflow.WorkflowRepository",
+                return_value=workflow_repository,
+            ),
+            patch(
+                "app.api.routers.workflow.build_presentation_spec",
+                return_value=presentation,
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.get(
+                f"/workflow/{timeline.workflow_execucao_id}/composer-render-input"
+            )
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["schema_version"] == "composer_render_input_v1"
+    assert payload["production_timeline"]["fingerprint"] == timeline.fingerprint
+    assert payload["presentation"]["fingerprint"] == presentation.fingerprint
+    workflow_repository.obter_por_id.assert_awaited_once_with(
+        timeline.workflow_execucao_id, com_blocos=True, com_transcricao=True
+    )

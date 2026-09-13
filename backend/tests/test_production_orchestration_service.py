@@ -50,6 +50,7 @@ def _timeline(workflow_id: uuid.UUID, *, gaps: int = 0) -> SimpleNamespace:
         status="completed" if gaps == 0 else "completed_with_gaps",
         gap_count=gaps,
         fingerprint="b" * 64,
+        duration_seconds=5.0,
         error_message=None,
         placements=[],
     )
@@ -306,6 +307,67 @@ def _static_placement(*, duration: float = 3.0) -> SimpleNamespace:
         },
         visual_decision_id=None,
     )
+
+
+@pytest.mark.asyncio
+async def test_stage17_identity_changes_when_presentation_changes() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    workflow.roteiro_snapshot = {
+        "titulo": "Video",
+        "blocos": [{"ordem": 0, "conteudo": "texto", "display_title": "Section"}],
+    }
+    workflow.blocos = [
+        SimpleNamespace(
+            ordem=0,
+            narration_start_seconds=0.0,
+            narration_end_seconds=5.0,
+        )
+    ]
+    workflow.transcricao = SimpleNamespace(
+        audio_sha256=workflow.audio_final_sha256,
+        palavras_timestamps=[{"palavra": "one", "inicio": 0.0, "fim": 0.5}],
+    )
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    first_presentation = await service._presentation_fingerprint(workflow.id, timeline)
+    first = service.render_request_fingerprint(
+        workflow.id, timeline, presentation_fingerprint=first_presentation
+    )
+    workflow.transcricao.palavras_timestamps[0]["palavra"] = "changed"
+    second_presentation = await service._presentation_fingerprint(workflow.id, timeline)
+    second = service.render_request_fingerprint(
+        workflow.id, timeline, presentation_fingerprint=second_presentation
+    )
+    assert first_presentation != second_presentation
+    assert first != second
+
+
+@pytest.mark.asyncio
+async def test_completed_remote_with_stale_presentation_cannot_promote_workflow() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    workflow.roteiro_snapshot = {
+        "titulo": "Video",
+        "blocos": [{"ordem": 0, "conteudo": "texto"}],
+    }
+    workflow.blocos = [
+        SimpleNamespace(
+            ordem=0,
+            narration_start_seconds=0.0,
+            narration_end_seconds=5.0,
+        )
+    ]
+    workflow.transcricao = SimpleNamespace(
+        audio_sha256=workflow.audio_final_sha256,
+        palavras_timestamps=[{"palavra": "current", "inicio": 0.0, "fim": 0.5}],
+    )
+    remote = _remote(workflow.id, timeline, "completed").model_copy(
+        update={"presentation_fingerprint": "0" * 64}
+    )
+    result = await _service(workflow, timeline, FakeComposer(remote)).process(workflow.id)
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_error_category == "composer_presentation_mismatch"
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,38 @@
+{
+  "schema_version": "presentation_spec_v1",
+  "strategy_version": "longform_presentation_v1",
+  "profile_id": "longform_professional_v1",
+  "fingerprint": "0a65c721ad4e500148e12153782dc25e52177d9a712ce44629c60fe855bebf64",
+  "captions": {
+    "policy_version": "caption_policy_v1",
+    "preset": "subtle_longform_v1",
+    "cues": [
+      {
+        "text": "Uma legenda discreta",
+        "start_seconds": 0.2,
+        "end_seconds": 1.8,
+        "preset": "subtle_longform_v1"
+      }
+    ]
+  },
+  "section_titles": [
+    {
+      "text": "A cidade reage",
+      "start_seconds": 2,
+      "end_seconds": 4.4,
+      "preset": "minimal_section_v1"
+    }
+  ],
+  "branding": {
+    "preset": "branding_disabled_v1",
+    "enabled": false
+  },
+  "transitions": [
+    {
+      "type": "fade_to_black",
+      "boundary_seconds": 2,
+      "duration_seconds": 0.3,
+      "preset": "section_boundary_fade_v1"
+    }
+  ]
+}

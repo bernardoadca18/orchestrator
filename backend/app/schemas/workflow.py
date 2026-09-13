@@ -327,6 +327,7 @@ class BlocoRoteiroPacote(BaseModel):
     ordem: int
     tipo: str
     conteudo: str
+    display_title: str | None = Field(default=None, min_length=1, max_length=120)
     visual_queries: list[VisualQueryPacote] = Field(default_factory=list)
 
 
@@ -745,6 +746,112 @@ class ProductionTimelineOut(BaseModel):
 class ProductionTimelineEnsureOut(BaseModel):
     created: bool
     production_timeline: ProductionTimelineOut
+
+
+class CaptionCueOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=85)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    preset: Literal["subtle_longform_v1"]
+
+    @model_validator(mode="after")
+    def validate_range_and_lines(self) -> CaptionCueOut:
+        lines = self.text.split("\n")
+        if self.end_seconds <= self.start_seconds or len(lines) > 2:
+            raise ValueError("caption cue range/line count is invalid")
+        if any(not line or len(line) > 42 for line in lines):
+            raise ValueError("caption cue line exceeds its preset")
+        return self
+
+
+class CaptionsPresentationOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    policy_version: Literal["caption_policy_v1"]
+    preset: Literal["subtle_longform_v1"]
+    cues: list[CaptionCueOut] = Field(max_length=5000)
+
+    @model_validator(mode="after")
+    def validate_cue_order(self) -> CaptionsPresentationOut:
+        pairs = zip(self.cues, self.cues[1:], strict=False)
+        if any(right.start_seconds < left.end_seconds for left, right in pairs):
+            raise ValueError("caption cues overlap")
+        return self
+
+
+class SectionTitlePresentationOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str = Field(min_length=1, max_length=120)
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    preset: Literal["minimal_section_v1"]
+
+    @model_validator(mode="after")
+    def validate_range(self) -> SectionTitlePresentationOut:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("section title range is invalid")
+        return self
+
+
+class BrandingDisabledOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    preset: Literal["branding_disabled_v1"]
+    enabled: Literal[False]
+
+
+class BrandingTextWatermarkOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    preset: Literal["text_watermark_v1"]
+    enabled: Literal[True]
+    text: str = Field(min_length=1, max_length=40)
+    placement: Literal["top_left", "top_right", "bottom_left", "bottom_right"]
+    opacity: float = Field(ge=0.2, le=0.8)
+
+
+BrandingPresentationOut = Annotated[
+    BrandingDisabledOut | BrandingTextWatermarkOut,
+    Field(discriminator="preset"),
+]
+
+
+class TransitionPresentationOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["fade_to_black"]
+    boundary_seconds: float = Field(gt=0)
+    duration_seconds: float = Field(ge=0.1, le=1.0)
+    preset: Literal["section_boundary_fade_v1"]
+
+
+class PresentationSpecOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["presentation_spec_v1"]
+    strategy_version: Literal["longform_presentation_v1"]
+    profile_id: Literal["longform_professional_v1"]
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    captions: CaptionsPresentationOut
+    section_titles: list[SectionTitlePresentationOut] = Field(max_length=100)
+    branding: BrandingPresentationOut
+    transitions: list[TransitionPresentationOut] = Field(max_length=100)
+
+    @model_validator(mode="after")
+    def validate_overlay_order(self) -> PresentationSpecOut:
+        title_pairs = zip(self.section_titles, self.section_titles[1:], strict=False)
+        if any(right.start_seconds < left.end_seconds for left, right in title_pairs):
+            raise ValueError("section titles overlap")
+        transition_pairs = zip(self.transitions, self.transitions[1:], strict=False)
+        for left, right in transition_pairs:
+            left_end = left.boundary_seconds + left.duration_seconds / 2
+            right_start = right.boundary_seconds - right.duration_seconds / 2
+            if right_start < left_end:
+                raise ValueError("transitions overlap")
+        return self
+
+
+class ComposerRenderInputPackageOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["composer_render_input_v1"]
+    production_timeline: ProductionTimelineOut
+    presentation: PresentationSpecOut | None
 
 
 class WorkflowRenderOutputOut(BaseModel):

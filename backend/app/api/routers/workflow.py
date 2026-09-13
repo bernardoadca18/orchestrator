@@ -38,6 +38,7 @@ from app.schemas.workflow import (
     AudioActionIn,
     AudioEditApplyOut,
     AudioEditUpdateOut,
+    ComposerRenderInputPackageOut,
     MediaScopeOut,
     NarrationAlignmentEnsureOut,
     NarrationBlockAlignmentOut,
@@ -81,6 +82,7 @@ from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
 )
+from app.services.presentation_spec import PresentationInputError, build_presentation_spec
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_qa_service import (
     ProductionQANotFoundError,
@@ -940,6 +942,37 @@ async def obter_production_timeline(
     return _production_timeline_response(timeline)
 
 
+@router.get(
+    "/{workflow_id}/composer-render-input",
+    response_model=ComposerRenderInputPackageOut,
+)
+async def obter_composer_render_input(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Return one coherent, frozen Composer input without rebuilding decisions."""
+    try:
+        timeline = await ProductionTimelineService(session).current(workflow_id)
+    except ProductionTimelineNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    if timeline is None:
+        raise HTTPException(404, "Production Timeline compatível ainda não disponível")
+    workflow = await WorkflowRepository(session).obter_por_id(
+        workflow_id, com_blocos=True, com_transcricao=True
+    )
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    try:
+        presentation = build_presentation_spec(workflow, duration_seconds=timeline.duration_seconds)
+    except PresentationInputError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return ComposerRenderInputPackageOut(
+        schema_version="composer_render_input_v1",
+        production_timeline=_production_timeline_response(timeline),
+        presentation=presentation,
+    )
+
+
 @router.post("/{workflow_id}/production-timeline", response_model=ProductionTimelineEnsureOut)
 async def construir_production_timeline(
     workflow_id: uuid.UUID,
@@ -1644,6 +1677,7 @@ async def obter_pacote_producao(
             ordem=b.get("ordem", i),
             tipo=b.get("tipo", f"bloco_{i}"),
             conteudo=b.get("conteudo", ""),
+            display_title=b.get("display_title"),
             visual_queries=[
                 VisualQueryPacote.model_validate(item) for item in b.get("visual_queries", [])
             ],

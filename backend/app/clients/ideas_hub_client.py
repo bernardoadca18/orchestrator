@@ -33,6 +33,7 @@ class IdeasHubBlock(BaseModel):
     tipo: str = Field(min_length=1)
     duracao_segundos: int = Field(gt=0)
     conteudo: str = Field(min_length=1)
+    display_title: str | None = Field(default=None, min_length=1, max_length=120)
     visual_queries: list[dict[str, Any]] = Field(default_factory=list)
 
 

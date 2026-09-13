@@ -14,6 +14,11 @@
 - **Video Composer** owns source materialization, deterministic frame quantization/rendering,
   output validation and authoritative MP4 storage/streaming.
 
+The Stage 17 Composer input is ProductionTimeline + PresentationSpec V1. PresentationSpec is
+resolved from final-audio transcription and explicit editorial metadata inside the Orchestrator;
+it is not Stage 19. Its fingerprint participates in render request identity and stale-render
+reconciliation. The Composer never rebuilds it from transcription or script endpoints.
+
 ```text
 media ingestion
   -> Semantic Timeline / Media Search

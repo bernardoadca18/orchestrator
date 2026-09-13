@@ -27,6 +27,7 @@ from app.repositories.workflow_render_repository import WorkflowRenderRepository
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
+from app.services.presentation_spec import build_presentation_spec
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.visual_director_service import VisualDirectorService
 from app.services.visual_diversity import (
@@ -317,13 +318,19 @@ class ProductionOrchestrationService:
         timeline = await self.timelines.current(workflow_id)
         if timeline is None:
             return None
-        fingerprint = self.render_request_fingerprint(workflow_id, timeline)
+        presentation_fingerprint = await self._presentation_fingerprint(workflow_id, timeline)
+        fingerprint = self.render_request_fingerprint(
+            workflow_id, timeline, presentation_fingerprint=presentation_fingerprint
+        )
         return await self.renders.get_by_request_fingerprint(fingerprint)
 
     async def _ensure_local_render(
         self, workflow: WorkflowExecucao, timeline: ProductionTimeline
     ) -> WorkflowRender:
-        fingerprint = self.render_request_fingerprint(workflow.id, timeline)
+        presentation_fingerprint = await self._presentation_fingerprint(workflow.id, timeline)
+        fingerprint = self.render_request_fingerprint(
+            workflow.id, timeline, presentation_fingerprint=presentation_fingerprint
+        )
         key = f"neovids-render:{workflow.id}:{fingerprint[:32]}"
         render, _ = await self.renders.create_or_get(
             workflow_execucao_id=workflow.id,
@@ -339,18 +346,39 @@ class ProductionOrchestrationService:
         return render
 
     def render_request_fingerprint(
-        self, workflow_id: uuid.UUID, timeline: ProductionTimeline
+        self,
+        workflow_id: uuid.UUID,
+        timeline: ProductionTimeline,
+        *,
+        presentation_fingerprint: str | None = None,
     ) -> str:
         payload = {
-            "contract": "stage_17_workflow_render_v1",
+            "contract": (
+                "stage_17_workflow_render_v2_presentation"
+                if presentation_fingerprint
+                else "stage_17_workflow_render_v1"
+            ),
             "workflow_id": str(workflow_id),
             "production_timeline_id": str(timeline.id),
             "production_timeline_fingerprint": timeline.fingerprint,
             "render_profile": self.config.video_composer_render_profile,
             "mode": "final",
         }
+        if presentation_fingerprint:
+            payload["presentation_fingerprint"] = presentation_fingerprint
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
+
+    async def _presentation_fingerprint(
+        self, workflow_id: uuid.UUID, timeline: ProductionTimeline
+    ) -> str | None:
+        workflow = await self.workflows.obter_por_id(
+            workflow_id, com_blocos=True, com_transcricao=True
+        )
+        if workflow is None:
+            return None
+        presentation = build_presentation_spec(workflow, duration_seconds=timeline.duration_seconds)
+        return presentation.fingerprint if presentation else None
 
     def _visual_diversity_policy(
         self, timeline: ProductionTimeline | None = None
@@ -557,6 +585,29 @@ class ProductionOrchestrationService:
                 "render",
                 "stale_render_input",
                 "Completed render no longer matches the current ProductionTimeline",
+            )
+            return OrchestrationResult(terminal=True)
+        current_presentation_fingerprint = await self._presentation_fingerprint(
+            workflow.id, current
+        )
+        if remote.presentation_fingerprint != current_presentation_fingerprint:
+            await self._block(
+                workflow,
+                "render",
+                "composer_presentation_mismatch",
+                "Video Composer returned another PresentationSpec identity",
+            )
+            return OrchestrationResult(terminal=True)
+        if render.request_fingerprint != self.render_request_fingerprint(
+            workflow.id,
+            current,
+            presentation_fingerprint=current_presentation_fingerprint,
+        ):
+            await self._block(
+                workflow,
+                "render",
+                "stale_render_presentation",
+                "Completed render belongs to another PresentationSpec",
             )
             return OrchestrationResult(terminal=True)
         latest = await self.workflows.obter_por_id(workflow.id)

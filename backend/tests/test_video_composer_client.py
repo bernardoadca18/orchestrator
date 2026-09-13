@@ -52,6 +52,7 @@ def _payload(status: str = "queued") -> dict:
         "total_frames": 60,
         "render_fingerprint": "d" * 64,
         "manifest_fingerprint": "e" * 64,
+        "presentation_fingerprint": "f" * 64,
         "output": output,
         "metrics": {},
         "error": error,
@@ -84,6 +85,7 @@ async def test_create_and_completed_aliases_are_typed() -> None:
     assert result.output is not None
     assert result.output.byte_size == 100
     assert result.output.audio_sample_rate == 48_000
+    assert result.presentation_fingerprint == "f" * 64
 
 
 @pytest.mark.asyncio

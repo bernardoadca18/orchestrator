@@ -73,6 +73,7 @@ class ComposerRenderJob(BaseModel):
     total_frames: int = Field(gt=0)
     render_fingerprint: str
     manifest_fingerprint: str
+    presentation_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     output: ComposerRenderOutput | None = None
     metrics: dict[str, Any] | None = None
     error: ComposerRenderError | None = None

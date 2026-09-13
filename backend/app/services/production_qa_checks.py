@@ -17,6 +17,7 @@ from app.models.workflow import (
     WorkflowExecucao,
     WorkflowRender,
 )
+from app.services.presentation_spec import PresentationInputError, build_presentation_spec
 from app.services.production_qa_policy import ProductionQAPolicy
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
@@ -172,6 +173,55 @@ def check_production_workflow_status(inputs: ProductionQAInputs) -> ProductionQA
         message,
         expected="completed",
         actual=status,
+    )
+
+
+def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
+    if inputs.transcription is None:
+        return ProductionQACheck(
+            "presentation_spec",
+            "presentation",
+            "skipped",
+            "Legacy render has no authoritative transcription-backed PresentationSpec.",
+        )
+    if not hasattr(inputs.transcription, "palavras_timestamps"):
+        return ProductionQACheck(
+            "presentation_spec",
+            "presentation",
+            "skipped",
+            "PresentationSpec evidence is unavailable in this compatibility fixture.",
+        )
+    try:
+        presentation = build_presentation_spec(
+            inputs.workflow, duration_seconds=inputs.timeline.duration_seconds
+        )
+    except (PresentationInputError, ValueError) as exc:
+        return ProductionQACheck(
+            "presentation_spec",
+            "presentation",
+            "failed",
+            "PresentationSpec is structurally invalid or stale.",
+            actual=str(exc),
+        )
+    if presentation is None:
+        return ProductionQACheck(
+            "presentation_spec",
+            "presentation",
+            "skipped",
+            "Legacy render intentionally has no PresentationSpec.",
+        )
+    return ProductionQACheck(
+        "presentation_spec",
+        "presentation",
+        "passed",
+        "PresentationSpec timestamps, presets and canonical fingerprint are valid.",
+        actual=presentation.fingerprint,
+        details={
+            "caption_cues": len(presentation.captions.cues),
+            "section_titles": len(presentation.section_titles),
+            "transitions": len(presentation.transitions),
+            "branding_preset": presentation.branding.preset,
+        },
     )
 
 
@@ -908,6 +958,7 @@ def standard_local_checks(inputs: ProductionQAInputs) -> list[ProductionQACheck]
         check_mastering_true_peak(inputs),
         check_mastering_loudness(inputs),
         check_transcription_identity(inputs),
+        check_presentation_spec(inputs),
         check_narration_alignment_status(inputs),
         check_required_narration_bindings(inputs),
         check_narration_alignment_coverage(inputs),
