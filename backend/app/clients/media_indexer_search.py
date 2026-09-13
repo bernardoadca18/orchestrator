@@ -50,6 +50,67 @@ class MediaSessionMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaAssetMetadata:
+    id: UUID
+    project_id: UUID
+    media_kind: str
+    content_type: str | None
+    byte_size: int
+    sha256: str
+    width: int | None
+    height: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class ImageSearchFilters:
+    source_owner: str | None = None
+    source_class: str | None = None
+    asset_class: str | None = None
+    collection: str | None = None
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in {
+                "source_owner": self.source_owner,
+                "source_class": self.source_class,
+                "asset_class": self.asset_class,
+                "collection": self.collection,
+            }.items()
+            if value is not None
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ImageSearchCandidate:
+    project_id: UUID
+    media_id: UUID
+    score: float
+    rank: int
+    original_filename: str
+    content_type: str
+    byte_size: int
+    sha256: str
+    width: int
+    height: int
+    format_name: str
+    provenance: dict[str, Any]
+    semantic_preview: str
+    image_semantic_index_id: UUID
+    semantic_index: dict[str, Any]
+
+
+@dataclass(frozen=True, slots=True)
+class ImageSearchResultSet:
+    query: str
+    project_id: UUID
+    results: tuple[ImageSearchCandidate, ...]
+    searched_indexes: int
+    compatibility_groups: int
+    filters: ImageSearchFilters
+
+
+@dataclass(frozen=True, slots=True)
 class MediaSearchCandidate:
     session_id: UUID
     media_id: UUID
@@ -84,6 +145,8 @@ class MediaSearchResultSet:
 
 
 class MediaSearchProvider(Protocol):
+    async def get_asset(self, media_id: UUID) -> MediaAssetMetadata: ...
+
     async def get_session(self, session_id: UUID) -> MediaSessionMetadata: ...
 
     async def search_session(
@@ -107,6 +170,16 @@ class MediaSearchProvider(Protocol):
         max_duration_seconds: float | None = None,
     ) -> MediaSearchResultSet: ...
 
+    async def search_images(
+        self,
+        project_id: UUID,
+        *,
+        query: str,
+        max_results: int,
+        min_score: float,
+        filters: ImageSearchFilters,
+    ) -> ImageSearchResultSet: ...
+
 
 class _MediaOut(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -123,6 +196,18 @@ class _SessionOut(BaseModel):
     label: str
     status: str
     media: _MediaOut
+
+
+class _MediaAssetOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: UUID
+    project_id: UUID
+    media_kind: str
+    content_type: str | None = None
+    byte_size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 class _SearchCandidate(BaseModel):
@@ -166,6 +251,49 @@ class _SearchResponse(BaseModel):
     embedding_provider: str
     embedding_model: str
     embedding_dimensions: int = Field(gt=0)
+
+
+class _ImageSemanticIndex(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    index_id: UUID
+    strategy: str
+    prompt_version: str
+    result_schema_version: str
+    canonical_text_version: str
+    vision_provider: str
+    vision_model: str
+    embedding_provider: str
+    embedding_model: str
+    embedding_dimensions: int = Field(gt=0)
+    configuration_fingerprint: str
+
+
+class _ImageSearchCandidate(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    source_type: str
+    project_id: UUID
+    media_id: UUID
+    score: float = Field(ge=-1, le=1)
+    rank: int = Field(ge=1)
+    original_filename: str
+    content_type: str
+    byte_size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    format_name: str
+    provenance: dict[str, Any] = Field(default_factory=dict)
+    semantic_preview: str
+    semantic_index: _ImageSemanticIndex
+
+
+class _ImageSearchResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    query: str
+    project_id: UUID
+    results: list[_ImageSearchCandidate]
+    searched_indexes: int = Field(ge=0)
+    compatibility_groups: int = Field(ge=0)
 
 
 def _safe_provenance(value: dict[str, Any]) -> dict[str, Any]:
@@ -250,6 +378,25 @@ class MediaIndexerSearchProvider:
             duration_seconds=parsed.media.duration_seconds,
         )
 
+    async def get_asset(self, media_id: UUID) -> MediaAssetMetadata:
+        raw = await self._request("GET", f"/media-assets/{media_id}")
+        try:
+            parsed = _MediaAssetOut.model_validate(raw)
+        except ValidationError as exc:
+            raise MediaIndexerContractError("Invalid Media Indexer asset response") from exc
+        if parsed.id != media_id:
+            raise MediaIndexerContractError("Media Indexer asset identity is inconsistent")
+        return MediaAssetMetadata(
+            id=parsed.id,
+            project_id=parsed.project_id,
+            media_kind=parsed.media_kind,
+            content_type=parsed.content_type,
+            byte_size=parsed.byte_size,
+            sha256=parsed.sha256,
+            width=parsed.width,
+            height=parsed.height,
+        )
+
     async def search_session(
         self,
         session_id: UUID,
@@ -290,6 +437,64 @@ class MediaIndexerSearchProvider:
             payload["max_duration_seconds"] = max_duration_seconds
         raw = await self._request("POST", f"/media-search/projects/{project_id}", json=payload)
         return self._parse_search(raw, expected_scope="project", expected_id=project_id)
+
+    async def search_images(
+        self,
+        project_id: UUID,
+        *,
+        query: str,
+        max_results: int,
+        min_score: float,
+        filters: ImageSearchFilters,
+    ) -> ImageSearchResultSet:
+        raw = await self._request(
+            "POST",
+            f"/image-search/projects/{project_id}",
+            json={
+                "query": query,
+                "limit": max_results,
+                "min_score": min_score,
+                "filters": filters.to_dict(),
+            },
+        )
+        try:
+            parsed = _ImageSearchResponse.model_validate(raw)
+        except ValidationError as exc:
+            raise MediaIndexerContractError("Invalid Media Indexer Image Search response") from exc
+        if parsed.project_id != project_id:
+            raise MediaIndexerContractError("Media Indexer image project identity is inconsistent")
+        candidates: list[ImageSearchCandidate] = []
+        for item in parsed.results:
+            if item.source_type != "image" or item.project_id != project_id:
+                raise MediaIndexerContractError("Media Indexer returned an invalid image source")
+            semantic = item.semantic_index.model_dump(mode="json")
+            candidates.append(
+                ImageSearchCandidate(
+                    project_id=item.project_id,
+                    media_id=item.media_id,
+                    score=item.score,
+                    rank=item.rank,
+                    original_filename=item.original_filename,
+                    content_type=item.content_type,
+                    byte_size=item.byte_size,
+                    sha256=item.sha256,
+                    width=item.width,
+                    height=item.height,
+                    format_name=item.format_name,
+                    provenance=dict(item.provenance),
+                    semantic_preview=item.semantic_preview,
+                    image_semantic_index_id=item.semantic_index.index_id,
+                    semantic_index=semantic,
+                )
+            )
+        return ImageSearchResultSet(
+            query=parsed.query,
+            project_id=parsed.project_id,
+            results=tuple(candidates),
+            searched_indexes=parsed.searched_indexes,
+            compatibility_groups=parsed.compatibility_groups,
+            filters=filters,
+        )
 
     def _parse_search(
         self, raw: Any, *, expected_scope: str, expected_id: UUID

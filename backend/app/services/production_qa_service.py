@@ -234,7 +234,9 @@ class ProductionQAService:
         else:
             alignment = await self.alignments.current(workflow_id)
         transcription = getattr(workflow, "transcricao", None)
-        policy = resolve_qa_policy(workflow.perfil_producao)
+        policy = resolve_qa_policy(
+            workflow.perfil_producao, getattr(timeline, "schema_version", None)
+        )
         fingerprint = self._request_fingerprint(
             workflow,
             alignment,
@@ -319,11 +321,25 @@ class ProductionQAService:
                 policy=upstream.policy,
                 render_profile=profile,
                 visual_diversity_policy=VisualDiversityPolicy(
-                    version=self.config.visual_diversity_policy_version,
+                    version=(
+                        self.config.visual_diversity_hybrid_policy_version
+                        if getattr(upstream.timeline, "schema_version", None)
+                        == self.config.production_timeline_hybrid_schema_version
+                        else self.config.visual_diversity_policy_version
+                    ),
                     minimum_window_count=self.config.visual_diversity_minimum_window_count,
                     maximum_reuse_ratio=self.config.visual_diversity_maximum_reuse_ratio,
                     maximum_dominant_window_ratio=(
                         self.config.visual_diversity_maximum_dominant_window_ratio
+                    ),
+                    maximum_dominant_static_ratio=(
+                        self.config.visual_diversity_maximum_dominant_static_ratio
+                    ),
+                    maximum_static_reuse_count=(
+                        self.config.visual_diversity_maximum_static_reuse_count
+                    ),
+                    maximum_consecutive_static_seconds=(
+                        self.config.static_image_maximum_consecutive_seconds
                     ),
                 ),
                 profile_unavailable=profile_unavailable,

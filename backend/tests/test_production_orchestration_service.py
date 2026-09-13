@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.clients.media_indexer_search import MediaAssetMetadata
 from app.clients.video_composer_client import (
     ComposerRender,
     VideoComposerNotFoundError,
@@ -270,6 +271,65 @@ def _service(
         audio_processor=AsyncMock(),
         composer_client_factory=lambda: composer,
     )
+
+
+def _static_placement(*, duration: float = 3.0) -> SimpleNamespace:
+    return SimpleNamespace(
+        order=0,
+        source_type="static_image",
+        source_project_id=uuid.UUID(int=10),
+        source_session_id=None,
+        source_media_id=uuid.UUID(int=11),
+        source_image_semantic_index_id=uuid.UUID(int=12),
+        timeline_start_seconds=0.0,
+        timeline_end_seconds=duration,
+        candidate_start_seconds=None,
+        candidate_end_seconds=None,
+        source_start_seconds=None,
+        source_end_seconds=None,
+        playback_rate=None,
+        presentation={
+            "policy_version": "static_image_presentation_v1",
+            "fit": "contain",
+            "background": "blurred_fill",
+            "motion": "slow_zoom_in",
+        },
+        source_provenance={
+            "expected_sha256": "a" * 64,
+            "expected_byte_size": 123,
+            "content_type": "image/png",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_pre_render_gate_validates_static_contract_and_asset_identity() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    timeline.schema_version = "production_timeline_schema_v2"
+    timeline.placements = [_static_placement()]
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+
+    class Provider:
+        async def get_asset(self, media_id):
+            return MediaAssetMetadata(
+                id=media_id,
+                project_id=uuid.UUID(int=10),
+                media_kind="image",
+                content_type="image/png",
+                byte_size=123,
+                sha256="a" * 64,
+                width=1080,
+                height=1350,
+            )
+
+    service.media_provider = Provider()
+    assert service._hybrid_timeline_errors(timeline) == []
+    assert await service._validate_static_image_assets(timeline) == []
+
+    timeline.placements[0] = _static_placement(duration=9)
+    assert "placement_0_image_hold_invalid" in service._hybrid_timeline_errors(timeline)
 
 
 @pytest.mark.asyncio

@@ -44,6 +44,11 @@ class TimelinePolicy:
     gap_fill_enabled: bool = True
     coalesce_contiguous: bool = True
     default_transition: str = "cut"
+    hybrid_enabled: bool = False
+    static_image_minimum_hold_us: int = 2_000_000
+    static_image_preferred_hold_us: int = 5_000_000
+    static_image_maximum_hold_us: int = 8_000_000
+    static_image_maximum_consecutive_us: int = 15_000_000
 
     def __post_init__(self) -> None:
         if self.minimum_visual_duration_us <= 0:
@@ -53,10 +58,17 @@ class TimelinePolicy:
         if self.maximum_visual_queries <= 0:
             raise TimelinePlanningError("maximum visual queries must be positive")
         if self.default_transition != "cut":
-            raise TimelinePlanningError("production_timeline_v1 only supports cut")
+            raise TimelinePlanningError("production timeline only supports cut")
+        if not (
+            0 < self.static_image_minimum_hold_us
+            <= self.static_image_preferred_hold_us
+            <= self.static_image_maximum_hold_us
+            <= self.static_image_maximum_consecutive_us
+        ):
+            raise TimelinePlanningError("static-image hold policy is invalid")
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "minimum_visual_duration_seconds": us_to_seconds(self.minimum_visual_duration_us),
             "maximum_sources_per_query": self.maximum_sources_per_query,
             "maximum_visual_queries": self.maximum_visual_queries,
@@ -65,6 +77,16 @@ class TimelinePolicy:
             "default_transition": self.default_transition,
             "numeric_precision": "integer_microseconds",
         }
+        if self.hybrid_enabled:
+            result["static_image_holds_seconds"] = {
+                "minimum": us_to_seconds(self.static_image_minimum_hold_us),
+                "preferred": us_to_seconds(self.static_image_preferred_hold_us),
+                "maximum": us_to_seconds(self.static_image_maximum_hold_us),
+                "maximum_consecutive": us_to_seconds(
+                    self.static_image_maximum_consecutive_us
+                ),
+            }
+        return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +105,20 @@ class SourceWindow:
 
 
 @dataclass(frozen=True, slots=True)
+class StaticImageSource:
+    project_id: uuid.UUID
+    media_id: uuid.UUID
+    image_semantic_index_id: uuid.UUID
+    sha256: str
+    byte_size: int
+    content_type: str
+    width: int
+    height: int
+    selection_strategy: str
+    provenance: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class DecisionInput:
     decision_id: uuid.UUID
     visual_query_id: uuid.UUID
@@ -93,8 +129,8 @@ class DecisionInput:
     source_status: str
     timeline_start_us: int | None
     timeline_end_us: int | None
-    selected: SourceWindow | None
-    alternatives: tuple[SourceWindow, ...] = ()
+    selected: SourceWindow | StaticImageSource | None
+    alternatives: tuple[SourceWindow | StaticImageSource, ...] = ()
 
 
 @dataclass(slots=True)
@@ -104,9 +140,9 @@ class PlacementDraft:
     visual_query_ids: list[uuid.UUID]
     timeline_start_us: int
     timeline_end_us: int
-    source: SourceWindow
-    source_start_us: int
-    source_end_us: int
+    source: SourceWindow | StaticImageSource
+    source_start_us: int | None
+    source_end_us: int | None
     strategy: str
     importance: str
     source_provenance: dict[str, Any]
@@ -184,8 +220,10 @@ class TimelinePlanResult:
     status: str
 
 
-def _validate_source(source: SourceWindow) -> None:
-    if source.start_us < 0 or source.end_us <= source.start_us:
+def _validate_source(source: SourceWindow | StaticImageSource) -> None:
+    if isinstance(source, SourceWindow) and (
+        source.start_us < 0 or source.end_us <= source.start_us
+    ):
         raise TimelinePlanningError("Stage 14 source window is invalid")
 
 
@@ -277,10 +315,27 @@ def _plan_decision_sources(
         assert source is not None
         _validate_source(source)
         remaining = end_us - cursor
-        duration = min(remaining, source.duration_us)
-        if duration < policy.minimum_visual_duration_us:
-            continue
-        source_start, source_end, trim_strategy = _trim_source(source, duration)
+        if isinstance(source, StaticImageSource):
+            duration = min(
+                remaining,
+                policy.static_image_maximum_hold_us
+                if source_index == len(sources[: policy.maximum_sources_per_query]) - 1
+                else policy.static_image_preferred_hold_us,
+            )
+            if duration < max(
+                policy.minimum_visual_duration_us, policy.static_image_minimum_hold_us
+            ):
+                continue
+            source_start = None
+            source_end = None
+            trim_strategy = "static_image_hold"
+            allowed_ranges: list[tuple[int, int]] = []
+        else:
+            duration = min(remaining, source.duration_us)
+            if duration < policy.minimum_visual_duration_us:
+                continue
+            source_start, source_end, trim_strategy = _trim_source(source, duration)
+            allowed_ranges = [(source.start_us, source.end_us)]
         placements.append(
             PlacementDraft(
                 visual_decision_id=decision.decision_id,
@@ -300,7 +355,7 @@ def _plan_decision_sources(
                 ),
                 importance=decision.importance,
                 source_provenance=dict(source.provenance),
-                allowed_source_ranges=[(source.start_us, source.end_us)],
+                allowed_source_ranges=allowed_ranges,
                 diagnostics={
                     "source_index": source_index,
                     "trim_strategy": trim_strategy,
@@ -341,14 +396,20 @@ def _fill_visual_gaps(duration_us: int, placements: list[PlacementDraft]) -> Non
         )
         following = next((item for item in placements if item.timeline_start_us == gap_end), None)
         cursor = gap_start
-        if previous is not None:
+        if previous is not None and isinstance(previous.source, SourceWindow):
+            assert previous.source_end_us is not None
             amount = min(gap_end - cursor, previous.source.end_us - previous.source_end_us)
             if amount > 0:
                 previous.timeline_end_us += amount
                 previous.source_end_us += amount
                 cursor += amount
                 _mark_extension(previous, "forward", amount)
-        if cursor < gap_end and following is not None:
+        if (
+            cursor < gap_end
+            and following is not None
+            and isinstance(following.source, SourceWindow)
+        ):
+            assert following.source_start_us is not None
             amount = min(gap_end - cursor, following.source_start_us - following.source.start_us)
             if amount > 0:
                 following.timeline_start_us -= amount
@@ -359,6 +420,9 @@ def _fill_visual_gaps(duration_us: int, placements: list[PlacementDraft]) -> Non
 
 def _can_coalesce(left: PlacementDraft, right: PlacementDraft) -> bool:
     return (
+        isinstance(left.source, SourceWindow)
+        and isinstance(right.source, SourceWindow)
+        and
         left.timeline_end_us == right.timeline_start_us
         and left.playback_rate == right.playback_rate
         and left.transition == right.transition
@@ -393,6 +457,8 @@ def _coalesce(placements: list[PlacementDraft]) -> list[PlacementDraft]:
         )
         if _importance_key(current.importance) < _importance_key(previous.importance):
             previous.importance = current.importance
+        assert isinstance(previous.source, SourceWindow)
+        assert isinstance(current.source, SourceWindow)
         previous.source = SourceWindow(
             project_id=previous.source.project_id,
             session_id=previous.source.session_id,
@@ -403,6 +469,39 @@ def _coalesce(placements: list[PlacementDraft]) -> list[PlacementDraft]:
             provenance=previous.source.provenance,
         )
         previous.diagnostics.setdefault("coalesced_strategies", []).append(current.strategy)
+    return result
+
+
+def _apply_static_hold_policy(
+    placements: list[PlacementDraft], policy: TimelinePolicy
+) -> list[PlacementDraft]:
+    result: list[PlacementDraft] = []
+    consecutive_us = 0
+    previous_end: int | None = None
+    for placement in placements:
+        if isinstance(placement.source, SourceWindow):
+            consecutive_us = 0
+            previous_end = placement.timeline_end_us
+            result.append(placement)
+            continue
+        if previous_end != placement.timeline_start_us:
+            consecutive_us = 0
+        allowed = min(
+            placement.duration_us,
+            policy.static_image_maximum_hold_us,
+            policy.static_image_maximum_consecutive_us - consecutive_us,
+        )
+        if allowed < max(
+            policy.minimum_visual_duration_us, policy.static_image_minimum_hold_us
+        ):
+            previous_end = placement.timeline_start_us
+            continue
+        if allowed < placement.duration_us:
+            placement.timeline_end_us = placement.timeline_start_us + allowed
+            placement.diagnostics["static_hold_truncated"] = True
+        consecutive_us += allowed
+        previous_end = placement.timeline_end_us
+        result.append(placement)
     return result
 
 
@@ -586,6 +685,8 @@ def build_production_timeline(
     placements.sort(key=lambda item: (item.timeline_start_us, item.timeline_end_us))
     if policy.coalesce_contiguous:
         placements = _coalesce(placements)
+    if policy.hybrid_enabled:
+        placements = _apply_static_hold_policy(placements, policy)
 
     outcomes = _query_outcomes(decisions, placements, reasons)
     gap_ranges = _complement(duration_us, placements)
@@ -626,14 +727,7 @@ def validate_production_timeline(result: TimelinePlanResult) -> None:
         raise TimelineValidationError("timeline duration must be positive")
     previous_end = 0
     for placement in result.placements:
-        values = (
-            placement.timeline_start_us,
-            placement.timeline_end_us,
-            placement.source.start_us,
-            placement.source.end_us,
-            placement.source_start_us,
-            placement.source_end_us,
-        )
+        values = (placement.timeline_start_us, placement.timeline_end_us)
         if any(not isinstance(value, int) for value in values):
             raise TimelineValidationError("timeline precision is not integral microseconds")
         if placement.timeline_start_us < previous_end:
@@ -644,26 +738,34 @@ def validate_production_timeline(result: TimelinePlanResult) -> None:
             or placement.timeline_end_us > result.duration_us
         ):
             raise TimelineValidationError("placement is outside timeline duration")
-        if (
-            placement.source_start_us < placement.source.start_us
-            or placement.source_end_us > placement.source.end_us
-            or placement.source_end_us <= placement.source_start_us
-        ):
-            raise TimelineValidationError("source trim is outside Stage 14 candidate")
-        allowed = _merge_ranges(placement.allowed_source_ranges)
-        if not any(
-            start <= placement.source_start_us and end >= placement.source_end_us
-            for start, end in allowed
-        ):
-            raise TimelineValidationError(
-                "source trim is not covered by contributing Stage 14 candidates"
-            )
-        if placement.duration_us != placement.source_end_us - placement.source_start_us:
-            raise TimelineValidationError("playback_rate=1.0 duration identity is invalid")
-        if not math.isfinite(placement.playback_rate) or placement.playback_rate != 1.0:
-            raise TimelineValidationError("production_timeline_v1 requires playback_rate=1.0")
+        if isinstance(placement.source, SourceWindow):
+            if placement.source_start_us is None or placement.source_end_us is None:
+                raise TimelineValidationError("video source trim is missing")
+            if (
+                placement.source_start_us < placement.source.start_us
+                or placement.source_end_us > placement.source.end_us
+                or placement.source_end_us <= placement.source_start_us
+            ):
+                raise TimelineValidationError("source trim is outside Stage 14 candidate")
+            allowed = _merge_ranges(placement.allowed_source_ranges)
+            if not any(
+                start <= placement.source_start_us and end >= placement.source_end_us
+                for start, end in allowed
+            ):
+                raise TimelineValidationError(
+                    "source trim is not covered by contributing Stage 14 candidates"
+                )
+            if placement.duration_us != placement.source_end_us - placement.source_start_us:
+                raise TimelineValidationError("playback_rate=1.0 duration identity is invalid")
+            if not math.isfinite(placement.playback_rate) or placement.playback_rate != 1.0:
+                raise TimelineValidationError("video source requires playback_rate=1.0")
+        else:
+            if placement.source_start_us is not None or placement.source_end_us is not None:
+                raise TimelineValidationError("static image cannot carry temporal source fields")
+            if placement.allowed_source_ranges:
+                raise TimelineValidationError("static image cannot carry candidate ranges")
         if placement.transition != "cut":
-            raise TimelineValidationError("production_timeline_v1 requires cut transitions")
+            raise TimelineValidationError("production timeline requires cut transitions")
         previous_end = placement.timeline_end_us
 
     expected_gaps = _complement(result.duration_us, list(result.placements))

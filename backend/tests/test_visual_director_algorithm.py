@@ -5,13 +5,33 @@ import uuid
 import pytest
 
 from app.services.visual_director_algorithm import (
+    StaticImageCandidate,
     VisualCandidate,
     deduplicate_candidates,
     direct_candidate,
+    fuse_hybrid_candidates,
     normalize_query,
     overlap_ratio,
     rank_candidates,
 )
+
+
+def _image(score: float, rank: int = 1) -> StaticImageCandidate:
+    return StaticImageCandidate(
+        project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+        media_id=uuid.uuid4(),
+        image_semantic_index_id=uuid.uuid4(),
+        semantic_score=score,
+        rank=rank,
+        media_filename="official.png",
+        content_type="image/png",
+        byte_size=10,
+        sha256="a" * 64,
+        width=1920,
+        height=1080,
+        format_name="PNG",
+        provenance={},
+    )
 
 
 def _candidate(
@@ -138,3 +158,62 @@ def test_trusted_provenance_is_hierarchical_and_not_diversity_penalized() -> Non
     assert trusted.selection_strategy == "preferred_provenance"
     assert trusted.selection_score == 1.0
     assert overlap_ratio(trusted, previous) == 1.0
+
+
+def test_hybrid_rrf_is_deterministic_and_does_not_compare_raw_cross_modal_scores() -> None:
+    video = _candidate(0, 5, 0.10)
+    image = _image(0.99)
+    first = fuse_hybrid_candidates(
+        [video],
+        [image],
+        already_selected=[],
+        preferred_session_id=None,
+        source_note_id=None,
+        rrf_k=60,
+        video_weight=1,
+        image_weight=1,
+        strategy_version="hybrid_visual_fusion_v1",
+    )
+    repeated = fuse_hybrid_candidates(
+        [video],
+        [image],
+        already_selected=[],
+        preferred_session_id=None,
+        source_note_id=None,
+        rrf_k=60,
+        video_weight=1,
+        image_weight=1,
+        strategy_version="hybrid_visual_fusion_v1",
+    )
+    assert first == repeated
+    assert isinstance(first[0], VisualCandidate)
+    assert first[0].score_components["rrf_score"] == first[1].score_components["rrf_score"]
+
+
+def test_hybrid_rrf_weights_and_reuse_penalty_allow_each_modality_to_win() -> None:
+    video = _candidate(0, 5, 0.9)
+    image = _image(0.1)
+    image_first = fuse_hybrid_candidates(
+        [video],
+        [image],
+        already_selected=[],
+        preferred_session_id=None,
+        source_note_id=None,
+        rrf_k=60,
+        video_weight=1,
+        image_weight=2,
+        strategy_version="hybrid_visual_fusion_v1",
+    )
+    assert isinstance(image_first[0], StaticImageCandidate)
+    video_first = fuse_hybrid_candidates(
+        [video],
+        [image],
+        already_selected=[image],
+        preferred_session_id=None,
+        source_note_id=None,
+        rrf_k=60,
+        video_weight=1,
+        image_weight=1,
+        strategy_version="hybrid_visual_fusion_v1",
+    )
+    assert isinstance(video_first[0], VisualCandidate)

@@ -7,6 +7,7 @@ import httpx
 import pytest
 
 from app.clients.media_indexer_search import (
+    ImageSearchFilters,
     MediaIndexerConflictError,
     MediaIndexerContractError,
     MediaIndexerNotFoundError,
@@ -203,3 +204,66 @@ async def test_retry_exhaustion_and_malformed_response_are_safe() -> None:
     )
     with pytest.raises(MediaIndexerContractError, match="session response"):
         await malformed.get_session(SESSION_ID)
+
+
+@pytest.mark.asyncio
+async def test_image_search_uses_public_non_temporal_contract_and_filters() -> None:
+    image_id = uuid.uuid4()
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == f"/image-search/projects/{PROJECT_ID}"
+        body = json.loads(request.content)
+        assert body["filters"]["asset_class"] == "official_screenshot"
+        assert "start_seconds" not in body
+        return httpx.Response(
+            200,
+            json={
+                "query": "Vice City skyline",
+                "project_id": str(PROJECT_ID),
+                "searched_indexes": 1,
+                "compatibility_groups": 1,
+                "results": [
+                    {
+                        "source_type": "image",
+                        "project_id": str(PROJECT_ID),
+                        "media_id": str(MEDIA_ID),
+                        "score": 0.72,
+                        "rank": 1,
+                        "original_filename": "official.png",
+                        "content_type": "image/png",
+                        "byte_size": 123,
+                        "sha256": "a" * 64,
+                        "width": 1920,
+                        "height": 1080,
+                        "format_name": "PNG",
+                        "provenance": {"asset_class": "official_screenshot"},
+                        "semantic_preview": "Vice City skyline",
+                        "semantic_index": {
+                            "index_id": str(image_id),
+                            "strategy": "image_semantic_v1",
+                            "prompt_version": "v1",
+                            "result_schema_version": "v1",
+                            "canonical_text_version": "v1",
+                            "vision_provider": "local",
+                            "vision_model": "fixture",
+                            "embedding_provider": "local",
+                            "embedding_model": "fixture",
+                            "embedding_dimensions": 1024,
+                            "configuration_fingerprint": "b" * 64,
+                        },
+                    }
+                ],
+            },
+        )
+
+    provider = MediaIndexerSearchProvider(_settings(), transport=httpx.MockTransport(handler))
+    result = await provider.search_images(
+        PROJECT_ID,
+        query="Vice City skyline",
+        max_results=5,
+        min_score=0.25,
+        filters=ImageSearchFilters(asset_class="official_screenshot"),
+    )
+    candidate = result.results[0]
+    assert candidate.image_semantic_index_id == image_id
+    assert candidate.content_type == "image/png"
+    assert not hasattr(candidate, "start_seconds")

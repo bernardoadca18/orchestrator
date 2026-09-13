@@ -6,6 +6,7 @@ import uuid
 
 import pytest
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from app.core.database import task_session
 from app.models.workflow import (
@@ -177,3 +178,116 @@ async def test_timeline_uniqueness_persistence_force_and_workflow_cascade() -> N
                 select(ProductionTimeline).where(ProductionTimeline.id == timeline.id)
             )
         ).scalar_one_or_none() is None
+
+
+@pytest.mark.asyncio
+async def test_hybrid_timeline_source_union_database_constraints() -> None:
+    workflow_id = uuid.uuid4()
+    async with task_session() as session:
+        workflow = WorkflowExecucao(
+            id=workflow_id,
+            ideia_id=uuid.uuid4(),
+            roteiro_id=uuid.uuid4(),
+            roteiro_snapshot={"blocos": []},
+            status="audio_concluido",
+            audio_final_sha256="a" * 64,
+            duracao_audio_segundos=10,
+        )
+        timeline = ProductionTimeline(
+            workflow_execucao_id=workflow_id,
+            final_audio_sha256="a" * 64,
+            script_fingerprint="b" * 64,
+            strategy_version="production_timeline_v2",
+            schema_version="production_timeline_schema_v2",
+            validator_version="production_timeline_validator_v2",
+            policy={},
+            request_fingerprint=uuid.uuid4().hex * 2,
+            fingerprint=uuid.uuid4().hex * 2,
+            status="completed",
+            duration_seconds=10,
+        )
+        session.add_all([workflow, timeline])
+        await session.flush()
+
+        def static_placement(order: int, **changes) -> TimelinePlacement:
+            values = dict(
+                production_timeline_id=timeline.id,
+                order=order,
+                visual_decision_ids=[],
+                visual_query_ids=[],
+                source_type="static_image",
+                source_project_id=uuid.uuid4(),
+                source_session_id=None,
+                source_media_id=uuid.uuid4(),
+                source_image_semantic_index_id=uuid.uuid4(),
+                timeline_start_seconds=0,
+                timeline_end_seconds=3,
+                candidate_start_seconds=None,
+                candidate_end_seconds=None,
+                source_start_seconds=None,
+                source_end_seconds=None,
+                playback_rate=None,
+                presentation={
+                    "fit": "contain",
+                    "background": "blurred_fill",
+                    "motion": "slow_zoom_in",
+                },
+                transition="cut",
+                strategy="static_image_hold",
+                importance="required",
+                source_provenance={},
+            )
+            values.update(changes)
+            return TimelinePlacement(**values)
+
+        session.add(static_placement(0))
+        session.add(
+            TimelinePlacement(
+                production_timeline_id=timeline.id,
+                order=1,
+                visual_decision_ids=[],
+                visual_query_ids=[],
+                source_type="video_segment",
+                source_project_id=uuid.uuid4(),
+                source_session_id=uuid.uuid4(),
+                source_media_id=uuid.uuid4(),
+                timeline_start_seconds=3,
+                timeline_end_seconds=6,
+                candidate_start_seconds=10,
+                candidate_end_seconds=20,
+                source_start_seconds=10,
+                source_end_seconds=13,
+                playback_rate=1,
+                presentation=None,
+                transition="cut",
+                strategy="direct_target_fit",
+                importance="required",
+                source_provenance={},
+            )
+        )
+        await session.flush()
+
+        invalid = [
+            static_placement(2, source_session_id=uuid.uuid4()),
+            static_placement(
+                3,
+                candidate_start_seconds=0,
+                candidate_end_seconds=3,
+                source_start_seconds=0,
+                source_end_seconds=3,
+            ),
+            static_placement(
+                4,
+                source_type="video_segment",
+                source_image_semantic_index_id=None,
+                presentation=None,
+                playback_rate=1,
+            ),
+            static_placement(5, source_type="future_source"),
+        ]
+        for item in invalid:
+            with pytest.raises(IntegrityError):
+                async with session.begin_nested():
+                    session.add(item)
+                    await session.flush()
+        await session.rollback()

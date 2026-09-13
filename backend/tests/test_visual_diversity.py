@@ -1,4 +1,5 @@
 from app.services.visual_diversity import (
+    VisualDiversityPolicy,
     VisualSourceWindow,
     evaluate_visual_diversity,
 )
@@ -35,3 +36,35 @@ def test_diverse_plan_passes_and_union_does_not_double_count_overlap() -> None:
 def test_short_or_explicitly_anchored_reuse_is_not_blocked() -> None:
     assert evaluate_visual_diversity([_window()] * 2).status == "passed"
     assert evaluate_visual_diversity([_window(anchored=True)] * 22).status == "passed"
+
+
+def _still(media_id: str, duration: float = 3.0) -> VisualSourceWindow:
+    return VisualSourceWindow(
+        session_id="",
+        media_id=media_id,
+        start_seconds=0,
+        end_seconds=0,
+        timeline_duration_seconds=duration,
+        source_type="static_image",
+    )
+
+
+def test_multimodal_diversity_tracks_distribution_and_blocks_dominant_still() -> None:
+    policy = VisualDiversityPolicy(
+        version="visual_diversity_policy_v2",
+        maximum_dominant_static_ratio=0.65,
+        maximum_static_reuse_count=3,
+        maximum_consecutive_static_seconds=15,
+    )
+    healthy = evaluate_visual_diversity(
+        [_window(0), _still("one"), _window(1), _still("two")], policy
+    )
+    assert healthy.status == "passed"
+    assert healthy.metrics["unique_static_image_count"] == 2
+    assert healthy.metrics["video_duration_ratio"] == 0.909091
+
+    dominant = evaluate_visual_diversity([_still("one", 8)] * 4, policy)
+    assert dominant.status == "failed"
+    assert "visual_plan_dominant_static_asset" in dominant.reasons
+    assert "visual_plan_excessive_static_reuse" in dominant.reasons
+    assert "visual_plan_excessive_consecutive_static" in dominant.reasons

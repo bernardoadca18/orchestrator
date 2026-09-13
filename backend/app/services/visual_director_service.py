@@ -9,10 +9,13 @@ import logging
 import math
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from itertools import product
 from typing import Any
 
 from app.clients.media_indexer_search import (
+    ImageSearchFilters,
+    ImageSearchResultSet,
     MediaIndexerConflictError,
     MediaIndexerError,
     MediaIndexerSearchProvider,
@@ -30,11 +33,18 @@ from app.models.workflow import (
 )
 from app.repositories.visual_plan_repository import VisualPlanRepository
 from app.repositories.workflow_repository import WorkflowRepository
-from app.schemas.workflow import VisualSourceSelectionOut
+from app.schemas.workflow import (
+    VisualGameplaySourceSelectionOut,
+    VisualStaticImageSourceSelectionOut,
+    VisualVideoSegmentSourceSelectionOut,
+)
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.visual_director_algorithm import (
+    HybridVisualCandidate,
+    StaticImageCandidate,
     VisualCandidate,
     direct_candidate,
+    fuse_hybrid_candidates,
     normalize_query,
     overlap_ratio,
     rank_candidates,
@@ -75,17 +85,43 @@ class VisualDirectorInputError(VisualDirectorError):
 
 
 @dataclass(frozen=True, slots=True)
+class StaticImageScope:
+    enabled: bool
+    asset_classes: tuple[str, ...] = ()
+    collections: tuple[str, ...] = ()
+    source_owners: tuple[str, ...] = ()
+    source_classes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "asset_classes": list(self.asset_classes),
+            "collections": list(self.collections),
+            "source_owners": list(self.source_owners),
+            "source_classes": list(self.source_classes),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class MediaScope:
     project_id: uuid.UUID | None
     session_ids: tuple[uuid.UUID, ...]
     origin: str
+    static_images: StaticImageScope | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "media_project_id": str(self.project_id) if self.project_id else None,
             "media_session_ids": [str(item) for item in self.session_ids] or None,
             "origin": self.origin,
         }
+        if self.static_images is not None:
+            result["static_images"] = self.static_images.to_dict()
+        return result
+
+    @property
+    def hybrid_enabled(self) -> bool:
+        return bool(self.project_id and self.static_images and self.static_images.enabled)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,8 +155,12 @@ class Resolution:
     direct: VisualCandidate | None
     candidates: list[VisualCandidate]
     result_sets: list[MediaSearchResultSet]
+    image_candidates: list[StaticImageCandidate] = field(default_factory=list)
+    image_result_sets: list[ImageSearchResultSet] = field(default_factory=list)
+    image_error: MediaIndexerError | None = None
     error: MediaIndexerError | None = None
     reason: str | None = None
+
 
 
 def _sha256(value: Any) -> str:
@@ -220,13 +260,14 @@ class VisualDirectorService:
         request_fingerprint, script_fingerprint, scope_fingerprint = self._request_identity(
             workflow, alignment, queries, scope
         )
+        strategy_version = self._strategy_version(scope)
         plan, created = await self.repository.create_or_get(
             workflow_execucao_id=workflow.id,
             narration_alignment_id=alignment.id if alignment else None,
             script_fingerprint=script_fingerprint,
             media_scope=scope.to_dict() if scope else None,
             media_scope_fingerprint=scope_fingerprint,
-            strategy_version=self.config.visual_director_strategy_version,
+            strategy_version=strategy_version,
             request_fingerprint=request_fingerprint,
             fingerprint=request_fingerprint,
             status="pending",
@@ -439,6 +480,7 @@ class VisualDirectorService:
             raise VisualDirectorInputError("media_context must be an object or null")
         project_id = None
         sessions: list[uuid.UUID] = []
+        static_images: StaticImageScope | None = None
         origin = "script_media_context"
         if isinstance(raw, dict):
             project_id = _uuid(raw.get("media_project_id"), "media_project_id")
@@ -450,6 +492,48 @@ class VisualDirectorService:
                     item = _uuid(value, "media_session_ids", optional=False)
                     assert item is not None
                     sessions.append(item)
+            raw_static = raw.get("static_images")
+            if raw_static is not None:
+                if not isinstance(raw_static, dict):
+                    raise VisualDirectorInputError("static_images must be an object or null")
+
+                def filters(name: str) -> tuple[str, ...]:
+                    values = raw_static.get(name, [])
+                    if values is None:
+                        return ()
+                    if not isinstance(values, list):
+                        raise VisualDirectorInputError(f"static_images.{name} must be a list")
+                    normalized = tuple(str(value).strip() for value in values)
+                    if any(not value or len(value) > 200 for value in normalized):
+                        raise VisualDirectorInputError(
+                            f"static_images.{name} contains an invalid filter"
+                        )
+                    if len(set(normalized)) != len(normalized):
+                        raise VisualDirectorInputError(
+                            f"static_images.{name} filters must be unique"
+                        )
+                    return normalized
+
+                static_images = StaticImageScope(
+                    enabled=raw_static.get("enabled") is True,
+                    asset_classes=filters("asset_classes"),
+                    collections=filters("collections"),
+                    source_owners=filters("source_owners"),
+                    source_classes=filters("source_classes"),
+                )
+                combinations = math.prod(
+                    max(1, len(value))
+                    for value in (
+                        static_images.asset_classes,
+                        static_images.collections,
+                        static_images.source_owners,
+                        static_images.source_classes,
+                    )
+                )
+                if combinations > self.config.visual_director_image_filter_combinations_max:
+                    raise VisualDirectorInputError(
+                        "static image filter combinations exceed configured limit"
+                    )
         if not sessions and project_id is None:
             sessions = [
                 item.preferred_session_id
@@ -461,7 +545,12 @@ class VisualDirectorService:
         unique_sessions = tuple(sorted(set(sessions), key=str))
         if project_id is None and not unique_sessions:
             return None
-        return MediaScope(project_id=project_id, session_ids=unique_sessions, origin=origin)
+        return MediaScope(
+            project_id=project_id,
+            session_ids=unique_sessions,
+            origin=origin,
+            static_images=static_images,
+        )
 
     def _request_identity(
         self,
@@ -494,21 +583,36 @@ class VisualDirectorService:
         }
         script_fingerprint = _sha256(script_value)
         scope_fingerprint = _sha256(scope.to_dict() if scope else None)
-        diversity_policy = self._diversity_policy()
+        diversity_policy = self._diversity_policy(scope)
+        hybrid = bool(scope and scope.hybrid_enabled)
         request = {
             "script_fingerprint": script_fingerprint,
             "narration_alignment_id": str(alignment.id) if alignment else None,
             "narration_alignment_fingerprint": alignment.fingerprint if alignment else None,
             "media_scope_fingerprint": scope_fingerprint,
-            "strategy_version": self.config.visual_director_strategy_version,
+            "strategy_version": self._strategy_version(scope),
             "policy": {
                 "search_top_k": self.config.visual_director_search_top_k,
                 "max_alternatives": self.config.visual_director_max_alternatives,
                 "min_semantic_score": self.config.visual_director_min_semantic_score,
-                "candidate_format": "visual_source_v1",
+                "candidate_format": "visual_source_v2" if hybrid else "visual_source_v1",
                 "media_search_strategy": (
                     self.config.visual_director_media_search_strategy_version
                 ),
+                "image_search_top_k": self.config.visual_director_image_search_top_k
+                if hybrid
+                else None,
+                "image_min_semantic_score": self.config.visual_director_image_min_semantic_score
+                if hybrid
+                else None,
+                "fusion": {
+                    "version": self.config.hybrid_visual_fusion_version,
+                    "rrf_k": self.config.hybrid_visual_fusion_rrf_k,
+                    "video_weight": self.config.hybrid_visual_fusion_video_weight,
+                    "image_weight": self.config.hybrid_visual_fusion_image_weight,
+                }
+                if hybrid
+                else None,
                 "diversity_policy": {
                     "version": diversity_policy.version,
                     "minimum_window_count": diversity_policy.minimum_window_count,
@@ -516,10 +620,24 @@ class VisualDirectorService:
                     "maximum_dominant_window_ratio": (
                         diversity_policy.maximum_dominant_window_ratio
                     ),
+                    "maximum_dominant_static_ratio": (
+                        diversity_policy.maximum_dominant_static_ratio
+                    ),
+                    "maximum_static_reuse_count": diversity_policy.maximum_static_reuse_count,
+                    "maximum_consecutive_static_seconds": (
+                        diversity_policy.maximum_consecutive_static_seconds
+                    ),
                 },
             },
         }
         return _sha256(request), script_fingerprint, scope_fingerprint
+
+    def _strategy_version(self, scope: MediaScope | None) -> str:
+        return (
+            self.config.visual_director_hybrid_strategy_version
+            if scope and scope.hybrid_enabled
+            else self.config.visual_director_strategy_version
+        )
 
     async def _build(
         self,
@@ -530,7 +648,14 @@ class VisualDirectorService:
         semaphore = asyncio.Semaphore(self.config.visual_director_search_concurrency)
         session_tasks: dict[uuid.UUID, asyncio.Task[MediaSessionMetadata]] = {}
         search_tasks: dict[tuple, asyncio.Task[MediaSearchResultSet]] = {}
-        stats = {"media_search_calls": 0, "search_seconds": 0.0, "metadata_calls": 0}
+        image_tasks: dict[tuple, asyncio.Task[ImageSearchResultSet]] = {}
+        stats = {
+            "media_search_calls": 0,
+            "image_search_calls": 0,
+            "search_seconds": 0.0,
+            "image_search_seconds": 0.0,
+            "metadata_calls": 0,
+        }
 
         async def get_session(session_id: uuid.UUID) -> MediaSessionMetadata:
             if session_id not in session_tasks:
@@ -557,6 +682,21 @@ class VisualDirectorService:
 
                 search_tasks[key] = asyncio.create_task(execute())
             return await search_tasks[key]
+
+        async def cached_image_search(key: tuple, call) -> ImageSearchResultSet:
+            if key not in image_tasks:
+
+                async def execute() -> ImageSearchResultSet:
+                    async with semaphore:
+                        started = time.perf_counter()
+                        stats["image_search_calls"] += 1
+                        try:
+                            return await call()
+                        finally:
+                            stats["image_search_seconds"] += time.perf_counter() - started
+
+                image_tasks[key] = asyncio.create_task(execute())
+            return await image_tasks[key]
 
         async def resolve(item: QueryContext) -> Resolution:
             direct_reason = None
@@ -593,65 +733,128 @@ class VisualDirectorService:
                     result_sets=[],
                     reason=direct_reason or "media scope is unavailable",
                 )
-            try:
-                result_sets = await self._search_query(
-                    item,
-                    scope,
-                    cached_search,
-                    use_preferred_session=direct_reason
-                    != "preferred session belongs to another project",
+            temporal_call = self._search_query(
+                item,
+                scope,
+                cached_search,
+                use_preferred_session=direct_reason
+                != "preferred session belongs to another project",
+            )
+            temporal_result: object
+            image_result: object
+            if scope.hybrid_enabled:
+                image_call = self._search_images(item, scope, cached_image_search)
+                temporal_result, image_result = await asyncio.gather(
+                    temporal_call, image_call, return_exceptions=True
                 )
-            except MediaIndexerError as exc:
-                return Resolution(
-                    query=item,
-                    direct=None,
-                    candidates=[],
-                    result_sets=[],
-                    error=exc,
-                    reason=f"Media Search failed: {exc.category}",
+            else:
+                temporal_results = await asyncio.gather(
+                    temporal_call, return_exceptions=True
                 )
+                temporal_result = temporal_results[0]
+                image_result = []
+            temporal_error = (
+                temporal_result if isinstance(temporal_result, MediaIndexerError) else None
+            )
+            image_error = image_result if isinstance(image_result, MediaIndexerError) else None
+            if isinstance(temporal_result, Exception) and temporal_error is None:
+                raise temporal_result
+            if isinstance(image_result, Exception) and image_error is None:
+                raise image_result
+            if temporal_error:
+                result_sets = []
+            else:
+                assert isinstance(temporal_result, list)
+                result_sets = temporal_result
+            if image_error:
+                image_result_sets = []
+            else:
+                assert isinstance(image_result, list)
+                image_result_sets = image_result
+            assert isinstance(result_sets, list)
+            assert isinstance(image_result_sets, list)
             candidates = self._normalize_candidates(result_sets, scope)
+            image_candidates = self._normalize_image_candidates(image_result_sets, scope)
+            branch_reasons = []
+            if temporal_error:
+                branch_reasons.append(f"Media Search failed: {temporal_error.category}")
+            if image_error:
+                branch_reasons.append(f"Image Search failed: {image_error.category}")
             return Resolution(
                 query=item,
                 direct=None,
                 candidates=candidates,
                 result_sets=result_sets,
-                reason=direct_reason,
+                image_candidates=image_candidates,
+                image_result_sets=image_result_sets,
+                error=temporal_error,
+                image_error=image_error,
+                reason=direct_reason or ("; ".join(branch_reasons) if branch_reasons else None),
             )
 
         resolutions = await asyncio.gather(*(resolve(item) for item in queries))
-        already_selected: list[VisualCandidate] = []
+        already_selected: list[HybridVisualCandidate] = []
         decisions: list[VisualDecision] = []
         reused = 0
         for resolution in resolutions:
             item = resolution.query
-            selected: VisualCandidate | None = resolution.direct
-            alternatives: list[VisualCandidate] = []
+            selected: HybridVisualCandidate | None = resolution.direct
+            alternatives: list[HybridVisualCandidate] = []
+            ranked: list[HybridVisualCandidate] = []
             source_status = "resolved"
             reason = resolution.reason
-            if selected is None and resolution.candidates:
-                ranked = rank_candidates(
-                    resolution.candidates,
-                    preferred_session_id=item.preferred_session_id,
-                    source_note_id=item.source_note_id,
-                    target_duration_seconds=item.target_duration_seconds,
-                    already_selected=already_selected,
-                    intent=item.intent,
-                )
+            all_candidates = [*resolution.candidates, *resolution.image_candidates]
+            if selected is None and all_candidates:
+                if scope and scope.hybrid_enabled:
+                    ranked = fuse_hybrid_candidates(
+                        resolution.candidates,
+                        resolution.image_candidates,
+                        already_selected=already_selected,
+                        preferred_session_id=item.preferred_session_id,
+                        source_note_id=item.source_note_id,
+                        rrf_k=self.config.hybrid_visual_fusion_rrf_k,
+                        video_weight=self.config.hybrid_visual_fusion_video_weight,
+                        image_weight=self.config.hybrid_visual_fusion_image_weight,
+                        strategy_version=self.config.hybrid_visual_fusion_version,
+                    )
+                else:
+                    ranked.extend(
+                        rank_candidates(
+                            resolution.candidates,
+                            preferred_session_id=item.preferred_session_id,
+                            source_note_id=item.source_note_id,
+                            target_duration_seconds=item.target_duration_seconds,
+                            already_selected=[
+                                value
+                                for value in already_selected
+                                if isinstance(value, VisualCandidate)
+                            ],
+                            intent=item.intent,
+                        )
+                    )
                 if (
                     ranked
-                    and (ranked[0].semantic_score or 0)
-                    >= self.config.visual_director_min_semantic_score
+                    and (
+                        isinstance(ranked[0], StaticImageCandidate)
+                        or (ranked[0].semantic_score or 0)
+                        >= self.config.visual_director_min_semantic_score
+                    )
                 ):
                     selected = ranked[0]
                     alternatives = ranked[1 : 1 + self.config.visual_director_max_alternatives]
-                    reason = None
+                    reason = resolution.reason
                 else:
                     source_status = "unresolved"
                     reason = "No Media Search result met the semantic threshold"
             elif selected is None:
-                if resolution.error is not None and not isinstance(
-                    resolution.error, MediaIndexerConflictError
+                branch_errors = (
+                    [resolution.error, resolution.image_error]
+                    if scope and scope.hybrid_enabled
+                    else [resolution.error]
+                )
+                if all(
+                    value is not None and not isinstance(value, MediaIndexerConflictError)
+                    for value in branch_errors
                 ):
                     source_status = "failed"
                 else:
@@ -659,12 +862,17 @@ class VisualDirectorService:
                 reason = reason or "Media Search returned no relevant results"
 
             if selected is not None:
-                if any(overlap_ratio(selected, previous) > 0.5 for previous in already_selected):
+                if any(self._candidate_reused(selected, previous) for previous in already_selected):
                     reused += 1
                 already_selected.append(selected)
 
-            selected_payload = self._candidate_payload(selected, item) if selected else None
-            alternative_payloads = [self._candidate_payload(value, item) for value in alternatives]
+            hybrid = bool(scope and scope.hybrid_enabled)
+            selected_payload = (
+                self._candidate_payload(selected, item, hybrid=hybrid) if selected else None
+            )
+            alternative_payloads = [
+                self._candidate_payload(value, item, hybrid=hybrid) for value in alternatives
+            ]
             decisions.append(
                 VisualDecision(
                     visual_plan_id=plan.id,
@@ -692,7 +900,26 @@ class VisualDirectorService:
                         "search_scope": resolution.result_sets[0].scope
                         if resolution.result_sets
                         else None,
-                        "candidate_count": len(resolution.candidates),
+                        "candidate_count": len(all_candidates),
+                        "temporal_candidate_count": len(resolution.candidates),
+                        "image_candidate_count": len(resolution.image_candidates),
+                        "temporal_branch_error": resolution.error.category
+                        if resolution.error
+                        else None,
+                        "image_branch_error": resolution.image_error.category
+                        if resolution.image_error
+                        else None,
+                        "fusion_ranking": [
+                            {
+                                "source_type": candidate.source_type,
+                                "media_id": str(candidate.media_id),
+                                "final_rank": rank,
+                                **(candidate.score_components or {}),
+                            }
+                            for rank, candidate in enumerate(
+                                ranked if selected is not None and all_candidates else [], 1
+                            )
+                        ],
                     },
                 )
             )
@@ -701,10 +928,13 @@ class VisualDirectorService:
         selected_scores = [
             item.selection_score
             for item in decisions
-            if item.selection_strategy == "media_search" and item.selection_score is not None
+            if item.selection_strategy != "preferred_provenance"
+            and item.selection_score is not None
         ]
         metrics = {
             "media_search_calls": stats["media_search_calls"],
+            "temporal_search_calls": stats["media_search_calls"],
+            "image_search_calls": stats["image_search_calls"],
             "metadata_calls": stats["metadata_calls"],
             "search_seconds": round(stats["search_seconds"], 6),
             "average_search_seconds": round(
@@ -713,11 +943,29 @@ class VisualDirectorService:
             if stats["media_search_calls"]
             else 0.0,
             "reused_source_count": reused,
+            "temporal_candidate_count": sum(
+                len(item.candidates) for item in resolutions
+            ),
+            "image_candidate_count": sum(
+                len(item.image_candidates) for item in resolutions
+            ),
+            "selected_video_count": sum(
+                isinstance(item.selected_source, dict)
+                and item.selected_source.get("source_type") in {"gameplay", "video_segment"}
+                for item in decisions
+            ),
+            "selected_image_count": sum(
+                isinstance(item.selected_source, dict)
+                and item.selected_source.get("source_type") == "static_image"
+                for item in decisions
+            ),
             "average_selected_score": round(sum(selected_scores) / len(selected_scores), 6)
             if selected_scores
             else None,
         }
-        candidate_counts = [len(item.candidates) for item in resolutions]
+        candidate_counts = [
+            len(item.candidates) + len(item.image_candidates) for item in resolutions
+        ]
         if candidate_counts:
             metrics.update(
                 {
@@ -731,20 +979,27 @@ class VisualDirectorService:
             source = decision.selected_source
             if decision.source_resolution_status != "resolved" or not isinstance(source, dict):
                 continue
+            source_type = str(source.get("source_type", "gameplay"))
             selected_windows.append(
                 VisualSourceWindow(
-                    session_id=str(source["session_id"]),
+                    session_id=str(source.get("session_id") or ""),
                     media_id=str(source["media_id"]),
-                    start_seconds=float(source["source_start_seconds"]),
-                    end_seconds=float(source["source_end_seconds"]),
+                    start_seconds=float(source.get("source_start_seconds") or 0.0),
+                    end_seconds=float(source.get("source_end_seconds") or 0.0),
                     explicitly_anchored=decision.selection_strategy == "preferred_provenance",
+                    source_type=source_type,
                 )
             )
-        diversity = evaluate_visual_diversity(selected_windows, self._diversity_policy())
+        diversity = evaluate_visual_diversity(selected_windows, self._diversity_policy(scope))
         metrics.update(diversity.metrics)
         diagnostics = {
             "query_order": [str(item.id) for item in queries],
-            "candidate_format_version": "visual_source_v1",
+            "candidate_format_version": "visual_source_v2"
+            if scope and scope.hybrid_enabled
+            else "visual_source_v1",
+            "hybrid_fusion_version": self.config.hybrid_visual_fusion_version
+            if scope and scope.hybrid_enabled
+            else None,
             "selection_policy": {
                 "preferred_provenance": "hierarchical priority",
                 "preferred_session_bonus": 0.05,
@@ -772,13 +1027,31 @@ class VisualDirectorService:
             status = "completed_with_gaps"
         return decisions, provenance, metrics, diagnostics, status
 
-    def _diversity_policy(self) -> VisualDiversityPolicy:
+    def _diversity_policy(self, scope: MediaScope | None = None) -> VisualDiversityPolicy:
+        hybrid = bool(scope and scope.hybrid_enabled)
         return VisualDiversityPolicy(
-            version=self.config.visual_diversity_policy_version,
+            version=self.config.visual_diversity_hybrid_policy_version
+            if hybrid
+            else self.config.visual_diversity_policy_version,
             minimum_window_count=self.config.visual_diversity_minimum_window_count,
             maximum_reuse_ratio=self.config.visual_diversity_maximum_reuse_ratio,
             maximum_dominant_window_ratio=(
                 self.config.visual_diversity_maximum_dominant_window_ratio
+            ),
+            maximum_dominant_static_ratio=(
+                self.config.visual_diversity_maximum_dominant_static_ratio
+                if hybrid
+                else 1.0
+            ),
+            maximum_static_reuse_count=(
+                self.config.visual_diversity_maximum_static_reuse_count
+                if hybrid
+                else 1_000_000
+            ),
+            maximum_consecutive_static_seconds=(
+                self.config.static_image_maximum_consecutive_seconds
+                if hybrid
+                else 1_000_000.0
             ),
         )
 
@@ -894,6 +1167,55 @@ class VisualDirectorService:
                 raise errors[0]
         raise MediaIndexerConflictError("No searchable project or session scope")
 
+    async def _search_images(
+        self,
+        item: QueryContext,
+        scope: MediaScope,
+        cached_image_search,
+    ) -> list[ImageSearchResultSet]:
+        if not scope.hybrid_enabled or scope.project_id is None or scope.static_images is None:
+            return []
+        image_scope = scope.static_images
+        dimensions = (
+            image_scope.source_owners or (None,),
+            image_scope.source_classes or (None,),
+            image_scope.asset_classes or (None,),
+            image_scope.collections or (None,),
+        )
+        calls = []
+        for source_owner, source_class, asset_class, collection in product(*dimensions):
+            filters = ImageSearchFilters(
+                source_owner=source_owner,
+                source_class=source_class,
+                asset_class=asset_class,
+                collection=collection,
+            )
+            key = (
+                "image",
+                str(scope.project_id),
+                item.query,
+                self.config.visual_director_image_search_top_k,
+                self.config.visual_director_image_min_semantic_score,
+                tuple(sorted(filters.to_dict().items())),
+            )
+            calls.append(
+                cached_image_search(
+                    key,
+                    lambda filters=filters: self.provider.search_images(
+                        scope.project_id,
+                        query=item.query,
+                        max_results=self.config.visual_director_image_search_top_k,
+                        min_score=self.config.visual_director_image_min_semantic_score,
+                        filters=filters,
+                    ),
+                )
+            )
+        results = await asyncio.gather(*calls, return_exceptions=True)
+        errors = [value for value in results if isinstance(value, MediaIndexerError)]
+        if errors:
+            raise errors[0]
+        return [value for value in results if isinstance(value, ImageSearchResultSet)]
+
     def _normalize_candidates(
         self, result_sets: list[MediaSearchResultSet], scope: MediaScope
     ) -> list[VisualCandidate]:
@@ -932,7 +1254,86 @@ class VisualDirectorService:
                 )
         return candidates
 
-    def _candidate_payload(self, candidate: VisualCandidate, item: QueryContext) -> dict[str, Any]:
+    def _normalize_image_candidates(
+        self, result_sets: list[ImageSearchResultSet], scope: MediaScope
+    ) -> list[StaticImageCandidate]:
+        candidates: list[StaticImageCandidate] = []
+        for result_set in result_sets:
+            if scope.project_id is None or result_set.project_id != scope.project_id:
+                raise VisualDirectorInputError("Image Search returned another project")
+            for item in result_set.results:
+                if item.project_id != scope.project_id:
+                    raise VisualDirectorInputError("Image Search candidate escaped project scope")
+                candidates.append(
+                    StaticImageCandidate(
+                        project_id=item.project_id,
+                        media_id=item.media_id,
+                        image_semantic_index_id=item.image_semantic_index_id,
+                        semantic_score=item.score,
+                        rank=item.rank,
+                        media_filename=item.original_filename,
+                        content_type=item.content_type,
+                        byte_size=item.byte_size,
+                        sha256=item.sha256,
+                        width=item.width,
+                        height=item.height,
+                        format_name=item.format_name,
+                        provenance=item.provenance,
+                        semantic_preview=item.semantic_preview,
+                        semantic_index=item.semantic_index,
+                    )
+                )
+        deduplicated: dict[uuid.UUID, StaticImageCandidate] = {}
+        for candidate in sorted(
+            candidates,
+            key=lambda value: (-value.semantic_score, value.rank, str(value.media_id)),
+        ):
+            deduplicated.setdefault(candidate.media_id, candidate)
+        return [
+            replace(candidate, rank=rank)
+            for rank, candidate in enumerate(deduplicated.values(), 1)
+        ]
+
+    @staticmethod
+    def _candidate_reused(
+        candidate: HybridVisualCandidate, previous: HybridVisualCandidate
+    ) -> bool:
+        if isinstance(candidate, StaticImageCandidate) or isinstance(
+            previous, StaticImageCandidate
+        ):
+            return (
+                isinstance(candidate, StaticImageCandidate)
+                and isinstance(previous, StaticImageCandidate)
+                and candidate.media_id == previous.media_id
+            )
+        return overlap_ratio(candidate, previous) > 0.5
+
+    def _candidate_payload(
+        self,
+        candidate: HybridVisualCandidate,
+        item: QueryContext,
+        *,
+        hybrid: bool,
+    ) -> dict[str, Any]:
+        if isinstance(candidate, StaticImageCandidate):
+            return VisualStaticImageSourceSelectionOut(
+                project_id=candidate.project_id,
+                media_id=candidate.media_id,
+                image_semantic_index_id=candidate.image_semantic_index_id,
+                semantic_score=candidate.semantic_score,
+                selection_score=candidate.selection_score,
+                rank=candidate.rank,
+                media_filename=candidate.media_filename,
+                content_type=candidate.content_type,
+                byte_size=candidate.byte_size,
+                sha256=candidate.sha256,
+                width=candidate.width,
+                height=candidate.height,
+                format_name=candidate.format_name,
+                semantic_preview=candidate.semantic_preview,
+                provenance=candidate.provenance,
+                semantic_index=candidate.semantic_index or {},
+            ).model_dump(mode="json")
         target = item.target_duration_seconds
         duration_fit = None
         if target and target > 0:
@@ -940,26 +1341,35 @@ class VisualDirectorService:
                 candidate.duration_seconds / target,
                 target / candidate.duration_seconds,
             )
-        payload = VisualSourceSelectionOut(
-            project_id=candidate.project_id,
-            session_id=candidate.session_id,
-            media_id=candidate.media_id,
-            source_start_seconds=candidate.start_seconds,
-            source_end_seconds=candidate.end_seconds,
-            source_duration_seconds=candidate.duration_seconds,
-            semantic_score=candidate.semantic_score,
-            selection_score=candidate.selection_score,
-            rank=candidate.rank,
-            session_label=candidate.session_label,
-            media_filename=candidate.media_filename,
-            temporal_index_id=candidate.temporal_index_id,
-            retrieval_candidate_id=candidate.retrieval_candidate_id,
-            transcript_preview=candidate.transcript_preview,
-            matched_note_ids=list(candidate.matched_note_ids),
-            media_search_strategy=candidate.search_strategy,
-            duration_fit_ratio=round(duration_fit, 6) if duration_fit is not None else None,
-            provenance=candidate.provenance or {},
+        source_class = (
+            VisualVideoSegmentSourceSelectionOut
+            if hybrid
+            else VisualGameplaySourceSelectionOut
         )
+        values = {
+            "project_id": candidate.project_id,
+            "session_id": candidate.session_id,
+            "media_id": candidate.media_id,
+            "source_start_seconds": candidate.start_seconds,
+            "source_end_seconds": candidate.end_seconds,
+            "source_duration_seconds": candidate.duration_seconds,
+            "semantic_score": candidate.semantic_score,
+            "selection_score": candidate.selection_score,
+            "rank": candidate.rank,
+            "session_label": candidate.session_label,
+            "media_filename": candidate.media_filename,
+            "temporal_index_id": candidate.temporal_index_id,
+            "retrieval_candidate_id": candidate.retrieval_candidate_id,
+            "transcript_preview": candidate.transcript_preview,
+            "matched_note_ids": list(candidate.matched_note_ids),
+            "media_search_strategy": candidate.search_strategy,
+            "duration_fit_ratio": round(duration_fit, 6) if duration_fit is not None else None,
+            "provenance": candidate.provenance or {},
+        }
+        if hybrid:
+            values["candidate_start_seconds"] = candidate.start_seconds
+            values["candidate_end_seconds"] = candidate.end_seconds
+        payload = source_class(**values)
         return payload.model_dump(mode="json")
 
     def _media_index_provenance(self, resolutions: list[Resolution]) -> dict[str, Any]:
@@ -999,6 +1409,24 @@ class VisualDirectorService:
                 for value in result_sets
             }
         )
+        image_indexes = sorted(
+            {
+                str(candidate.image_semantic_index_id)
+                for resolution in resolutions
+                for candidate in resolution.image_candidates
+            }
+        )
+        image_profiles = sorted(
+            {
+                (
+                    str((candidate.semantic_index or {}).get("embedding_provider", "")),
+                    str((candidate.semantic_index or {}).get("embedding_model", "")),
+                    int((candidate.semantic_index or {}).get("embedding_dimensions", 0)),
+                )
+                for resolution in resolutions
+                for candidate in resolution.image_candidates
+            }
+        )
         return {
             "temporal_index_ids": temporal_index_ids,
             "compatibility_signatures": compatibility_signatures,
@@ -1007,5 +1435,22 @@ class VisualDirectorService:
                 {"provider": provider, "model": model, "dimensions": dimensions}
                 for provider, model, dimensions in embedding_profiles
             ],
+            "image_semantic_index_ids": image_indexes,
+            "image_embedding_profiles": [
+                {"provider": provider, "model": model, "dimensions": dimensions}
+                for provider, model, dimensions in image_profiles
+            ],
+            "retrieval_branches": {
+                "temporal": {
+                    "result_sets": len(result_sets),
+                    "failures": sum(item.error is not None for item in resolutions),
+                },
+                "static_image": {
+                    "result_sets": sum(
+                        len(item.image_result_sets) for item in resolutions
+                    ),
+                    "failures": sum(item.image_error is not None for item in resolutions),
+                },
+            },
             "session_summaries": [summaries[key] for key in sorted(summaries)],
         }

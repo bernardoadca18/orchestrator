@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.clients.media_indexer_search import MediaIndexerSearchProvider, MediaSearchProvider
 from app.clients.video_composer_client import (
     ComposerRender,
     VideoComposerClient,
@@ -58,6 +59,7 @@ class ProductionOrchestrationService:
         timeline_service: Any | None = None,
         audio_processor: Callable[..., Any] = processar_workflow,
         composer_client_factory: Callable[[], VideoComposerClient] | None = None,
+        media_provider: MediaSearchProvider | None = None,
     ) -> None:
         self.session = session
         self.config = config
@@ -70,6 +72,7 @@ class ProductionOrchestrationService:
         self.composer_client_factory = composer_client_factory or (
             lambda: VideoComposerClient(config)
         )
+        self.media_provider = media_provider or MediaIndexerSearchProvider(config)
 
     async def process(self, workflow_id: uuid.UUID) -> OrchestrationResult:
         workflow = await self.workflows.obter_por_id(workflow_id)
@@ -166,9 +169,29 @@ class ProductionOrchestrationService:
                             "Current render input is unavailable",
                         )
                         return OrchestrationResult(terminal=True)
+                    hybrid_errors = self._hybrid_timeline_errors(timeline)
+                    if hybrid_errors:
+                        await self._block(
+                            workflow,
+                            "render",
+                            "hybrid_timeline_gate_failed",
+                            "ProductionTimeline failed hybrid source contract gate: "
+                            + ", ".join(hybrid_errors),
+                        )
+                        return OrchestrationResult(terminal=True)
+                    image_errors = await self._validate_static_image_assets(timeline)
+                    if image_errors:
+                        await self._block(
+                            workflow,
+                            "render",
+                            "image_asset_validation_failed",
+                            "Static image integrity validation failed: "
+                            + ", ".join(image_errors),
+                        )
+                        return OrchestrationResult(terminal=True)
                     diversity = timeline_visual_diversity(
                         timeline.placements,
-                        self._visual_diversity_policy(),
+                        self._visual_diversity_policy(timeline),
                     )
                     if diversity.status == "failed":
                         await self._block(
@@ -330,15 +353,138 @@ class ProductionOrchestrationService:
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
 
-    def _visual_diversity_policy(self) -> VisualDiversityPolicy:
+    def _visual_diversity_policy(
+        self, timeline: ProductionTimeline | None = None
+    ) -> VisualDiversityPolicy:
+        hybrid = bool(
+            timeline
+            and getattr(timeline, "schema_version", None)
+            == self.config.production_timeline_hybrid_schema_version
+        )
         return VisualDiversityPolicy(
-            version=self.config.visual_diversity_policy_version,
+            version=(
+                self.config.visual_diversity_hybrid_policy_version
+                if hybrid
+                else self.config.visual_diversity_policy_version
+            ),
             minimum_window_count=self.config.visual_diversity_minimum_window_count,
             maximum_reuse_ratio=self.config.visual_diversity_maximum_reuse_ratio,
             maximum_dominant_window_ratio=(
                 self.config.visual_diversity_maximum_dominant_window_ratio
             ),
+            maximum_dominant_static_ratio=(
+                self.config.visual_diversity_maximum_dominant_static_ratio
+                if hybrid
+                else 1.0
+            ),
+            maximum_static_reuse_count=(
+                self.config.visual_diversity_maximum_static_reuse_count
+                if hybrid
+                else 2**31 - 1
+            ),
+            maximum_consecutive_static_seconds=(
+                self.config.static_image_maximum_consecutive_seconds
+                if hybrid
+                else float("inf")
+            ),
         )
+
+    def _hybrid_timeline_errors(self, timeline: ProductionTimeline) -> list[str]:
+        if (
+            getattr(timeline, "schema_version", None)
+            != self.config.production_timeline_hybrid_schema_version
+        ):
+            return []
+        errors: list[str] = []
+        consecutive_static = 0.0
+        previous_end: float | None = None
+        for item in sorted(timeline.placements, key=lambda value: value.order):
+            duration = item.timeline_end_seconds - item.timeline_start_seconds
+            if item.source_type == "static_image":
+                if any(
+                    value is not None
+                    for value in (
+                        item.source_session_id,
+                        item.candidate_start_seconds,
+                        item.candidate_end_seconds,
+                        item.source_start_seconds,
+                        item.source_end_seconds,
+                        item.playback_rate,
+                    )
+                ):
+                    errors.append(f"placement_{item.order}_image_has_temporal_fields")
+                provenance = item.source_provenance or {}
+                presentation = item.presentation or {}
+                if not (
+                    item.source_image_semantic_index_id
+                    and provenance.get("expected_sha256")
+                    and provenance.get("expected_byte_size") is not None
+                    and provenance.get("content_type")
+                    in {"image/jpeg", "image/png", "image/webp"}
+                ):
+                    errors.append(f"placement_{item.order}_image_identity_invalid")
+                if presentation.get("policy_version") != (
+                    self.config.static_image_presentation_policy_version
+                ):
+                    errors.append(f"placement_{item.order}_presentation_invalid")
+                if not (
+                    self.config.static_image_minimum_hold_seconds
+                    <= duration
+                    <= self.config.static_image_maximum_hold_seconds
+                ):
+                    errors.append(f"placement_{item.order}_image_hold_invalid")
+                if previous_end != item.timeline_start_seconds:
+                    consecutive_static = 0.0
+                consecutive_static += duration
+                if consecutive_static > self.config.static_image_maximum_consecutive_seconds:
+                    errors.append("consecutive_static_hold_exceeded")
+            elif item.source_type == "video_segment":
+                consecutive_static = 0.0
+                if (
+                    item.source_session_id is None
+                    or item.source_image_semantic_index_id is not None
+                    or item.source_start_seconds is None
+                    or item.source_end_seconds is None
+                    or item.playback_rate != 1.0
+                    or item.presentation is not None
+                ):
+                    errors.append(f"placement_{item.order}_video_contract_invalid")
+            else:
+                errors.append(f"placement_{item.order}_source_type_invalid")
+            previous_end = item.timeline_end_seconds
+        return sorted(set(errors))
+
+    async def _validate_static_image_assets(
+        self, timeline: ProductionTimeline
+    ) -> list[str]:
+        expected: dict[uuid.UUID, tuple[uuid.UUID, str, int, str]] = {}
+        for item in timeline.placements:
+            if getattr(item, "source_type", "gameplay") != "static_image":
+                continue
+            provenance = item.source_provenance or {}
+            expected[item.source_media_id] = (
+                item.source_project_id,
+                str(provenance.get("expected_sha256", "")),
+                int(provenance.get("expected_byte_size", -1)),
+                str(provenance.get("content_type", "")),
+            )
+        errors: list[str] = []
+        for media_id, identity in sorted(expected.items(), key=lambda value: str(value[0])):
+            try:
+                asset = await self.media_provider.get_asset(media_id)
+            except Exception as exc:
+                errors.append(f"{media_id}:provider_{type(exc).__name__}")
+                continue
+            project_id, sha256, byte_size, content_type = identity
+            if (
+                asset.project_id != project_id
+                or asset.media_kind != "image"
+                or asset.sha256 != sha256
+                or asset.byte_size != byte_size
+                or asset.content_type != content_type
+            ):
+                errors.append(f"{media_id}:identity_mismatch")
+        return errors
 
     async def _reconcile_or_submit(
         self, render: WorkflowRender, *, retry_failed: bool

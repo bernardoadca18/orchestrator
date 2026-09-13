@@ -31,6 +31,39 @@ class VisualCandidate:
     def duration_seconds(self) -> float:
         return self.end_seconds - self.start_seconds
 
+    @property
+    def source_type(self) -> str:
+        return "video_segment"
+
+
+@dataclass(frozen=True, slots=True)
+class StaticImageCandidate:
+    project_id: UUID
+    media_id: UUID
+    image_semantic_index_id: UUID
+    semantic_score: float
+    rank: int
+    media_filename: str
+    content_type: str
+    byte_size: int
+    sha256: str
+    width: int
+    height: int
+    format_name: str
+    provenance: dict
+    semantic_preview: str | None = None
+    semantic_index: dict | None = None
+    selection_strategy: str = "hybrid_visual_fusion"
+    selection_score: float = 0.0
+    score_components: dict | None = None
+
+    @property
+    def source_type(self) -> str:
+        return "static_image"
+
+
+type HybridVisualCandidate = VisualCandidate | StaticImageCandidate
+
 
 def normalize_query(value: str) -> str:
     normalized = " ".join(value.split())
@@ -219,4 +252,99 @@ def direct_candidate(
         selection_score=1.0,
         score_components={"trusted_preferred_provenance": 1.0},
         provenance={"source": "production_script"},
+    )
+
+
+def _same_source(left: HybridVisualCandidate, right: HybridVisualCandidate) -> bool:
+    if isinstance(left, StaticImageCandidate) or isinstance(right, StaticImageCandidate):
+        return (
+            isinstance(left, StaticImageCandidate)
+            and isinstance(right, StaticImageCandidate)
+            and left.media_id == right.media_id
+        )
+    return overlap_ratio(left, right) >= 0.95
+
+
+def fuse_hybrid_candidates(
+    video_candidates: list[VisualCandidate],
+    image_candidates: list[StaticImageCandidate],
+    *,
+    already_selected: list[HybridVisualCandidate],
+    preferred_session_id: UUID | None,
+    source_note_id: UUID | None,
+    rrf_k: int,
+    video_weight: float,
+    image_weight: float,
+    strategy_version: str,
+) -> list[HybridVisualCandidate]:
+    """Weighted RRF without treating cross-modal native scores as calibrated."""
+    videos = deduplicate_candidates(video_candidates)
+    images_by_media: dict[UUID, StaticImageCandidate] = {}
+    for image_candidate in sorted(
+        image_candidates,
+        key=lambda item: (item.rank, -item.semantic_score, str(item.media_id)),
+    ):
+        images_by_media.setdefault(image_candidate.media_id, image_candidate)
+    images = list(images_by_media.values())
+    candidates: list[HybridVisualCandidate] = list(videos)
+    candidates.extend(images)
+    scored: list[HybridVisualCandidate] = []
+    for candidate in candidates:
+        weight = image_weight if isinstance(candidate, StaticImageCandidate) else video_weight
+        native_rank = candidate.rank or 1
+        rrf_score = weight / (rrf_k + native_rank)
+        preferred_bonus = (
+            0.003
+            if isinstance(candidate, VisualCandidate)
+            and candidate.session_id == preferred_session_id
+            else 0.0
+        )
+        note_bonus = (
+            0.002
+            if isinstance(candidate, VisualCandidate)
+            and source_note_id is not None
+            and source_note_id in candidate.matched_note_ids
+            else 0.0
+        )
+        reuse_count = sum(_same_source(candidate, previous) for previous in already_selected)
+        consecutive_reuse = bool(
+            already_selected and _same_source(candidate, already_selected[-1])
+        )
+        reuse_penalty = min(0.012, 0.004 * reuse_count) + (
+            0.003 if consecutive_reuse else 0.0
+        )
+        fusion_score = max(0.0, rrf_score + preferred_bonus + note_bonus - reuse_penalty)
+        scored.append(
+            replace(
+                candidate,
+                selection_strategy=strategy_version,
+                selection_score=round(fusion_score, 9),
+                score_components={
+                    "fusion_strategy": strategy_version,
+                    "source_kind": candidate.source_type,
+                    "native_rank": native_rank,
+                    "native_score": round(candidate.semantic_score or 0.0, 6),
+                    "modality_weight": weight,
+                    "rrf_k": rrf_k,
+                    "rrf_score": round(rrf_score, 9),
+                    "preferred_session_bonus": preferred_bonus,
+                    "source_note_bonus": note_bonus,
+                    "reuse_count": reuse_count,
+                    "consecutive_reuse": consecutive_reuse,
+                    "reuse_penalty": round(reuse_penalty, 9),
+                    "fusion_score": round(fusion_score, 9),
+                },
+            )
+        )
+    # Native scores are compared only after modality and native rank have tied.
+    return sorted(
+        scored,
+        key=lambda item: (
+            -item.selection_score,
+            0 if isinstance(item, VisualCandidate) else 1,
+            item.rank or 1,
+            -(item.semantic_score or 0.0),
+            str(item.media_id),
+            item.start_seconds if isinstance(item, VisualCandidate) else 0.0,
+        ),
     )

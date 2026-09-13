@@ -8,6 +8,7 @@ import pytest
 from app.services.production_timeline_algorithm import (
     DecisionInput,
     SourceWindow,
+    StaticImageSource,
     TimelinePolicy,
     TimelineValidationError,
     build_production_timeline,
@@ -42,7 +43,7 @@ def _source(
 def _decision(
     start: float | None,
     end: float | None,
-    source: SourceWindow | None,
+    source: SourceWindow | StaticImageSource | None,
     *,
     query_id: uuid.UUID | None = None,
     decision_id: uuid.UUID | None = None,
@@ -50,7 +51,7 @@ def _decision(
     binding_status: str = "resolved",
     source_status: str = "resolved",
     order: int = 0,
-    alternatives: tuple[SourceWindow, ...] = (),
+    alternatives: tuple[SourceWindow | StaticImageSource, ...] = (),
 ) -> DecisionInput:
     return DecisionInput(
         decision_id=decision_id or uuid.uuid4(),
@@ -79,6 +80,20 @@ def _policy(**changes) -> TimelinePolicy:
     return TimelinePolicy(**values)
 
 
+def _image(media_id: uuid.UUID | None = None) -> StaticImageSource:
+    return StaticImageSource(
+        project_id=PROJECT_ID,
+        media_id=media_id or uuid.uuid4(),
+        image_semantic_index_id=uuid.uuid4(),
+        sha256="a" * 64,
+        byte_size=100,
+        content_type="image/png",
+        width=1080,
+        height=1350,
+        selection_strategy="hybrid_visual_fusion_v1",
+    )
+
+
 def test_basic_timeline_exact_fit_and_explicit_edge_gaps() -> None:
     result = build_production_timeline(
         20,
@@ -102,6 +117,49 @@ def test_basic_timeline_exact_fit_and_explicit_edge_gaps() -> None:
     assert result.visual_coverage_us == seconds_to_us(5)
     assert result.visual_gap_us == seconds_to_us(15)
     assert result.status == "completed_with_gaps"
+
+
+def test_static_image_has_timeline_hold_without_fake_source_time() -> None:
+    image = _image()
+    result = build_production_timeline(
+        5,
+        [_decision(0, 5, image)],
+        _policy(hybrid_enabled=True, maximum_sources_per_query=4),
+    )
+    placement = result.placements[0]
+    assert placement.source is image
+    assert placement.source_start_us is None
+    assert placement.source_end_us is None
+    assert placement.allowed_source_ranges == []
+    assert placement.duration_us == seconds_to_us(5)
+
+
+def test_long_hybrid_span_uses_mixed_alternatives_and_caps_static_hold() -> None:
+    image = _image()
+    video = _source(100, 104)
+    result = build_production_timeline(
+        12,
+        [
+            _decision(
+                0,
+                12,
+                image,
+                alternatives=(video, _image()),
+            )
+        ],
+        _policy(hybrid_enabled=True, maximum_sources_per_query=4),
+    )
+    assert [type(item.source) for item in result.placements] == [
+        StaticImageSource,
+        SourceWindow,
+        StaticImageSource,
+    ]
+    assert all(
+        item.duration_us <= seconds_to_us(8)
+        for item in result.placements
+        if isinstance(item.source, StaticImageSource)
+    )
+    assert result.coverage_ratio == 1
 
 
 def test_resolved_visual_beats_cover_full_narration_without_fake_gap_fill() -> None:

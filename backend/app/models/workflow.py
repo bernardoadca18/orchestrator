@@ -1114,16 +1114,30 @@ class TimelinePlacement(Base):
             name="ck_timeline_placement_timeline_range",
         ),
         CheckConstraint(
-            "candidate_start_seconds >= 0 AND "
-            "candidate_end_seconds > candidate_start_seconds AND "
+            "(source_type IN ('gameplay', 'video_segment') AND "
+            "source_session_id IS NOT NULL AND source_image_semantic_index_id IS NULL AND "
+            "candidate_start_seconds >= 0 AND candidate_end_seconds > candidate_start_seconds AND "
             "source_start_seconds >= candidate_start_seconds AND "
             "source_end_seconds <= candidate_end_seconds AND "
-            "source_end_seconds > source_start_seconds",
-            name="ck_timeline_placement_source_range",
+            "source_end_seconds > source_start_seconds "
+            "AND playback_rate = 1.0 AND presentation IS NULL) OR "
+            "(source_type = 'static_image' AND source_session_id IS NULL AND "
+            "source_image_semantic_index_id IS NOT NULL AND candidate_start_seconds IS NULL AND "
+            "candidate_end_seconds IS NULL AND source_start_seconds IS NULL AND "
+            "source_end_seconds IS NULL AND playback_rate IS NULL AND presentation IS NOT NULL)",
+            name="ck_timeline_placement_source_union",
         ),
-        CheckConstraint("playback_rate = 1.0", name="ck_timeline_placement_playback_rate"),
         CheckConstraint("transition = 'cut'", name="ck_timeline_placement_transition"),
-        CheckConstraint("source_type = 'gameplay'", name="ck_timeline_placement_source_type"),
+        CheckConstraint(
+            "source_type IN ('gameplay', 'video_segment', 'static_image')",
+            name="ck_timeline_placement_source_type",
+        ),
+        CheckConstraint(
+            "presentation IS NULL OR (presentation->>'fit' IN ('cover', 'contain') AND "
+            "presentation->>'background' IN ('black', 'blurred_fill') AND "
+            "presentation->>'motion' IN ('none', 'slow_zoom_in', 'slow_zoom_out'))",
+            name="ck_timeline_placement_presentation",
+        ),
         CheckConstraint(
             "importance IN ('required', 'preferred', 'optional')",
             name="ck_timeline_placement_importance",
@@ -1149,19 +1163,25 @@ class TimelinePlacement(Base):
     visual_decision_ids: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     source_type: Mapped[str] = mapped_column(String(32), nullable=False, default="gameplay")
     source_project_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
-    source_session_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    source_session_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     source_media_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False)
+    source_image_semantic_index_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True), nullable=True
+    )
     timeline_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
     timeline_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
-    candidate_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
-    candidate_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
-    source_start_seconds: Mapped[float] = mapped_column(Float, nullable=False)
-    source_end_seconds: Mapped[float] = mapped_column(Float, nullable=False)
-    playback_rate: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    candidate_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candidate_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_start_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_end_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    playback_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
     transition: Mapped[str] = mapped_column(String(24), nullable=False, default="cut")
     strategy: Mapped[str] = mapped_column(String(40), nullable=False)
     importance: Mapped[str] = mapped_column(String(24), nullable=False)
     source_provenance: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    presentation: Mapped[dict | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
     diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     criado_em: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

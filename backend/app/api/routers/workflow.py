@@ -6,10 +6,11 @@ enfileirar geração de áudio, acompanhar progresso e baixar o resultado.
 import datetime as dt
 import uuid
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import ideas_hub_client
@@ -102,6 +103,8 @@ from app.tasks.audio_tasks import gerar_audio_workflow
 from app.tasks.production_tasks import processar_producao_workflow
 
 router = APIRouter()
+VISUAL_SOURCE_ADAPTER: TypeAdapter[Any] = TypeAdapter(VisualSourceSelectionOut)
+TIMELINE_SOURCE_ADAPTER: TypeAdapter[Any] = TypeAdapter(TimelineSourceOut)
 
 
 @router.get("/calibration/speaking-rate")
@@ -321,11 +324,11 @@ def _visual_plan_response(plan: VisualPlan) -> VisualPlanOut:
                 target_narration_duration_seconds=item.target_narration_duration_seconds,
                 source_resolution_status=item.source_resolution_status,
                 selection_strategy=item.selection_strategy,
-                selected_source=VisualSourceSelectionOut.model_validate(item.selected_source)
+                selected_source=VISUAL_SOURCE_ADAPTER.validate_python(item.selected_source)
                 if item.selected_source
                 else None,
                 alternatives=[
-                    VisualSourceSelectionOut.model_validate(candidate)
+                    VISUAL_SOURCE_ADAPTER.validate_python(candidate)
                     for candidate in item.alternatives
                 ],
                 selection_score=item.selection_score,
@@ -336,6 +339,35 @@ def _visual_plan_response(plan: VisualPlan) -> VisualPlanOut:
             for item in plan.decisions
         ],
     )
+
+
+def _timeline_source_response(item):
+    source_type = getattr(item, "source_type", None) or "gameplay"
+    if source_type == "static_image":
+        provenance = item.source_provenance or {}
+        payload = {
+            "source_type": "static_image",
+            "project_id": item.source_project_id,
+            "media_id": item.source_media_id,
+            "image_semantic_index_id": item.source_image_semantic_index_id,
+            "expected_sha256": provenance.get("expected_sha256"),
+            "expected_byte_size": provenance.get("expected_byte_size"),
+            "content_type": provenance.get("content_type"),
+            "provenance": provenance,
+        }
+    else:
+        payload = {
+            "source_type": source_type,
+            "project_id": item.source_project_id,
+            "session_id": item.source_session_id,
+            "media_id": item.source_media_id,
+            "candidate_start_seconds": item.candidate_start_seconds,
+            "candidate_end_seconds": item.candidate_end_seconds,
+            "source_start_seconds": item.source_start_seconds,
+            "source_end_seconds": item.source_end_seconds,
+            "provenance": item.source_provenance,
+        }
+    return TIMELINE_SOURCE_ADAPTER.validate_python(payload)
 
 
 def _production_timeline_response(timeline: ProductionTimeline) -> ProductionTimelineOut:
@@ -382,17 +414,9 @@ def _production_timeline_response(timeline: ProductionTimeline) -> ProductionTim
                         visual_query_ids=[uuid.UUID(value) for value in item.visual_query_ids],
                         timeline_start_seconds=item.timeline_start_seconds,
                         timeline_end_seconds=item.timeline_end_seconds,
-                        source=TimelineSourceOut(
-                            project_id=item.source_project_id,
-                            session_id=item.source_session_id,
-                            media_id=item.source_media_id,
-                            candidate_start_seconds=item.candidate_start_seconds,
-                            candidate_end_seconds=item.candidate_end_seconds,
-                            source_start_seconds=item.source_start_seconds,
-                            source_end_seconds=item.source_end_seconds,
-                            provenance=item.source_provenance,
-                        ),
+                        source=_timeline_source_response(item),
                         playback_rate=item.playback_rate,
+                        presentation=getattr(item, "presentation", None),
                         transition=item.transition,
                         strategy=item.strategy,
                         importance=item.importance,

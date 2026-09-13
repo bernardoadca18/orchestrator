@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,11 +11,13 @@ from app.services.production_qa_checks import (
     ProductionQACheck,
     ProductionQAInputs,
     aggregate_checks,
+    check_hybrid_source_contracts,
     deep_ffprobe_check,
     delivery_checks,
     standard_local_checks,
 )
 from app.services.production_qa_policy import (
+    GAME_ANALYSIS_HYBRID_POLICY,
     GAME_ANALYSIS_POLICY,
     GENERIC_POLICY,
     resolve_qa_policy,
@@ -319,6 +322,45 @@ def test_unknown_and_null_profiles_use_generic_policy() -> None:
     assert resolve_qa_policy(None) == GENERIC_POLICY
     assert resolve_qa_policy("future_unknown_profile") == GENERIC_POLICY
     assert resolve_qa_policy("game_analysis") == GAME_ANALYSIS_POLICY
+    assert (
+        resolve_qa_policy("game_analysis", "production_timeline_schema_v2")
+        == GAME_ANALYSIS_HYBRID_POLICY
+    )
+
+
+def test_hybrid_qa_accepts_non_temporal_image_identity_and_rejects_fake_time() -> None:
+    inputs = replace(_inputs(), policy=GAME_ANALYSIS_HYBRID_POLICY)
+    inputs.timeline.schema_version = "production_timeline_schema_v2"
+    placement = SimpleNamespace(
+        order=0,
+        source_type="static_image",
+        source_project_id=uuid.uuid4(),
+        source_session_id=None,
+        source_media_id=uuid.uuid4(),
+        source_image_semantic_index_id=uuid.uuid4(),
+        timeline_start_seconds=0.0,
+        timeline_end_seconds=5.0,
+        candidate_start_seconds=None,
+        candidate_end_seconds=None,
+        source_start_seconds=None,
+        source_end_seconds=None,
+        playback_rate=None,
+        presentation={
+            "fit": "contain",
+            "background": "blurred_fill",
+            "motion": "none",
+        },
+        source_provenance={
+            "expected_sha256": "a" * 64,
+            "expected_byte_size": 10,
+            "content_type": "image/png",
+        },
+        visual_decision_id=None,
+    )
+    inputs.timeline.placements = [placement]
+    assert check_hybrid_source_contracts(inputs).result == "passed"
+    placement.source_start_seconds = 0
+    assert check_hybrid_source_contracts(inputs).result == "failed"
 
 
 def test_standard_delivery_requires_exact_one_byte_range_contract() -> None:

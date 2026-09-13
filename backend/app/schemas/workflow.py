@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 class RoteiroDisponivelOut(BaseModel):
@@ -339,11 +339,20 @@ class RoteiroPacoteOut(BaseModel):
     media_context: MediaScopeOut | None = None
 
 
+class StaticImageScopeOut(BaseModel):
+    enabled: bool = False
+    asset_classes: list[str] = Field(default_factory=list)
+    collections: list[str] = Field(default_factory=list)
+    source_owners: list[str] = Field(default_factory=list)
+    source_classes: list[str] = Field(default_factory=list)
+
+
 class MediaScopeOut(BaseModel):
     """Minimal immutable Media Indexer scope preserved by Ideas Hub."""
 
     media_project_id: uuid.UUID | None = None
     media_session_ids: list[uuid.UUID] | None = None
+    static_images: StaticImageScopeOut | None = None
 
 
 class MetadataPacoteOut(BaseModel):
@@ -422,9 +431,10 @@ class NarrationAlignmentEnsureOut(BaseModel):
     timeline: NarrationTimelineOut
 
 
-class VisualSourceSelectionOut(BaseModel):
-    format_version: str = "visual_source_v1"
-    source_type: str = "gameplay"
+class VisualGameplaySourceSelectionOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format_version: Literal["visual_source_v1"] = "visual_source_v1"
+    source_type: Literal["gameplay"] = "gameplay"
     project_id: uuid.UUID
     session_id: uuid.UUID
     media_id: uuid.UUID
@@ -443,6 +453,63 @@ class VisualSourceSelectionOut(BaseModel):
     media_search_strategy: str | None = None
     duration_fit_ratio: float | None = Field(default=None, ge=0, le=1)
     provenance: dict = Field(default_factory=dict)
+
+
+class VisualVideoSegmentSourceSelectionOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format_version: Literal["visual_source_v2"] = "visual_source_v2"
+    source_type: Literal["video_segment"] = "video_segment"
+    project_id: uuid.UUID
+    session_id: uuid.UUID
+    media_id: uuid.UUID
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(gt=0)
+    source_duration_seconds: float = Field(gt=0)
+    semantic_score: float | None = Field(default=None, ge=0, le=1)
+    selection_score: float = Field(ge=0, le=1)
+    rank: int | None = Field(default=None, ge=1)
+    session_label: str
+    media_filename: str
+    temporal_index_id: uuid.UUID | None = None
+    retrieval_candidate_id: uuid.UUID | None = None
+    transcript_preview: str | None = None
+    matched_note_ids: list[uuid.UUID] = Field(default_factory=list)
+    media_search_strategy: str | None = None
+    duration_fit_ratio: float | None = Field(default=None, ge=0, le=1)
+    provenance: dict = Field(default_factory=dict)
+    candidate_start_seconds: float = Field(ge=0)
+    candidate_end_seconds: float = Field(gt=0)
+
+
+class VisualStaticImageSourceSelectionOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    format_version: Literal["visual_source_v2"] = "visual_source_v2"
+    source_type: Literal["static_image"] = "static_image"
+    project_id: uuid.UUID
+    media_id: uuid.UUID
+    image_semantic_index_id: uuid.UUID
+    semantic_score: float = Field(ge=-1, le=1)
+    selection_score: float = Field(ge=0, le=1)
+    rank: int = Field(ge=1)
+    media_filename: str
+    content_type: Literal["image/jpeg", "image/png", "image/webp"]
+    byte_size: int = Field(ge=0)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    width: int = Field(gt=0)
+    height: int = Field(gt=0)
+    format_name: str
+    semantic_preview: str | None = None
+    duration_fit_ratio: None = None
+    provenance: dict = Field(default_factory=dict)
+    semantic_index: dict = Field(default_factory=dict)
+
+
+VisualSourceSelectionOut = Annotated[
+    VisualGameplaySourceSelectionOut
+    | VisualVideoSegmentSourceSelectionOut
+    | VisualStaticImageSourceSelectionOut,
+    Field(discriminator="source_type"),
+]
 
 
 class VisualDecisionOut(BaseModel):
@@ -516,8 +583,9 @@ class NarrationTrackOut(BaseModel):
     byte_size: int | None
 
 
-class TimelineSourceOut(BaseModel):
-    source_type: str = "gameplay"
+class TimelineGameplaySourceOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_type: Literal["gameplay"] = "gameplay"
     project_id: uuid.UUID
     session_id: uuid.UUID
     media_id: uuid.UUID
@@ -526,6 +594,46 @@ class TimelineSourceOut(BaseModel):
     source_start_seconds: float = Field(ge=0)
     source_end_seconds: float = Field(gt=0)
     provenance: dict = Field(default_factory=dict)
+
+
+class TimelineVideoSegmentSourceOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_type: Literal["video_segment"] = "video_segment"
+    project_id: uuid.UUID
+    session_id: uuid.UUID
+    media_id: uuid.UUID
+    candidate_start_seconds: float = Field(ge=0)
+    candidate_end_seconds: float = Field(gt=0)
+    source_start_seconds: float = Field(ge=0)
+    source_end_seconds: float = Field(gt=0)
+    provenance: dict = Field(default_factory=dict)
+
+
+class TimelineStaticImageSourceOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source_type: Literal["static_image"] = "static_image"
+    project_id: uuid.UUID
+    media_id: uuid.UUID
+    image_semantic_index_id: uuid.UUID
+    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_byte_size: int = Field(ge=0)
+    content_type: Literal["image/jpeg", "image/png", "image/webp"]
+    provenance: dict = Field(default_factory=dict)
+
+
+TimelineSourceOut = Annotated[
+    TimelineGameplaySourceOut | TimelineVideoSegmentSourceOut | TimelineStaticImageSourceOut,
+    Field(discriminator="source_type"),
+]
+
+
+class StaticImagePresentationOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    policy_version: str
+    fit: Literal["cover", "contain"]
+    background: Literal["black", "blurred_fill"]
+    motion: Literal["none", "slow_zoom_in", "slow_zoom_out"]
+    zoom_amount: float = Field(ge=0, le=0.1)
 
 
 class TimelinePlacementOut(BaseModel):
@@ -537,11 +645,21 @@ class TimelinePlacementOut(BaseModel):
     timeline_start_seconds: float = Field(ge=0)
     timeline_end_seconds: float = Field(gt=0)
     source: TimelineSourceOut
-    playback_rate: float
+    playback_rate: float | None = None
+    presentation: StaticImagePresentationOut | None = None
     transition: str
     strategy: str
     importance: str
     diagnostics: dict | None
+
+    @model_validator(mode="after")
+    def validate_source_contract(self) -> TimelinePlacementOut:
+        if isinstance(self.source, TimelineStaticImageSourceOut):
+            if self.playback_rate is not None or self.presentation is None:
+                raise ValueError("static images require presentation and forbid playback_rate")
+        elif self.playback_rate != 1.0 or self.presentation is not None:
+            raise ValueError("video sources require playback_rate=1 and forbid presentation")
+        return self
 
 
 class TimelineGapOut(BaseModel):

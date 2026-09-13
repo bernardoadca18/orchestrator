@@ -26,6 +26,9 @@ class ProductionQAPolicy:
     expected_audio_channels: int = 1
     alignment_coverage_warning_threshold: float = 0.60
     supported_source_types: tuple[str, ...] = ("gameplay",)
+    static_image_minimum_hold_seconds: float | None = None
+    static_image_maximum_hold_seconds: float | None = None
+    static_image_maximum_consecutive_seconds: float | None = None
     identity: str = field(init=False, default="")
 
     def __post_init__(self) -> None:
@@ -49,6 +52,19 @@ GAME_ANALYSIS_POLICY = ProductionQAPolicy(
     require_required_visual_queries_resolved=True,
 )
 
+GAME_ANALYSIS_HYBRID_POLICY = ProductionQAPolicy(
+    name="game_analysis_qa_v2",
+    version="2",
+    require_transcription=True,
+    require_narration_alignment=True,
+    require_visual_plan=True,
+    require_required_visual_queries_resolved=True,
+    supported_source_types=("video_segment", "static_image"),
+    static_image_minimum_hold_seconds=2.0,
+    static_image_maximum_hold_seconds=8.0,
+    static_image_maximum_consecutive_seconds=15.0,
+)
+
 
 # These are the actual Ideas Hub production profile identifiers audited in Stage 18.
 # Faceless VisualQuery readiness is enforced upstream by Visual Director; these
@@ -64,7 +80,11 @@ KNOWN_IDEAS_HUB_PROFILES = frozenset(
 )
 
 
-def resolve_qa_policy(perfil_producao: str | None) -> ProductionQAPolicy:
+def resolve_qa_policy(
+    perfil_producao: str | None, timeline_schema_version: str | None = None
+) -> ProductionQAPolicy:
     if perfil_producao == "game_analysis":
+        if timeline_schema_version == "production_timeline_schema_v2":
+            return GAME_ANALYSIS_HYBRID_POLICY
         return GAME_ANALYSIS_POLICY
     return GENERIC_POLICY

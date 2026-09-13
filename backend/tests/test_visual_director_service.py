@@ -8,6 +8,9 @@ import uuid
 import pytest
 
 from app.clients.media_indexer_search import (
+    ImageSearchCandidate,
+    ImageSearchFilters,
+    ImageSearchResultSet,
     MediaIndexerUnavailableError,
     MediaSearchCandidate,
     MediaSearchResultSet,
@@ -161,7 +164,10 @@ class FakeProvider:
             )
         }
         self.results: list[MediaSearchCandidate] = []
+        self.image_results: list[ImageSearchCandidate] = []
+        self.image_search_calls: list[tuple[uuid.UUID, str, ImageSearchFilters]] = []
         self.search_error: Exception | None = None
+        self.image_error: Exception | None = None
 
     async def get_session(self, session_id: uuid.UUID):
         self.session_calls.append(session_id)
@@ -202,6 +208,26 @@ class FakeProvider:
     async def search_project(self, project_id: uuid.UUID, *, query: str, **kwargs):
         self.project_search_calls.append((project_id, query))
         return self._result("project")
+
+    async def search_images(
+        self,
+        project_id: uuid.UUID,
+        *,
+        query: str,
+        filters: ImageSearchFilters,
+        **kwargs,
+    ):
+        self.image_search_calls.append((project_id, query, filters))
+        if self.image_error:
+            raise self.image_error
+        return ImageSearchResultSet(
+            query=query,
+            project_id=project_id,
+            results=tuple(self.image_results),
+            searched_indexes=1,
+            compatibility_groups=1,
+            filters=filters,
+        )
 
 
 def _query(
@@ -363,6 +389,26 @@ def _candidate(
     )
 
 
+def _image_candidate(score: float = 0.8) -> ImageSearchCandidate:
+    return ImageSearchCandidate(
+        project_id=PROJECT_ID,
+        media_id=uuid.uuid4(),
+        score=score,
+        rank=1,
+        original_filename="official.png",
+        content_type="image/png",
+        byte_size=123,
+        sha256="e" * 64,
+        width=1920,
+        height=1080,
+        format_name="PNG",
+        provenance={"asset_class": "official_screenshot"},
+        semantic_preview="Vice City",
+        image_semantic_index_id=uuid.uuid4(),
+        semantic_index={"strategy": "image_semantic_v1"},
+    )
+
+
 def _service(workflow, alignment, provider, repository=None, config=None):
     repository = repository or FakeVisualPlanRepository()
     config = config or Settings(
@@ -459,6 +505,46 @@ async def test_required_and_optional_no_results_are_explicit_gaps() -> None:
     assert plan.required_gaps == 1
     assert plan.optional_gaps == 1
     assert {item.source_resolution_status for item in plan.decisions} == {"unresolved"}
+
+
+@pytest.mark.asyncio
+async def test_hybrid_image_only_result_is_selected_without_temporal_fields() -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)]
+    )
+    workflow.roteiro_snapshot["media_context"]["static_images"] = {
+        "enabled": True,
+        "asset_classes": ["official_screenshot"],
+        "collections": [],
+        "source_owners": [],
+        "source_classes": [],
+    }
+    provider = FakeProvider()
+    provider.image_results = [_image_candidate()]
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    source = plan.decisions[0].selected_source
+    assert plan.strategy_version == "visual_director_v2_hybrid_sources"
+    assert source["source_type"] == "static_image"
+    assert "source_start_seconds" not in source
+    assert len(provider.project_search_calls) == 1
+    assert provider.image_search_calls[0][2].asset_class == "official_screenshot"
+
+
+@pytest.mark.asyncio
+async def test_hybrid_image_failure_degrades_to_video_branch() -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)]
+    )
+    workflow.roteiro_snapshot["media_context"]["static_images"] = {"enabled": True}
+    provider = FakeProvider()
+    provider.results = [_candidate()]
+    provider.image_error = MediaIndexerUnavailableError("offline")
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.status == "completed"
+    assert plan.decisions[0].selected_source["source_type"] == "video_segment"
+    assert plan.decisions[0].diagnostics["image_branch_error"] == "unavailable"
 
 
 @pytest.mark.asyncio

@@ -121,18 +121,38 @@ class Settings(BaseSettings):
     visual_director_search_concurrency: int = 4
     visual_director_min_semantic_score: float = 0.25
     visual_director_media_search_strategy_version: str = "media_search_v4_hybrid_evidence"
+    visual_director_hybrid_strategy_version: str = "visual_director_v2_hybrid_sources"
+    hybrid_visual_fusion_version: str = "hybrid_visual_fusion_v1"
+    visual_director_image_search_top_k: int = 5
+    visual_director_image_min_semantic_score: float = 0.25
+    visual_director_image_filter_combinations_max: int = 16
+    hybrid_visual_fusion_rrf_k: int = 60
+    hybrid_visual_fusion_video_weight: float = 1.0
+    hybrid_visual_fusion_image_weight: float = 1.0
     visual_diversity_policy_version: str = "visual_diversity_policy_v1"
+    visual_diversity_hybrid_policy_version: str = "visual_diversity_policy_v2"
     visual_diversity_minimum_window_count: int = 4
     visual_diversity_maximum_reuse_ratio: float = 0.75
     visual_diversity_maximum_dominant_window_ratio: float = 0.75
+    visual_diversity_maximum_dominant_static_ratio: float = 0.65
+    visual_diversity_maximum_static_reuse_count: int = 3
 
     production_timeline_strategy_version: str = "production_timeline_v1"
     production_timeline_schema_version: str = "production_timeline_schema_v1"
     production_timeline_validator_version: str = "production_timeline_validator_v1"
+    production_timeline_hybrid_strategy_version: str = "production_timeline_v2"
+    production_timeline_hybrid_schema_version: str = "production_timeline_schema_v2"
+    production_timeline_hybrid_validator_version: str = "production_timeline_validator_v2"
     production_timeline_min_visual_seconds: float = 0.5
     production_timeline_max_sources_per_query: int = 2
+    production_timeline_hybrid_max_sources_per_query: int = 4
     production_timeline_gap_fill_enabled: bool = True
     production_timeline_coalesce_contiguous: bool = True
+    static_image_presentation_policy_version: str = "static_image_presentation_v1"
+    static_image_minimum_hold_seconds: float = 2.0
+    static_image_preferred_hold_seconds: float = 5.0
+    static_image_maximum_hold_seconds: float = 8.0
+    static_image_maximum_consecutive_seconds: float = 15.0
 
     # --- API -----------------------------------------------------------------
     api_port: int = 8001
@@ -209,6 +229,12 @@ class Settings(BaseSettings):
         "text_normalizer_version",
         "narration_quality_policy_version",
         "visual_director_media_search_strategy_version",
+        "visual_director_hybrid_strategy_version",
+        "hybrid_visual_fusion_version",
+        "production_timeline_hybrid_strategy_version",
+        "production_timeline_hybrid_schema_version",
+        "production_timeline_hybrid_validator_version",
+        "static_image_presentation_policy_version",
     )
     @classmethod
     def validate_version_identity(cls, value: str) -> str:
@@ -243,9 +269,14 @@ class Settings(BaseSettings):
     @field_validator(
         "visual_director_max_queries",
         "visual_director_search_top_k",
+        "visual_director_image_search_top_k",
         "visual_director_search_concurrency",
+        "visual_director_image_filter_combinations_max",
+        "hybrid_visual_fusion_rrf_k",
         "visual_diversity_minimum_window_count",
+        "visual_diversity_maximum_static_reuse_count",
         "production_timeline_max_sources_per_query",
+        "production_timeline_hybrid_max_sources_per_query",
     )
     @classmethod
     def validate_visual_director_positive(cls, value: int) -> int:
@@ -253,7 +284,15 @@ class Settings(BaseSettings):
             raise ValueError("Visual Director limits must be positive")
         return value
 
-    @field_validator("production_timeline_min_visual_seconds")
+    @field_validator(
+        "production_timeline_min_visual_seconds",
+        "static_image_minimum_hold_seconds",
+        "static_image_preferred_hold_seconds",
+        "static_image_maximum_hold_seconds",
+        "static_image_maximum_consecutive_seconds",
+        "hybrid_visual_fusion_video_weight",
+        "hybrid_visual_fusion_image_weight",
+    )
     @classmethod
     def validate_timeline_minimum_seconds(cls, value: float) -> float:
         if value <= 0:
@@ -296,14 +335,27 @@ class Settings(BaseSettings):
 
     @field_validator(
         "visual_director_min_semantic_score",
+        "visual_director_image_min_semantic_score",
         "visual_diversity_maximum_reuse_ratio",
         "visual_diversity_maximum_dominant_window_ratio",
+        "visual_diversity_maximum_dominant_static_ratio",
     )
     @classmethod
     def validate_visual_director_score(cls, value: float) -> float:
         if value < 0 or value > 1:
             raise ValueError("Visual Director score threshold must be between 0 and 1")
         return value
+
+    @model_validator(mode="after")
+    def validate_static_hold_policy(self) -> "Settings":
+        if not (
+            self.static_image_minimum_hold_seconds
+            <= self.static_image_preferred_hold_seconds
+            <= self.static_image_maximum_hold_seconds
+            <= self.static_image_maximum_consecutive_seconds
+        ):
+            raise ValueError("static image hold limits must be monotonically increasing")
+        return self
 
 
 settings = Settings()

@@ -666,6 +666,106 @@ def check_source_types(inputs: ProductionQAInputs) -> ProductionQACheck:
     )
 
 
+def check_hybrid_source_contracts(inputs: ProductionQAInputs) -> ProductionQACheck:
+    if getattr(inputs.timeline, "schema_version", None) != "production_timeline_schema_v2":
+        return ProductionQACheck(
+            "hybrid_source_contracts",
+            "production_timeline",
+            "skipped",
+            "Hybrid source contracts do not apply to this legacy timeline.",
+        )
+    failures: list[str] = []
+    selected_by_decision = {
+        item.id: item.selected_source
+        for item in (inputs.visual_plan.decisions if inputs.visual_plan else [])
+        if getattr(item, "id", None) is not None and item.selected_source
+    }
+    consecutive = 0.0
+    previous_end: float | None = None
+    policy = inputs.policy
+    for placement in sorted(inputs.timeline.placements, key=lambda item: item.order):
+        duration = placement.timeline_end_seconds - placement.timeline_start_seconds
+        if placement.source_type == "static_image":
+            provenance = placement.source_provenance or {}
+            presentation = placement.presentation or {}
+            if any(
+                value is not None
+                for value in (
+                    placement.source_session_id,
+                    placement.candidate_start_seconds,
+                    placement.candidate_end_seconds,
+                    placement.source_start_seconds,
+                    placement.source_end_seconds,
+                    placement.playback_rate,
+                )
+            ):
+                failures.append(f"placement_{placement.order}:temporal_image_fields")
+            if not (
+                placement.source_image_semantic_index_id
+                and len(str(provenance.get("expected_sha256", ""))) == 64
+                and int(provenance.get("expected_byte_size", -1)) >= 0
+                and provenance.get("content_type")
+                in {"image/jpeg", "image/png", "image/webp"}
+                and presentation.get("fit") in {"cover", "contain"}
+                and presentation.get("background") in {"black", "blurred_fill"}
+                and presentation.get("motion")
+                in {"none", "slow_zoom_in", "slow_zoom_out"}
+            ):
+                failures.append(f"placement_{placement.order}:image_contract")
+            if (
+                policy.static_image_minimum_hold_seconds is not None
+                and duration < policy.static_image_minimum_hold_seconds
+            ) or (
+                policy.static_image_maximum_hold_seconds is not None
+                and duration > policy.static_image_maximum_hold_seconds
+            ):
+                failures.append(f"placement_{placement.order}:image_hold")
+            if previous_end != placement.timeline_start_seconds:
+                consecutive = 0.0
+            consecutive += duration
+            if (
+                policy.static_image_maximum_consecutive_seconds is not None
+                and consecutive > policy.static_image_maximum_consecutive_seconds
+            ):
+                failures.append("consecutive_static_hold")
+            selected = (
+                selected_by_decision.get(placement.visual_decision_id)
+                if placement.visual_decision_id is not None
+                else None
+            )
+            if selected and (
+                selected.get("source_type") != "static_image"
+                or str(selected.get("media_id")) != str(placement.source_media_id)
+                or str(selected.get("image_semantic_index_id"))
+                != str(placement.source_image_semantic_index_id)
+                or selected.get("sha256") != provenance.get("expected_sha256")
+            ):
+                failures.append(f"placement_{placement.order}:visual_plan_identity")
+        elif placement.source_type == "video_segment":
+            consecutive = 0.0
+            if (
+                placement.source_session_id is None
+                or placement.source_image_semantic_index_id is not None
+                or placement.source_start_seconds is None
+                or placement.source_end_seconds is None
+                or placement.playback_rate != 1.0
+                or placement.presentation is not None
+            ):
+                failures.append(f"placement_{placement.order}:video_contract")
+        else:
+            failures.append(f"placement_{placement.order}:source_type")
+        previous_end = placement.timeline_end_seconds
+    return ProductionQACheck(
+        "hybrid_source_contracts",
+        "production_timeline",
+        "failed" if failures else "passed",
+        "Hybrid timeline source identities and presentation rules are valid."
+        if not failures
+        else "Hybrid timeline contains invalid source contracts.",
+        actual=sorted(set(failures)),
+    )
+
+
 def check_render_status(inputs: ProductionQAInputs) -> ProductionQACheck:
     render = inputs.render
     has_output = bool(
@@ -818,6 +918,7 @@ def standard_local_checks(inputs: ProductionQAInputs) -> list[ProductionQACheck]
         check_production_timeline_visual_coverage(inputs),
         check_required_query_placement(inputs),
         check_source_types(inputs),
+        check_hybrid_source_contracts(inputs),
         check_render_status(inputs),
         check_render_timeline_identity(inputs),
         check_render_output_profile(inputs),
