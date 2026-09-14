@@ -569,7 +569,12 @@ def test_deep_ffprobe_validates_independently() -> None:
                 "height": 1080,
                 "avg_frame_rate": "30/1",
             },
-            {"codec_type": "audio", "codec_name": "aac", "sample_rate": "48000"},
+            {
+                "codec_type": "audio",
+                "codec_name": "aac",
+                "sample_rate": "48000",
+                "channels": 1,
+            },
         ],
         "format": {"duration": "10.0"},
     }

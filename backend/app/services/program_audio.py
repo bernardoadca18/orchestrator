@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import stat
 import unicodedata
 import uuid
 from pathlib import Path
@@ -131,7 +132,7 @@ def verify_music_asset(config: Settings, asset: ProgramMusicAssetOut) -> Path:
         details = candidate.stat()
     except OSError as exc:
         raise ProgramAudioError("music_asset_unavailable", "Music asset is unavailable") from exc
-    if not details.is_file() or details.st_size != asset.byte_size:
+    if not stat.S_ISREG(details.st_mode) or details.st_size != asset.byte_size:
         raise ProgramAudioError("music_asset_integrity_failed", "Music asset size mismatch")
     digest = hashlib.sha256()
     try:
@@ -243,7 +244,8 @@ def build_speech_regions(
 
 
 def _parse_intents(workflow: WorkflowExecucao) -> tuple[list[AudioIntent | None], bool]:
-    raw_blocks = workflow.roteiro_snapshot.get("blocos", [])
+    snapshot = getattr(workflow, "roteiro_snapshot", None) or {}
+    raw_blocks = snapshot.get("blocos", [])
     if not isinstance(raw_blocks, list):
         raise ProgramAudioError("audio_mix_plan_invalid", "Script blocks are invalid")
     found = False
@@ -353,7 +355,7 @@ def build_audio_mix_plan(
         music = {
             "enabled": True,
             "asset": asset.model_dump(mode="json"),
-            "source_start_seconds": 0.0,
+            "source_start_seconds": 0,
             "source_end_seconds": asset.duration_seconds,
             "loop_policy": loop_policy,
             "normalization_policy": "music_loudnorm_v1",

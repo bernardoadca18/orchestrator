@@ -869,7 +869,9 @@ def check_program_audio(inputs: ProductionQAInputs) -> list[ProductionQACheck]:
     plan_fingerprint = metrics.get("audioMixPlanFingerprint")
     music_asset_id = metrics.get("musicAssetId")
     music_sha = metrics.get("musicSha256")
-    after = metrics.get("after") if isinstance(metrics.get("after"), dict) else {}
+    after: dict[str, Any] = (
+        metrics["after"] if isinstance(metrics.get("after"), dict) else {}
+    )
     loudness = after.get("integratedLufs")
     true_peak = after.get("truePeakDbtp")
     target_lufs = metrics.get("targetLufs")
@@ -878,7 +880,9 @@ def check_program_audio(inputs: ProductionQAInputs) -> list[ProductionQACheck]:
         ProductionQACheck(
             "audio_mix_plan_identity",
             "program_audio",
-            "passed" if isinstance(plan_fingerprint, str) and len(plan_fingerprint) == 64 else "failed",
+            "passed"
+            if isinstance(plan_fingerprint, str) and len(plan_fingerprint) == 64
+            else "failed",
             "AudioMixPlan canonical identity is persisted with the render.",
             actual=plan_fingerprint,
         ),

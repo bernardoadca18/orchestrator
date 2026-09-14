@@ -921,7 +921,7 @@ class ProgramMusicEnabledOut(BaseModel):
     model_config = ConfigDict(extra="forbid")
     enabled: Literal[True]
     asset: ProgramMusicAssetOut
-    source_start_seconds: Literal[0.0]
+    source_start_seconds: Literal[0]
     source_end_seconds: float = Field(gt=0)
     loop_policy: Literal["no_loop_v1", "repeat_from_start_v1"]
     normalization_policy: Literal["music_loudnorm_v1"]

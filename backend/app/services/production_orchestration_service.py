@@ -644,7 +644,10 @@ class ProductionOrchestrationService:
                 "Video Composer returned another PresentationSpec identity",
             )
             return OrchestrationResult(terminal=True)
-        if getattr(remote, "audio_mix_plan_fingerprint", None) != current_audio_mix_plan_fingerprint:
+        if (
+            getattr(remote, "audio_mix_plan_fingerprint", None)
+            != current_audio_mix_plan_fingerprint
+        ):
             await self._block(
                 workflow,
                 "render",

@@ -166,7 +166,7 @@ def test_composer_render_input_returns_one_coherent_versioned_package() -> None:
     timeline_service = MagicMock()
     timeline_service.current = AsyncMock(return_value=timeline)
     workflow_repository = MagicMock()
-    workflow_repository.obter_por_id = AsyncMock(return_value=MagicMock())
+    workflow_repository.obter_por_id = AsyncMock(return_value=MagicMock(roteiro_snapshot={}))
     presentation = PresentationSpecOut.model_validate_json(
         PRESENTATION_FIXTURE.read_text(encoding="utf-8")
     )
