@@ -209,10 +209,12 @@ async def test_retry_exhaustion_and_malformed_response_are_safe() -> None:
 @pytest.mark.asyncio
 async def test_image_search_uses_public_non_temporal_contract_and_filters() -> None:
     image_id = uuid.uuid4()
+
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == f"/image-search/projects/{PROJECT_ID}"
         body = json.loads(request.content)
         assert body["filters"]["asset_class"] == "official_screenshot"
+        assert body["filters"]["game"] == "gta_vi"
         assert "start_seconds" not in body
         return httpx.Response(
             200,
@@ -261,9 +263,45 @@ async def test_image_search_uses_public_non_temporal_contract_and_filters() -> N
         query="Vice City skyline",
         max_results=5,
         min_score=0.25,
-        filters=ImageSearchFilters(asset_class="official_screenshot"),
+        filters=ImageSearchFilters(asset_class="official_screenshot", game="gta_vi"),
     )
     candidate = result.results[0]
     assert candidate.image_semantic_index_id == image_id
     assert candidate.content_type == "image/png"
     assert not hasattr(candidate, "start_seconds")
+
+
+@pytest.mark.asyncio
+async def test_read_only_project_and_session_discovery_preserves_identity() -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/projects":
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "id": str(PROJECT_ID),
+                        "name": "GTA / Rockstar Canonical Corpus",
+                        "description": "canonical",
+                    }
+                ],
+            )
+        assert request.url.path == f"/projects/{PROJECT_ID}/sessions"
+        return httpx.Response(
+            200,
+            json=[
+                {
+                    "id": str(SESSION_ID),
+                    "project_id": str(PROJECT_ID),
+                    "media_id": str(MEDIA_ID),
+                    "label": "gta_iv_gameplay_ep000",
+                    "status": "ready",
+                }
+            ],
+        )
+
+    provider = MediaIndexerSearchProvider(_settings(), transport=httpx.MockTransport(handler))
+    projects = await provider.list_projects()
+    sessions = await provider.list_project_sessions(PROJECT_ID)
+    assert projects[0].name == "GTA / Rockstar Canonical Corpus"
+    assert sessions[0].label == "gta_iv_gameplay_ep000"
+    assert sessions[0].project_id == PROJECT_ID

@@ -1,0 +1,167 @@
+{
+  "schema_version": "visual_retrieval_dataset_v1",
+  "name": "gta_visual_retrieval_controlled_probes_v1",
+  "description": "Small controlled GTA IV/V/VI retrieval and explicit-scope regression dataset.",
+  "default_scope": {
+    "media_project_name": "GTA / Rockstar Canonical Corpus"
+  },
+  "queries": [
+    {
+      "id": "gta_iv_niko_character",
+      "query": "Niko Bellic walking through Liberty City streets",
+      "intent": "evidence",
+      "importance": "required",
+      "expected_game": "gta_iv",
+      "expected_source_type": "temporal",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_iv"]
+      },
+      "notes": "Specific character and location; temporal-friendly."
+    },
+    {
+      "id": "gta_iv_liberty_city_atmosphere",
+      "query": "rainy nighttime traffic and pedestrians in Liberty City",
+      "intent": "atmosphere",
+      "expected_game": "gta_iv",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_iv"]
+      },
+      "notes": "Atmosphere and generic environment."
+    },
+    {
+      "id": "gta_v_vehicle_action",
+      "query": "high speed sports car chase through Los Santos",
+      "intent": "illustration",
+      "expected_game": "gta_v",
+      "expected_source_type": "temporal",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_v"]
+      },
+      "notes": "Vehicle plus concrete action."
+    },
+    {
+      "id": "gta_v_specific_location",
+      "query": "Vinewood sign and Los Santos skyline",
+      "intent": "evidence",
+      "expected_game": "gta_v",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_v"]
+      },
+      "notes": "Specific landmark."
+    },
+    {
+      "id": "gta_vi_lucia_temporal",
+      "query": "Lucia Caminos speaking with Jason in Vice City",
+      "intent": "evidence",
+      "importance": "required",
+      "expected_game": "gta_vi",
+      "expected_source_type": "temporal",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_vi"]
+      },
+      "notes": "Specific GTA VI characters."
+    },
+    {
+      "id": "gta_vi_vice_city_environment",
+      "query": "Vice City beach, palm trees and neon nightlife",
+      "intent": "atmosphere",
+      "expected_game": "gta_vi",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_vi"]
+      },
+      "notes": "Location and atmosphere."
+    },
+    {
+      "id": "gta_vi_lucia_static",
+      "query": "official portrait or artwork of Lucia Caminos",
+      "intent": "illustration",
+      "expected_game": "gta_vi",
+      "expected_source_type": "static",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_vi"],
+        "static_images": {
+          "enabled": true,
+          "filters": [
+            {
+              "source_owner": "rockstar_games",
+              "game": "gta_vi"
+            }
+          ]
+        }
+      },
+      "notes": "Static-friendly canonical game filter probe."
+    },
+    {
+      "id": "gta_iv_v_mixed_scope",
+      "query": "dense urban traffic and police response in a Rockstar city",
+      "intent": "comparison",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_iv", "gta_v"]
+      },
+      "notes": "GTA IV + GTA V union; GTA VI is forbidden."
+    },
+    {
+      "id": "gta_iv_scope_gta_v_preferred",
+      "query": "city street traffic and pedestrians",
+      "intent": "illustration",
+      "expected_game": "gta_iv",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_iv"]
+      },
+      "preferred_game": "gta_v",
+      "notes": "Out-of-scope preferred session must not bypass GTA IV scope."
+    },
+    {
+      "id": "project_wide_comparison",
+      "query": "evolution of Rockstar open world city environments",
+      "intent": "comparison",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "media_session_ids": []
+      },
+      "notes": "Project-wide semantics: cross-game results are valid, not leakage."
+    },
+    {
+      "id": "gta_vi_static_promotional",
+      "query": "official Grand Theft Auto VI promotional key art",
+      "intent": "illustration",
+      "expected_game": "gta_vi",
+      "expected_source_type": "static",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_vi"],
+        "static_images": {
+          "enabled": true,
+          "filters": [
+            {
+              "source_owner": "rockstar_games",
+              "source_class": "official",
+              "game": "gta_vi"
+            }
+          ]
+        }
+      },
+      "notes": "Static provenance and filter survival probe."
+    },
+    {
+      "id": "gta_vi_ambiguous_event",
+      "query": "the important moment before everything changes",
+      "intent": "illustration",
+      "expected_game": "gta_vi",
+      "scope": {
+        "media_project_name": "GTA / Rockstar Canonical Corpus",
+        "games": ["gta_vi"]
+      },
+      "notes": "Intentionally difficult/ambiguous query for QUERY_AMBIGUOUS review."
+    }
+  ]
+}

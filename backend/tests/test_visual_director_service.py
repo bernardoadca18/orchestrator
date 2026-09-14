@@ -35,6 +35,7 @@ SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000002")
 OTHER_SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000003")
 MEDIA_ID = uuid.UUID("20000000-0000-4000-8000-000000000004")
 INDEX_ID = uuid.UUID("20000000-0000-4000-8000-000000000005")
+THIRD_SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000006")
 
 
 class FakeWorkflowRepository:
@@ -152,6 +153,7 @@ class FakeProvider:
         self.session_calls: list[uuid.UUID] = []
         self.session_search_calls: list[tuple[uuid.UUID, str]] = []
         self.project_search_calls: list[tuple[uuid.UUID, str]] = []
+        self.project_search_scopes: list[list[uuid.UUID] | None] = []
         self.metadata = {
             SESSION_ID: MediaSessionMetadata(
                 id=SESSION_ID,
@@ -207,6 +209,7 @@ class FakeProvider:
 
     async def search_project(self, project_id: uuid.UUID, *, query: str, **kwargs):
         self.project_search_calls.append((project_id, query))
+        self.project_search_scopes.append(kwargs.get("session_ids"))
         return self._result("project")
 
     async def search_images(
@@ -466,12 +469,75 @@ async def test_session_outside_explicit_scope_uses_project_fallback() -> None:
         [_query(preferred_session_id=OTHER_SESSION_ID)], media_session_ids=[SESSION_ID]
     )
     provider = FakeProvider()
-    provider.results = [_candidate()]
+    provider.results = [
+        _candidate(score=0.99, session_id=OTHER_SESSION_ID),
+        _candidate(score=0.80, session_id=SESSION_ID),
+    ]
     service, _ = _service(workflow, alignment, provider)
     plan, _ = await service.ensure(workflow.id)
     assert plan.decisions[0].selected_source["session_id"] == str(SESSION_ID)
+    assert all(
+        item["session_id"] == str(SESSION_ID) for item in plan.decisions[0].alternatives
+    )
     assert provider.session_calls == []
     assert len(provider.project_search_calls) == 1
+    assert provider.project_search_scopes == [[SESSION_ID]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "allowed",
+    [
+        [SESSION_ID],
+        [OTHER_SESSION_ID],
+        [THIRD_SESSION_ID],
+        [SESSION_ID, OTHER_SESSION_ID],
+    ],
+    ids=["gta-iv", "gta-v", "gta-vi", "gta-iv-plus-v"],
+)
+async def test_explicit_scope_filters_selected_and_alternatives(allowed) -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)],
+        media_session_ids=allowed,
+    )
+    provider = FakeProvider()
+    provider.results = [
+        _candidate(score=0.90, session_id=SESSION_ID),
+        _candidate(score=0.80, session_id=OTHER_SESSION_ID),
+        _candidate(score=0.70, session_id=THIRD_SESSION_ID),
+    ]
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    decision = plan.decisions[0]
+    selected_and_alternatives = [decision.selected_source, *decision.alternatives]
+    assert selected_and_alternatives
+    assert {
+        uuid.UUID(item["session_id"]) for item in selected_and_alternatives
+    }.issubset(set(allowed))
+    assert provider.project_search_scopes == [allowed]
+
+
+@pytest.mark.asyncio
+async def test_project_wide_scope_does_not_reject_cross_game_sessions() -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)],
+        media_session_ids=[],
+    )
+    provider = FakeProvider()
+    provider.results = [
+        _candidate(score=0.90, session_id=SESSION_ID),
+        _candidate(score=0.80, session_id=OTHER_SESSION_ID),
+    ]
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    selected_and_alternatives = [
+        plan.decisions[0].selected_source, *plan.decisions[0].alternatives
+    ]
+    assert {uuid.UUID(item["session_id"]) for item in selected_and_alternatives} == {
+        SESSION_ID,
+        OTHER_SESSION_ID,
+    }
+    assert provider.project_search_scopes == [None]
 
 
 @pytest.mark.asyncio

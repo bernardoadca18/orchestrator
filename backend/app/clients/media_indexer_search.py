@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from uuid import UUID
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
 from app.core.config import Settings, settings
 
@@ -62,11 +62,28 @@ class MediaAssetMetadata:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaProjectMetadata:
+    id: UUID
+    name: str
+    description: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class MediaSessionSummary:
+    id: UUID
+    project_id: UUID
+    media_id: UUID
+    label: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True)
 class ImageSearchFilters:
     source_owner: str | None = None
     source_class: str | None = None
     asset_class: str | None = None
     collection: str | None = None
+    game: str | None = None
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -76,6 +93,7 @@ class ImageSearchFilters:
                 "source_class": self.source_class,
                 "asset_class": self.asset_class,
                 "collection": self.collection,
+                "game": self.game,
             }.items()
             if value is not None
         }
@@ -208,6 +226,22 @@ class _MediaAssetOut(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     width: int | None = Field(default=None, gt=0)
     height: int | None = Field(default=None, gt=0)
+
+
+class _ProjectOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: UUID
+    name: str
+    description: str | None = None
+
+
+class _SessionSummaryOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    id: UUID
+    project_id: UUID
+    media_id: UUID
+    label: str
+    status: str
 
 
 class _SearchCandidate(BaseModel):
@@ -376,6 +410,40 @@ class MediaIndexerSearchProvider:
             status=parsed.status,
             media_filename=parsed.media.original_filename,
             duration_seconds=parsed.media.duration_seconds,
+        )
+
+    async def list_projects(self) -> tuple[MediaProjectMetadata, ...]:
+        raw = await self._request("GET", "/projects")
+        try:
+            parsed = TypeAdapter(list[_ProjectOut]).validate_python(raw)
+        except ValidationError as exc:
+            raise MediaIndexerContractError("Invalid Media Indexer projects response") from exc
+        return tuple(
+            MediaProjectMetadata(id=item.id, name=item.name, description=item.description)
+            for item in parsed
+        )
+
+    async def list_project_sessions(
+        self, project_id: UUID
+    ) -> tuple[MediaSessionSummary, ...]:
+        raw = await self._request("GET", f"/projects/{project_id}/sessions")
+        try:
+            parsed = TypeAdapter(list[_SessionSummaryOut]).validate_python(raw)
+        except ValidationError as exc:
+            raise MediaIndexerContractError("Invalid Media Indexer sessions response") from exc
+        if any(item.project_id != project_id for item in parsed):
+            raise MediaIndexerContractError(
+                "Media Indexer session project identity is inconsistent"
+            )
+        return tuple(
+            MediaSessionSummary(
+                id=item.id,
+                project_id=item.project_id,
+                media_id=item.media_id,
+                label=item.label,
+                status=item.status,
+            )
+            for item in parsed
         )
 
     async def get_asset(self, media_id: UUID) -> MediaAssetMetadata:
