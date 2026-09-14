@@ -1,14 +1,17 @@
 import { useCallback } from "react";
 import { operatorApi, ProductionTimelineDetail, VisualPlanDetail, VisualSource } from "../../api/operator";
-import { Alert, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, StatusBadge, TableWrap } from "../../components/ui";
+import { Alert, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, ScoreBar, StatusBadge, TableWrap } from "../../components/ui";
 import { useColdArtifact } from "../../hooks/useColdArtifact";
 import { useWorkflowContext } from "../workflow/WorkflowWorkspace";
 
-function Source({ source }: { source: VisualSource }) {
-  return <div className="source-details">
+function Source({ source, selected = false }: { source: VisualSource; selected?: boolean }) {
+  return <div className={`source-details ${selected ? "source-selected" : "source-alternative"}`}>
     <strong>{source.media_filename}</strong> <StatusBadge value={source.source_type} />
+    <div className="source-scores">
+      <ScoreBar value={source.selection_score} label="Seleção" />
+      {source.semantic_score != null && <ScoreBar value={source.semantic_score} label="Semântica" />}
+    </div>
     <dl className="definition-list compact">
-      <div><dt>Seleção / semântica</dt><dd>{source.selection_score.toFixed(3)} / {source.semantic_score?.toFixed(3) ?? "—"}</dd></div>
       <div><dt>Rank</dt><dd>{source.rank ?? "—"}</dd></div>
       {source.source_type !== "static_image" ? <div><dt>Range</dt><dd>{source.source_start_seconds?.toFixed(2)}–{source.source_end_seconds?.toFixed(2)}s · {source.session_label}</dd></div> : <div><dt>Imagem</dt><dd>{source.width}×{source.height}</dd></div>}
     </dl>
@@ -59,8 +62,8 @@ export default function VisualsPage() {
       <div className="decision-list">{plan.data.decisions.map((decision) => <details className="decision-card" key={decision.id} open={decision.importance === "required" && decision.source_resolution_status !== "resolved"}>
         <summary><span><strong>Q{decision.query_order + 1}: {decision.query}</strong><small>{decision.intent} · {decision.importance} · narração {decision.narration_start_seconds?.toFixed(2) ?? "—"}–{decision.narration_end_seconds?.toFixed(2) ?? "—"}s</small></span><StatusBadge value={decision.source_resolution_status} /></summary>
         <DefinitionList items={[["Estratégia", decision.selection_strategy || "—"], ["Score", decision.selection_score?.toFixed(3) || "—"], ["Binding", decision.narration_binding_status], ["Motivo", decision.reason || "—"]]} />
-        <h4>Fonte selecionada</h4>{decision.selected_source ? <Source source={decision.selected_source} /> : <EmptyState title="Nenhuma fonte selecionada" detail={decision.reason || undefined} />}
-        <details><summary>Alternativas ({decision.alternatives.length})</summary>{decision.alternatives.map((source, index) => <Source key={`${source.media_filename}-${index}`} source={source} />)}</details>
+        <h4>Fonte selecionada</h4>{decision.selected_source ? <Source source={decision.selected_source} selected /> : <EmptyState title="Nenhuma fonte selecionada" detail={decision.reason || undefined} />}
+        <details className="source-alternatives"><summary>Alternativas ({decision.alternatives.length})</summary>{decision.alternatives.map((source, index) => <Source key={`${source.media_filename}-${index}`} source={source} />)}</details>
         <Diagnostics label="Componentes do score" value={decision.score_components} /><Diagnostics value={decision.diagnostics} />
       </details>)}</div>
       <Diagnostics value={plan.data.diagnostics} />

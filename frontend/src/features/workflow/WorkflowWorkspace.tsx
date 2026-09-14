@@ -39,7 +39,7 @@ export default function WorkflowWorkspace() {
     {workflow.attention.length > 0 && <Alert tone={workflow.attention.some((item) => item.severity === "critical") ? "danger" : "warning"}>
       <strong>Requer atenção:</strong> {workflow.attention.map((item) => item.message).join(" ")}
     </Alert>}
-    <nav className="workspace-nav" aria-label="Áreas da produção">
+    <nav className="workflow-nav" aria-label="Áreas da produção">
       {workflowSections.map(([section, label]) => <NavLink key={section} to={workflowPath(workflowId, section)}>{label}</NavLink>)}
     </nav>
     <div className="workspace-content"><Outlet context={{ snapshot: data, refresh }} /></div>

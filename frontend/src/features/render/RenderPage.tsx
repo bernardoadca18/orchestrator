@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { api, ProductionQAReport, WorkflowRender } from "../../api/client";
 import { operatorApi, ReviewDecision } from "../../api/operator";
-import { ActionButton, Alert, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, Progress, StatusBadge, TableWrap } from "../../components/ui";
+import { ActionButton, Alert, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, Progress, StatusBadge, TableWrap, CopyButton } from "../../components/ui";
 import { coldArtifactCache } from "../../data/coldArtifactCache";
 import { createActionKey } from "../../data/operatorAction";
 import { useColdArtifact } from "../../hooks/useColdArtifact";
@@ -49,40 +49,205 @@ export default function RenderPage() {
   }
 
   if (render.loading && !render.data) return <LoadingState label="Carregando render…" />;
-  return <div className="workspace-stack">
-    {(render.error || qa.error) && <Alert tone="danger">{render.error || qa.error}</Alert>}
-    <Card title="Render final">
-      {!render.data ? <EmptyState title="Render corrente ainda não disponível" /> : <>
-        <div className="split-row"><StatusBadge value={render.data.status} /><span>{render.data.phase}</span></div>
-        <Progress value={render.data.progress} label={`${render.data.frames_rendered}/${render.data.total_frames ?? "?"} frames`} />
-        {render.data.status === "completed" && render.data.output ? <video className="video-player" controls preload="metadata" src={api.urlVideo(workflow.id)} /> : null}
-        {render.data.error && <Alert tone="danger"><strong>{render.data.error.category}:</strong> {render.data.error.message}</Alert>}
-        <DefinitionList items={[
-          ["Render fingerprint", <code>{render.data.render_fingerprint || "—"}</code>],
-          ["Manifest fingerprint", <code>{render.data.manifest_fingerprint || "—"}</code>],
-          ["Output SHA", <code>{render.data.output?.sha256 || "—"}</code>],
-          ["Vídeo", render.data.output ? `${render.data.output.width}×${render.data.output.height} · ${render.data.output.fps} fps · ${render.data.output.video_codec}` : "—"],
-          ["Áudio", render.data.output ? `${render.data.output.audio_codec} · ${render.data.output.audio_sample_rate} Hz` : "—"],
-          ["Duração / tamanho", render.data.output ? `${render.data.output.duration_seconds.toFixed(2)}s · ${(render.data.output.byte_size / 1024 / 1024).toFixed(1)} MiB` : "—"],
-          ["Início / conclusão", `${render.data.started_at ? new Date(render.data.started_at).toLocaleString("pt-BR") : "—"} / ${render.data.completed_at ? new Date(render.data.completed_at).toLocaleString("pt-BR") : "—"}`],
-        ]} />
-        <Diagnostics label="Render metrics" value={render.data.metrics} />
-      </>}
-    </Card>
-    <Card title="QA automático">
-      {!qa.data ? <EmptyState title="QA ainda não executado para o render corrente" /> : <>
-        <DefinitionList items={[["Status", <StatusBadge value={qa.data.status} />], ["Publication ready", <StatusBadge value={qa.data.publication_ready ? "ready" : "not ready"} />], ["Modo / policy", `${qa.data.qa_mode} · ${qa.data.policy_name}@${qa.data.policy_version}`], ["Checks", `${qa.data.passed_count} passed · ${qa.data.warning_count} warning · ${qa.data.failed_count} failed · ${qa.data.blocked_count} blocked`], ["Fingerprint", <code>{qa.data.request_fingerprint}</code>]]} />
-        <TableWrap><table><thead><tr><th>Check</th><th>Categoria</th><th>Resultado</th><th>Mensagem</th><th>Esperado / atual</th></tr></thead><tbody>{qa.data.checks.map((check) => <tr key={check.code}><td><code>{check.code}</code></td><td>{check.category}</td><td><StatusBadge value={check.result} /></td><td>{check.message}<Diagnostics label="Detalhes" value={check.details} /></td><td><Diagnostics label="Valores" value={{ expected: check.expected, actual: check.actual }} /></td></tr>)}</tbody></table></TableWrap>
-      </>}
-      <div className="inline-actions"><ActionButton capability={workflow.capabilities.can_run_standard_qa} disabled={action.submitting} onClick={() => void runQA("standard")}>Executar QA standard</ActionButton><ActionButton capability={workflow.capabilities.can_run_deep_qa} disabled={action.submitting} onClick={() => void runQA("deep")}>Executar QA profundo</ActionButton></div>
-    </Card>
-    <Card title="Human Review">
-      <Alert tone={workflow.human_review.state === "approved" ? "success" : workflow.human_review.state === "changes_requested" || workflow.human_review.state === "rejected" ? "danger" : "warning"}><strong>{reviewBanner(workflow.human_review.state, workflow.human_review.latest_historical?.status)}</strong></Alert>
-      {workflow.human_review.current && <DefinitionList items={[["Decisão corrente", <StatusBadge value={workflow.human_review.current.status} />], ["Nota", workflow.human_review.current.note || "—"], ["Data", new Date(workflow.human_review.current.created_at).toLocaleString("pt-BR")], ["Render aprovado", <code>{workflow.human_review.current.output_sha256}</code>]]} />}
-      {workflow.human_review.state === "stale" && workflow.human_review.latest_historical && <details><summary>Revisão histórica</summary><DefinitionList items={[["Status", workflow.human_review.latest_historical.status], ["Output antigo", <code>{workflow.human_review.latest_historical.output_sha256}</code>], ["Nota", workflow.human_review.latest_historical.note || "—"]]} /></details>}
-      <fieldset disabled={action.submitting || workflow.capabilities.can_review?.allowed === false} className="review-form"><legend>Registrar decisão para o render exibido</legend><label>Decisão<select value={decision} onChange={(event) => setDecision(event.target.value as ReviewDecision)}><option value="approved">Aprovar</option><option value="changes_requested">Solicitar alterações</option><option value="rejected">Rejeitar</option></select></label><label>Nota {decision !== "approved" && <strong>(obrigatória)</strong>}<textarea rows={4} maxLength={4000} value={note} onChange={(event) => setNote(event.target.value)} /></label><button disabled={decision !== "approved" && !note.trim()} onClick={() => void submitReview()}>Registrar Human Review</button></fieldset>
-      {workflow.capabilities.can_review?.reason && <small className="block-meta">{workflow.capabilities.can_review.reason}</small>}
-      {action.error && <Alert tone={action.conflict ? "warning" : "danger"}>{action.conflict ? "O render mudou: " : ""}{action.error}</Alert>}{action.notice && <Alert tone="success">{action.notice}</Alert>}
-    </Card>
+
+  const hasVideo = render.data?.status === "completed" && render.data.output;
+  const reviewState = workflow.human_review.state;
+
+  return <div className="review-room">
+    {/* Left: Video Player Section */}
+    <div className="review-player-section">
+      {render.error && <Alert tone="danger">{render.error}</Alert>}
+
+      {!render.data ? (
+        <Card title="Render corrente">
+          <EmptyState title="Render ainda não disponível" detail="O render será exibido aqui quando estiver pronto." />
+        </Card>
+      ) : (
+        <>
+          {/* Video Player */}
+          <div className="review-player-wrap">
+            {hasVideo ? (
+              <video className="media-player" controls preload="metadata" src={api.urlVideo(workflow.id)} />
+            ) : (
+              <div style={{ display: "grid", placeItems: "center", height: "100%", color: "var(--text-muted)" }}>
+                <div style={{ textAlign: "center" }}>
+                  <StatusBadge value={render.data.status} />
+                  <p style={{ marginTop: "0.5rem" }}>{render.data.phase}</p>
+                  {render.data.progress < 1 && <Progress value={render.data.progress} label="Renderizando…" />}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Player Info Bar */}
+          <div className="review-player-info">
+            <div>
+              <StatusBadge value={render.data.status} />
+              <span style={{ marginLeft: "0.5rem" }}>{render.data.phase}</span>
+            </div>
+            {render.data.output && (
+              <div style={{ display: "flex", gap: "1rem", fontSize: "0.8rem", color: "var(--text-muted)" }}>
+                <span>{render.data.output.width}×{render.data.output.height}</span>
+                <span>{render.data.output.fps} fps</span>
+                <span>{render.data.output.duration_seconds.toFixed(1)}s</span>
+                <span>{(render.data.output.byte_size / 1024 / 1024).toFixed(1)} MiB</span>
+              </div>
+            )}
+          </div>
+
+          {/* Render Error */}
+          {render.data.error && (
+            <Alert tone="danger">
+              <strong>{render.data.error.category}:</strong> {render.data.error.message}
+            </Alert>
+          )}
+
+          {/* Render Details (collapsed) */}
+          <details>
+            <summary>Detalhes técnicos do render</summary>
+            <DefinitionList items={[
+              ["Render fingerprint", <CopyButton value={render.data.render_fingerprint || "—"} label="fingerprint" />],
+              ["Manifest fingerprint", <code>{render.data.manifest_fingerprint || "—"}</code>],
+              ["Output SHA", <CopyButton value={render.data.output?.sha256 || "—"} label="SHA" />],
+              ["Vídeo", render.data.output ? `${render.data.output.video_codec}` : "—"],
+              ["Áudio", render.data.output ? `${render.data.output.audio_codec} · ${render.data.output.audio_sample_rate} Hz` : "—"],
+              ["Início", render.data.started_at ? new Date(render.data.started_at).toLocaleString("pt-BR") : "—"],
+              ["Conclusão", render.data.completed_at ? new Date(render.data.completed_at).toLocaleString("pt-BR") : "—"],
+            ]} />
+            <Diagnostics label="Métricas" value={render.data.metrics} />
+          </details>
+        </>
+      )}
+    </div>
+
+    {/* Right: Review Panel */}
+    <div className="review-panel-section">
+      {qa.error && <Alert tone="danger">{qa.error}</Alert>}
+
+      {/* Human Review Status Banner */}
+      <div className={`review-banner ${reviewState}`}>
+        <div className="review-banner-title">
+          {reviewState === "approved" && "✓ Aprovado"}
+          {reviewState === "changes_requested" && "⚠ Alterações solicitadas"}
+          {reviewState === "rejected" && "✗ Rejeitado"}
+          {reviewState === "stale" && "⚡ Aprovação histórica"}
+          {reviewState === "pending" && "○ Aguardando revisão"}
+        </div>
+        <div className="review-banner-meta">
+          {reviewState === "stale" && "O render atual não foi revisado"}
+          {reviewState === "pending" && "Registre sua decisão abaixo"}
+          {reviewState === "approved" && workflow.human_review.current && `Por ${workflow.human_review.current.operator_label || "operador"} em ${new Date(workflow.human_review.current.created_at).toLocaleDateString("pt-BR")}`}
+          {(reviewState === "changes_requested" || reviewState === "rejected") && workflow.human_review.current?.note && `Nota: ${workflow.human_review.current.note}`}
+        </div>
+      </div>
+
+      {/* QA Summary */}
+      <Card title="QA automático">
+        {!qa.data ? (
+          <EmptyState title="QA não executado" detail="Execute o QA para verificar qualidade técnica." />
+        ) : (
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: "1rem", marginBottom: "0.75rem" }}>
+              <StatusBadge value={qa.data.status} />
+              <span style={{ fontSize: "0.9rem" }}>
+                {qa.data.passed_count} passed · {qa.data.warning_count} warning · {qa.data.failed_count} failed · {qa.data.blocked_count} blocked
+              </span>
+            </div>
+            <details>
+              <summary>Ver todos os checks</summary>
+              <TableWrap>
+                <table>
+                  <thead>
+                    <tr><th>Check</th><th>Resultado</th><th>Mensagem</th></tr>
+                  </thead>
+                  <tbody>
+                    {qa.data.checks.map((check) => (
+                      <tr key={check.code}>
+                        <td><code>{check.code}</code></td>
+                        <td><StatusBadge value={check.result} /></td>
+                        <td>{check.message}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </TableWrap>
+            </details>
+          </>
+        )}
+        <div className="inline-actions" style={{ marginTop: "0.75rem" }}>
+          <ActionButton capability={workflow.capabilities.can_run_standard_qa} disabled={action.submitting} onClick={() => void runQA("standard")}>QA standard</ActionButton>
+          <ActionButton capability={workflow.capabilities.can_run_deep_qa} disabled={action.submitting} onClick={() => void runQA("deep")}>QA profundo</ActionButton>
+        </div>
+      </Card>
+
+      {/* Review Actions */}
+      <Card title="Registrar decisão">
+        {workflow.capabilities.can_review?.reason && (
+          <Alert tone="warning">{workflow.capabilities.can_review.reason}</Alert>
+        )}
+        {action.error && <Alert tone={action.conflict ? "warning" : "danger"}>{action.conflict ? "O render mudou: " : ""}{action.error}</Alert>}
+        {action.notice && <Alert tone="success">{action.notice}</Alert>}
+
+        <fieldset disabled={action.submitting || workflow.capabilities.can_review?.allowed === false} className="review-form">
+          <div className="review-actions">
+            <button
+              className={`review-action-btn ${decision === "approved" ? "selected" : ""}`}
+              onClick={() => { setDecision("approved"); if (note === "") setNote(""); }}
+              type="button"
+            >
+              <strong>Aprovar</strong>
+              <small>Render aprovado para publicação</small>
+            </button>
+            <button
+              className={`review-action-btn warning ${decision === "changes_requested" ? "selected" : ""}`}
+              onClick={() => setDecision("changes_requested")}
+              type="button"
+            >
+              <strong>Solicitar alterações</strong>
+              <small>Nota obrigatória</small>
+            </button>
+            <button
+              className={`review-action-btn danger ${decision === "rejected" ? "selected" : ""}`}
+              onClick={() => setDecision("rejected")}
+              type="button"
+            >
+              <strong>Rejeitar</strong>
+              <small>Nota obrigatória</small>
+            </button>
+          </div>
+
+          <label style={{ marginTop: "1rem" }}>
+            Nota {decision !== "approved" && <strong className="text-danger">(obrigatória)</strong>}
+            <textarea
+              rows={3}
+              maxLength={4000}
+              value={note}
+              onChange={(event) => setNote(event.target.value)}
+              placeholder={decision === "approved" ? "Opcional: adicione uma nota…" : "Descreva o motivo…"}
+            />
+          </label>
+
+          <button
+            disabled={decision !== "approved" && !note.trim()}
+            onClick={() => void submitReview()}
+            style={{ marginTop: "0.75rem" }}
+          >
+            Registrar revisão
+          </button>
+        </fieldset>
+      </Card>
+
+      {/* Historical Review Info */}
+      {workflow.human_review.state === "stale" && workflow.human_review.latest_historical && (
+        <details>
+          <summary>Revisão histórica anterior</summary>
+          <DefinitionList items={[
+            ["Status", <StatusBadge value={workflow.human_review.latest_historical.status} />],
+            ["Output", <code>{workflow.human_review.latest_historical.output_sha256}</code>],
+            ["Nota", workflow.human_review.latest_historical.note || "—"],
+          ]} />
+        </details>
+      )}
+    </div>
   </div>;
 }

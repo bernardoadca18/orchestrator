@@ -1,19 +1,185 @@
-import { ReactNode, useEffect, useRef } from "react";
+import { ReactNode, useEffect, useId, useRef, useState } from "react";
 import { NavLink } from "react-router-dom";
 import { ActionCapability } from "../api/operator";
+import { ThemeToggle } from "../theme/ThemeToggle";
+
+function CopyIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+export function CopyButton({ value, label }: { value: string; label?: string }) {
+  const [copied, setCopied] = useState(false);
+  const truncated = value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard API not available
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      className="copy-button"
+      onClick={copy}
+      title={label ? `${label}: ${value}` : value}
+      aria-label={label ? `Copiar ${label}` : "Copiar"}
+    >
+      <code>{truncated}</code>
+      {copied ? <CheckIcon /> : <CopyIcon />}
+      {copied && <span className="copy-feedback">Copiado</span>}
+    </button>
+  );
+}
+
+export function ScoreBar({ value, max = 1, label }: { value: number; max?: number; label?: string }) {
+  const percent = Math.max(0, Math.min(100, (value / max) * 100));
+  const isLow = percent < 40;
+  const isMedium = percent >= 40 && percent < 70;
+
+  return (
+    <div
+      className="score-bar-wrap"
+      role="meter"
+      aria-label={label || "Score"}
+      aria-valuemin={0}
+      aria-valuemax={max}
+      aria-valuenow={value}
+    >
+      {label && <span className="score-label">{label}</span>}
+      <div className="score-bar">
+        <div
+          className={`score-bar-fill ${isLow ? "low" : isMedium ? "medium" : "high"}`}
+          style={{ width: `${percent}%` }}
+        />
+      </div>
+      <span className="score-value">{value.toFixed(2)}</span>
+    </div>
+  );
+}
+
+export function RelativeTime({ date }: { date: string | Date }) {
+  const d = typeof date === "string" ? new Date(date) : date;
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const diffMins = Math.floor(diffMs / 60000);
+  const diffHours = Math.floor(diffMs / 3600000);
+  const diffDays = Math.floor(diffMs / 86400000);
+
+  let relative: string;
+  if (diffMins < 1) relative = "agora";
+  else if (diffMins < 60) relative = `${diffMins}min atrás`;
+  else if (diffHours < 24) relative = `${diffHours}h atrás`;
+  else if (diffDays < 7) relative = `${diffDays}d atrás`;
+  else relative = d.toLocaleDateString("pt-BR");
+
+  return (
+    <span title={d.toLocaleString("pt-BR")} className="relative-time">
+      {relative}
+    </span>
+  );
+}
+
+function LayoutGridIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="3" y="3" width="7" height="7" />
+      <rect x="14" y="3" width="7" height="7" />
+      <rect x="14" y="14" width="7" height="7" />
+      <rect x="3" y="14" width="7" height="7" />
+    </svg>
+  );
+}
+
+function ClapperboardIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 11V8a4 4 0 0 1 4-4h.5" />
+      <path d="M4.5 11h15" />
+      <path d="M4.5 11a.5.5 0 0 0-.5.5v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7a.5.5 0 0 0-.5-.5" />
+      <path d="M9 4h.01" />
+      <path d="M14 4h.01" />
+      <path d="M19 4h.01" />
+    </svg>
+  );
+}
+
+function ClipboardCheckIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="8" y="2" width="8" height="4" rx="1" ry="1" />
+      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
+      <path d="m9 14 2 2 4-4" />
+    </svg>
+  );
+}
+
+function MusicIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 18V5l12-2v13" />
+      <circle cx="6" cy="18" r="3" />
+      <circle cx="18" cy="16" r="3" />
+    </svg>
+  );
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   return <div className="app-shell">
-    <header className="app-topbar">
-      <NavLink className="brand" to="/dashboard">NeoVids <span>Operator Console</span></NavLink>
-      <nav aria-label="Navegação principal">
-        <NavLink to="/dashboard">Dashboard</NavLink>
-        <NavLink to="/productions">Produções</NavLink>
-        <NavLink to="/review">Revisão</NavLink>
-        <NavLink to="/music">Música</NavLink>
+    <aside className="app-sidebar">
+      <div className="app-sidebar-header">
+        <NavLink to="/dashboard" className="app-sidebar-brand" aria-label="NeoVids">
+          <span>N</span>
+          <span>NeoVids</span>
+        </NavLink>
+      </div>
+      <nav className="app-sidebar-nav" aria-label="Navegação principal">
+        <NavLink to="/dashboard" aria-label="Dashboard" className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}>
+          <LayoutGridIcon />
+          <span>Dashboard</span>
+        </NavLink>
+        <NavLink to="/productions" aria-label="Produções" className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}>
+          <ClapperboardIcon />
+          <span>Produções</span>
+        </NavLink>
+        <NavLink to="/review" aria-label="Revisão" className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}>
+          <ClipboardCheckIcon />
+          <span>Revisão</span>
+        </NavLink>
+        <NavLink to="/music" aria-label="Música" className={({ isActive }) => isActive ? "nav-item active" : "nav-item"}>
+          <MusicIcon />
+          <span>Música</span>
+        </NavLink>
       </nav>
-    </header>
-    <main>{children}</main>
+      <div className="app-sidebar-footer">
+        <ThemeToggle />
+      </div>
+    </aside>
+    <div className="app-main">
+      <header className="app-topbar">
+        <div className="topbar-title">
+          <h1>Operator Console</h1>
+        </div>
+      </header>
+      <main className="app-content">{children}</main>
+    </div>
   </div>;
 }
 
@@ -28,15 +194,20 @@ export function Card({ title, children, className = "" }: { title?: ReactNode; c
   return <section className={`card ${className}`}>{title && <h2>{title}</h2>}{children}</section>;
 }
 
-export function StatusBadge({ value }: { value: string | null | undefined }) {
+export function statusTone(value: string | null | undefined) {
   const safe = value || "não disponível";
-  const tone = /failed|erro|rejected|blocked|critical/.test(safe)
+  return /failed|erro|rejected|blocked|critical|unavailable|destructive/.test(safe)
     ? "danger"
-    : /warning|stale|pending|queued|requested/.test(safe)
+    : /warning|stale|pending|queued|requested|degraded|attention/.test(safe)
       ? "warning"
-      : /completed|passed|approved|ready|healthy|concluido/.test(safe)
+      : /completed|passed|approved|ready|healthy|concluido|allowed/.test(safe)
         ? "success"
         : "neutral";
+}
+
+export function StatusBadge({ value }: { value: string | null | undefined }) {
+  const safe = value || "não disponível";
+  const tone = statusTone(value);
   return <span className={`status-badge ${tone}`}>{safe.replace(/_/g, " ")}</span>;
 }
 
@@ -111,6 +282,7 @@ export interface ConfirmDialogProps {
 
 export function ConfirmDialog(props: ConfirmDialogProps) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   useEffect(() => {
     const dialog = ref.current;
     if (!dialog) return;
@@ -119,6 +291,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
   }, [props.open]);
   return <dialog
     ref={ref}
+    aria-labelledby={titleId}
     onCancel={(event) => { event.preventDefault(); props.onClose(); }}
     onKeyDown={(event) => {
       if (event.key === "Escape") {
@@ -128,7 +301,7 @@ export function ConfirmDialog(props: ConfirmDialogProps) {
     }}
     onClose={props.onClose}
   >
-    <h2>{props.title}</h2>
+    <h2 id={titleId}>{props.title}</h2>
     <p>{props.consequence}</p>
     {props.invalidates?.length ? <div><strong>Será reconstruído:</strong><ul>{props.invalidates.map((item) => <li key={item}>{item}</li>)}</ul></div> : null}
     <div className="dialog-actions">
