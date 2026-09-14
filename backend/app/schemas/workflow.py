@@ -119,6 +119,8 @@ class AudioBlocoOut(BaseModel):
     erro_mensagem: str | None
     audio_edit_revision: int = 0
     audio_materialized_revision: int = 0
+    music_override_asset_id: str | None = None
+    music_override_revision: int = 0
     takes: list[AudioBlocoTakeOut] = Field(default_factory=list)
 
     @computed_field  # type: ignore[prop-decorator]

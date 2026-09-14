@@ -49,7 +49,7 @@ revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestra
     "SELECT version_num FROM alembic_version;")"
 column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='audio_blocos' AND column_name IN ('text_normalizer_version','text_normalizer_identity','initial_resolved_seed','retry_seed_strategy','generation_attempt_history','current_take_id','requested_take_id','voice_chunking_identity','pronunciation_replacements','normalized_text');")"
-test "${revision}" = "019"
+test "${revision}" = "020"
 test "${column_count}" = "10"
 take_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='audio_bloco_takes';")"
@@ -90,6 +90,12 @@ test "${chunk_take_provenance_count}" = "9"
 accent_diagnostics_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND ((table_name='audio_bloco_takes' AND column_name='accent_quality') OR (table_name='audio_chunk_takes' AND column_name IN ('accent_quality','quality_rejection_reason')));")"
 test "${accent_diagnostics_column_count}" = "3"
+operator_console_column_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.columns WHERE table_schema='public' AND table_name='workflow_execucoes' AND column_name IN ('music_override_asset_id','music_override_revision','music_override_last_idempotency_key');")"
+test "${operator_console_column_count}" = "3"
+human_review_table_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='workflow_human_reviews';")"
+test "${human_review_table_count}" = "1"
 
 # Downgrade 019 must fail before mutation when non-lossless V2 data exists.
 docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
@@ -106,7 +112,7 @@ esac
 static_rows="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT count(*) FROM timeline_placements WHERE source_type='static_image';")"
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
 test "${static_rows}" = "1"
-test "${revision}" = "019"
+test "${revision}" = "020"
 
 docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
     "DELETE FROM production_timelines WHERE id='20000000-0000-0000-0000-000000000001'; INSERT INTO production_timelines (id, workflow_execucao_id, script_fingerprint, strategy_version, schema_version, validator_version, policy, request_fingerprint, fingerprint, status, duration_seconds) VALUES ('20000000-0000-0000-0000-000000000002', '10000000-0000-0000-0000-000000000001', repeat('a', 64), 'production_timeline_v2', 'production_timeline_schema_v2', 'production_timeline_validator_v2', '{}'::jsonb, repeat('d', 64), repeat('e', 64), 'completed', 3); INSERT INTO timeline_placements (id, production_timeline_id, \"order\", visual_query_ids, visual_decision_ids, source_type, source_project_id, source_session_id, source_media_id, timeline_start_seconds, timeline_end_seconds, candidate_start_seconds, candidate_end_seconds, source_start_seconds, source_end_seconds, playback_rate, transition, strategy, importance, source_provenance) VALUES ('30000000-0000-0000-0000-000000000002', '20000000-0000-0000-0000-000000000002', 0, '[]'::jsonb, '[]'::jsonb, 'video_segment', '40000000-0000-0000-0000-000000000001', '40000000-0000-0000-0000-000000000004', '40000000-0000-0000-0000-000000000005', 0, 3, 10, 20, 10, 13, 1, 'cut', 'media_search', 'required', '{}'::jsonb);" >/dev/null
@@ -122,7 +128,7 @@ esac
 video_rows="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT count(*) FROM timeline_placements WHERE source_type='video_segment';")"
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
 test "${video_rows}" = "1"
-test "${revision}" = "019"
+test "${revision}" = "020"
 
 # With no V2 artifacts, the same downgrade remains reversible.
 docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -v ON_ERROR_STOP=1 -c \
@@ -132,7 +138,7 @@ revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestra
 test "${revision}" = "018"
 docker run --rm --network "${network_name}" --env "DATABASE_URL=${database_url}" --env PYTHONPATH=/app "${backend_image}" alembic upgrade head >/dev/null
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc "SELECT version_num FROM alembic_version;")"
-test "${revision}" = "019"
+test "${revision}" = "020"
 
 docker run --rm \
     --network "${network_name}" \
@@ -157,9 +163,9 @@ docker run --rm \
     alembic upgrade head
 revision="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT version_num FROM alembic_version;")"
-test "${revision}" = "019"
+test "${revision}" = "020"
 historical_take_count="$(docker exec "${db_container}" psql -U orchestrator_test -d orchestrator_test -Atc \
     "SELECT count(*) FROM audio_bloco_takes WHERE id='00000000-0000-0000-0000-000000000005' AND status='completed' AND canonical_text IS NULL AND normalized_text IS NULL AND synthesis_text IS NULL AND pronunciation_glossary_identity IS NULL AND pronunciation_replacements IS NULL AND text_normalizer_version IS NULL AND text_normalizer_identity IS NULL AND audio_sample_rate IS NULL AND audio_channels IS NULL AND audio_frame_count IS NULL AND audio_subtype IS NULL AND quality_status IS NULL AND artifact_integrity IS NULL AND provider_metadata IS NULL AND content_quality IS NULL AND pause_diagnostics IS NULL;")"
 test "${historical_take_count}" = "1"
 
-echo "Fresh/reversible Orchestrator migrations passed: 001 -> 019 -> 012 -> 019"
+echo "Fresh/reversible Orchestrator migrations passed: 001 -> 020 -> 012 -> 020"

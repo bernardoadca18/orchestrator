@@ -124,6 +124,9 @@ class WorkflowExecucao(Base):
     qa_reports: Mapped[list["ProductionQAReport"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
     )
+    human_reviews: Mapped[list["WorkflowHumanReview"]] = relationship(
+        back_populates="workflow", cascade="all, delete-orphan", passive_deletes=True
+    )
 
     # Stage 17 is deliberately orthogonal to the legacy audio status enum. Existing
     # rows remain NULL and dormant until explicitly resumed.
@@ -143,6 +146,16 @@ class WorkflowExecucao(Base):
     )
     audio_materialized_revision: Mapped[int] = mapped_column(
         BigInteger, nullable=False, default=0, server_default="0"
+    )
+    # Mutable operator choice belongs to the workflow, never to the immutable
+    # music registry. Revision zero preserves the historical registry override
+    # compatibility path until the first explicit operator mutation.
+    music_override_asset_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    music_override_revision: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    music_override_last_idempotency_key: Mapped[str | None] = mapped_column(
+        String(200), nullable=True
     )
     audio_edit_updates: Mapped[list["AudioEditUpdate"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan"
@@ -1101,6 +1114,53 @@ class ProductionQAReport(Base):
     workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="qa_reports")
     workflow_render: Mapped["WorkflowRender"] = relationship()
     production_timeline: Mapped["ProductionTimeline"] = relationship()
+
+
+class WorkflowHumanReview(Base):
+    """Append-only human decision over one exact immutable render output."""
+
+    __tablename__ = "workflow_human_reviews"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('approved', 'changes_requested', 'rejected')",
+            name="ck_workflow_human_review_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    workflow_render_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_renders.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    render_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    output_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    qa_report_id: Mapped[uuid.UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("production_qa_reports.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    qa_request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    operator_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    workflow: Mapped["WorkflowExecucao"] = relationship(back_populates="human_reviews")
+    workflow_render: Mapped["WorkflowRender"] = relationship()
+    qa_report: Mapped["ProductionQAReport | None"] = relationship()
 
 
 class TimelinePlacement(Base):

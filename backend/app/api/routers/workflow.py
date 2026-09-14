@@ -33,7 +33,17 @@ from app.models.workflow import (
     WorkflowExecucao,
     WorkflowRender,
 )
+from app.repositories.human_review_repository import HumanReviewRepository
 from app.repositories.workflow_repository import WorkflowRepository
+from app.schemas.operator import (
+    HumanReviewCreateIn,
+    HumanReviewCreateOut,
+    HumanReviewRecordOut,
+    HumanReviewStateOut,
+    MusicOverrideClearIn,
+    MusicOverrideIn,
+    MusicOverrideOut,
+)
 from app.schemas.transcricao import TranscricaoOut
 from app.schemas.workflow import (
     AudioActionIn,
@@ -80,9 +90,20 @@ from app.services.audio_serving import (
     verify_audio_artifact,
 )
 from app.services.block_materialization import active_block_is_current
+from app.services.human_review import (
+    HumanReviewConflictError,
+    HumanReviewNotFoundError,
+    HumanReviewService,
+)
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
+)
+from app.services.operator_console import OperatorConsoleService
+from app.services.operator_music import (
+    MusicOverrideConflictError,
+    MusicOverrideNotFoundError,
+    OperatorMusicService,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
 from app.services.production_orchestration_service import ProductionOrchestrationService
@@ -563,6 +584,12 @@ async def obter_workflow(workflow_id: uuid.UUID, session: Annotated[AsyncSession
 def _action_key(value: str | None) -> str:
     if value is None or not value.strip() or len(value) > 200:
         raise HTTPException(400, "Idempotency-Key é obrigatório para ações de narração")
+    return value.strip()
+
+
+def _operator_action_key(value: str | None) -> str:
+    if value is None or not value.strip() or len(value) > 200:
+        raise HTTPException(400, "Idempotency-Key é obrigatório para esta ação")
     return value.strip()
 
 
@@ -1093,6 +1120,90 @@ async def executar_qa_report(
     except ProductionQAPreconditionError as exc:
         raise HTTPException(409, str(exc)) from exc
     return ProductionQAEnsureOut(created=result.created, report=_qa_response(result.report))
+
+
+@router.get("/{workflow_id}/human-review", response_model=HumanReviewStateOut)
+async def obter_human_review(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    """Project the decision for the exact current render; never creates a review."""
+    workflow = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    return (await OperatorConsoleService(session).summary(workflow)).human_review
+
+
+@router.get("/{workflow_id}/human-review/history", response_model=list[HumanReviewRecordOut])
+async def listar_human_reviews(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    workflow = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    reviews = await HumanReviewRepository(session).list_for_workflow(workflow_id)
+    return [HumanReviewRecordOut.model_validate(item) for item in reviews]
+
+
+@router.post("/{workflow_id}/human-review", response_model=HumanReviewCreateOut, status_code=201)
+async def registrar_human_review(
+    workflow_id: uuid.UUID,
+    payload: HumanReviewCreateIn,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    key = _operator_action_key(idempotency_key)
+    try:
+        review, created = await HumanReviewService(session).submit(workflow_id, payload, key)
+    except HumanReviewNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except HumanReviewConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return HumanReviewCreateOut(created=created, review=HumanReviewRecordOut.model_validate(review))
+
+
+@router.put("/{workflow_id}/music-override", response_model=MusicOverrideOut)
+async def definir_music_override(
+    workflow_id: uuid.UUID,
+    payload: MusicOverrideIn,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    try:
+        result = await OperatorMusicService(session).set_override(
+            workflow_id,
+            payload.asset_id,
+            payload.expected_revision,
+            _operator_action_key(idempotency_key),
+        )
+    except MusicOverrideNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except MusicOverrideConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result.changed:
+        processar_producao_workflow.delay(str(workflow_id))
+    return result
+
+
+@router.delete("/{workflow_id}/music-override", response_model=MusicOverrideOut)
+async def remover_music_override(
+    workflow_id: uuid.UUID,
+    payload: MusicOverrideClearIn,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    try:
+        result = await OperatorMusicService(session).clear_override(
+            workflow_id,
+            payload.expected_revision,
+            _operator_action_key(idempotency_key),
+        )
+    except MusicOverrideNotFoundError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except MusicOverrideConflictError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result.changed:
+        processar_producao_workflow.delay(str(workflow_id))
+    return result
 
 
 @router.get("/{workflow_id}/video")

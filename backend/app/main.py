@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import dashboard, health, workflow
+from app.api.routers import dashboard, health, operator, workflow
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 
@@ -22,3 +22,4 @@ app.add_middleware(
 app.include_router(health.router, tags=["health"])
 app.include_router(workflow.router, prefix="/workflow", tags=["workflow"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
+app.include_router(operator.router, prefix="/operator", tags=["operator"])

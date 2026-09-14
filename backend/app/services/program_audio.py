@@ -152,6 +152,7 @@ def resolve_music_asset(
     *,
     workflow_id: uuid.UUID,
     override_asset_id: str | None = None,
+    allow_registry_override: bool = True,
 ) -> ProgramMusicAssetOut:
     enabled = [intent for intent in intents if intent.music_enabled]
     if not enabled:
@@ -160,7 +161,9 @@ def resolve_music_asset(
         raise ProgramAudioError(
             "music_resolution_failed", "Program Audio V1 does not support requested vocals"
         )
-    selected_override = override_asset_id or registry.workflow_overrides.get(str(workflow_id))
+    selected_override = override_asset_id
+    if selected_override is None and allow_registry_override:
+        selected_override = registry.workflow_overrides.get(str(workflow_id))
     assets = {asset.asset_id: asset for asset in registry.assets}
     if selected_override is not None:
         asset = assets.get(selected_override)
@@ -238,8 +241,7 @@ def build_speech_regions(
     if len(merged) > MAX_SPEECH_REGIONS:
         raise ProgramAudioError("audio_mix_plan_invalid", "Speech envelope exceeds bounded size")
     return [
-        {"start_seconds": round(start, 6), "end_seconds": round(end, 6)}
-        for start, end in merged
+        {"start_seconds": round(start, 6), "end_seconds": round(end, 6)} for start, end in merged
     ]
 
 
@@ -307,11 +309,18 @@ def build_audio_mix_plan(
         music = {"enabled": False}
     else:
         catalog = registry or load_music_registry(config)
+        override_revision = int(getattr(workflow, "music_override_revision", 0) or 0)
+        durable_override = getattr(workflow, "music_override_asset_id", None)
+        selected_override = override_asset_id if override_asset_id is not None else durable_override
         asset = resolve_music_asset(
             catalog,
             concrete_intents,
             workflow_id=workflow.id,
-            override_asset_id=override_asset_id,
+            override_asset_id=selected_override,
+            # Rows never touched by the Operator Console retain the historical
+            # registry JSON behavior. After an explicit set/clear, revision > 0
+            # makes NULL mean automatic selection, not a legacy JSON override.
+            allow_registry_override=(override_asset_id is None and override_revision == 0),
         )
         segments: list[dict[str, Any]] = []
         blocks_by_order = {block.ordem: block for block in workflow.blocos}
@@ -398,9 +407,7 @@ def build_audio_mix_plan(
             "channels": 2,
         },
     }
-    plan = AudioMixPlanV1Out.model_validate(
-        {**content, "fingerprint": canonical_hash(content)}
-    )
+    plan = AudioMixPlanV1Out.model_validate({**content, "fingerprint": canonical_hash(content)})
     logger.info(
         "audio mix plan created",
         extra={

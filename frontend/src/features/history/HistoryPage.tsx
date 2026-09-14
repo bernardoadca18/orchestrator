@@ -1,0 +1,24 @@
+import { useCallback } from "react";
+import { OperatorWorkflowHistory, operatorApi } from "../../api/operator";
+import { Alert, Card, DefinitionList, EmptyState, LoadingState, StatusBadge, TableWrap } from "../../components/ui";
+import { useColdArtifact } from "../../hooks/useColdArtifact";
+import { useWorkflowContext } from "../workflow/WorkflowWorkspace";
+
+export default function HistoryPage() {
+  const { snapshot } = useWorkflowContext();
+  const workflow = snapshot.workflow;
+  const identity = `${workflow.updated_at}:${workflow.render?.id || "none"}:${workflow.qa?.id || "none"}:${workflow.human_review.latest_historical?.id || "none"}`;
+  const loader = useCallback((signal?: AbortSignal) => operatorApi.getWorkflowHistory(workflow.id, signal), [workflow.id]);
+  const result = useColdArtifact<OperatorWorkflowHistory>(workflow.id, "history", identity, loader);
+  if (result.loading) return <LoadingState label="Carregando histórico operacional…" />;
+  if (result.error) return <Alert tone="danger">{result.error}</Alert>;
+  if (!result.data) return <EmptyState title="Histórico indisponível" />;
+  const history = result.data;
+  return <div className="workspace-stack">
+    <Card title="Linha operacional"><DefinitionList items={[["Workflow criado", new Date(history.created_at).toLocaleString("pt-BR")], ["Última atualização", new Date(workflow.updated_at).toLocaleString("pt-BR")], ["Revisão de edição de áudio", `${history.audio_materialized_revision}/${history.audio_edit_revision} materializada`], ["Renders duráveis", String(history.renders.length)], ["Relatórios QA", String(history.qa_reports.length)], ["Human Reviews", String(history.human_reviews.length)]]} /></Card>
+    <Card title={`Histórico de erros (${history.production_error_history.length})`}>{history.production_error_history.length === 0 ? <EmptyState title="Nenhum erro durável registrado" /> : <TableWrap><table><thead><tr><th>Ocorrido</th><th>Fase / categoria</th><th>Mensagem</th><th>Recovery</th></tr></thead><tbody>{history.production_error_history.map((item, index) => <tr key={`${item.occurred_at}-${index}`}><td>{new Date(item.occurred_at).toLocaleString("pt-BR")}</td><td>{item.phase}<small className="block-meta"><code>{item.category}</code></small></td><td>{item.message}</td><td>{item.recovered_at ? <><StatusBadge value="recovered" /> {new Date(item.recovered_at).toLocaleString("pt-BR")} · {item.recovery_phase}</> : <StatusBadge value="active" />}</td></tr>)}</tbody></table></TableWrap>}</Card>
+    <Card title={`Renders (${history.renders.length})`}>{history.renders.length === 0 ? <EmptyState title="Nenhum render criado" /> : <TableWrap><table><thead><tr><th>Criado</th><th>Status</th><th>Profile</th><th>Output</th><th>Erro</th></tr></thead><tbody>{history.renders.map((render) => <tr key={render.id}><td>{new Date(render.created_at).toLocaleString("pt-BR")}<small className="block-meta">{render.id}</small></td><td><StatusBadge value={render.status} /><small className="block-meta">{render.phase}</small></td><td>{render.render_profile}</td><td>{render.output_sha256 ? <><code>{render.output_sha256}</code><small className="block-meta">{render.output_duration_seconds?.toFixed(2)}s</small></> : "—"}</td><td>{render.error_category ? `${render.error_category}: ${render.error_message}` : "—"}</td></tr>)}</tbody></table></TableWrap>}</Card>
+    <Card title={`QA (${history.qa_reports.length})`}>{history.qa_reports.length === 0 ? <EmptyState title="Nenhum QA executado" /> : <TableWrap><table><thead><tr><th>Criado</th><th>Render</th><th>Modo / status</th><th>Checks problemáticos</th><th>Erro</th></tr></thead><tbody>{history.qa_reports.map((qa) => <tr key={qa.id}><td>{new Date(qa.created_at).toLocaleString("pt-BR")}</td><td><code>{qa.workflow_render_id.slice(0, 8)}</code></td><td>{qa.qa_mode} <StatusBadge value={qa.status} /></td><td>{qa.warning_count} warnings · {qa.failed_count} failed · {qa.blocked_count} blocked</td><td>{qa.error_category ? `${qa.error_category}: ${qa.error_message}` : "—"}</td></tr>)}</tbody></table></TableWrap>}</Card>
+    <Card title={`Human Reviews (${history.human_reviews.length})`}>{history.human_reviews.length === 0 ? <EmptyState title="Nenhuma revisão humana registrada" /> : <TableWrap><table><thead><tr><th>Data</th><th>Decisão</th><th>Render / SHA</th><th>QA</th><th>Nota</th></tr></thead><tbody>{history.human_reviews.map((review) => <tr key={review.id}><td>{new Date(review.created_at).toLocaleString("pt-BR")}</td><td><StatusBadge value={review.status} /></td><td><code>{review.workflow_render_id.slice(0, 8)}</code><small className="block-meta">{review.output_sha256}</small></td><td>{review.qa_report_id ? <code>{review.qa_report_id.slice(0, 8)}</code> : "—"}</td><td>{review.note || "—"}</td></tr>)}</tbody></table></TableWrap>}</Card>
+  </div>;
+}

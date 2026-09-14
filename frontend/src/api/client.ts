@@ -1,4 +1,4 @@
-const BASE_URL = import.meta.env?.VITE_API_URL || "http://localhost:8011";
+export const BASE_URL = import.meta.env?.VITE_API_URL || "http://localhost:8011";
 
 export type ApiErrorKind = "http" | "network" | "malformed_response";
 
@@ -7,6 +7,8 @@ export class ApiError extends Error {
     message: string,
     public readonly kind: ApiErrorKind,
     public readonly status?: number,
+    public readonly category?: string,
+    public readonly details?: unknown,
   ) {
     super(message);
     this.name = "ApiError";
@@ -17,7 +19,7 @@ export function isExpectedNotFound(error: unknown): error is ApiError {
   return error instanceof ApiError && error.status === 404;
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+export async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const { headers: optionHeaders, ...rest } = options || {};
   let resp: Response;
   try {
@@ -30,9 +32,18 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     throw new ApiError("Não foi possível conectar ao Orchestrator.", "network");
   }
   if (!resp.ok) {
-    const body = await resp.json().catch(() => null) as { detail?: string | { message?: string } } | null;
+    const body = await resp.json().catch(() => null) as {
+      detail?: string | { message?: string; category?: string; [key: string]: unknown };
+    } | null;
     const detail = typeof body?.detail === "string" ? body.detail : body?.detail?.message;
-    throw new ApiError(detail || `Orchestrator retornou HTTP ${resp.status}.`, "http", resp.status);
+    const category = typeof body?.detail === "object" ? body.detail?.category : undefined;
+    throw new ApiError(
+      detail || `Orchestrator retornou HTTP ${resp.status}.`,
+      "http",
+      resp.status,
+      category,
+      body?.detail,
+    );
   }
   if (resp.status === 204) return undefined as T;
   try {
@@ -262,6 +273,8 @@ export interface Workflow {
   audio_final_frame_count: number | null;
   audio_final_subtype: string | null;
   audio_integrity: Record<string, unknown> | null;
+  mastering_config: Record<string, unknown> | null;
+  mastering_metrics: Record<string, unknown> | null;
   erro_mensagem: string | null;
   tentativas: number;
   production_status: string | null;
