@@ -845,6 +845,110 @@ def check_render_status(inputs: ProductionQAInputs) -> ProductionQACheck:
     )
 
 
+def check_program_audio(inputs: ProductionQAInputs) -> list[ProductionQACheck]:
+    is_program = inputs.render.render_profile == "youtube_1080p30_program_audio_v1"
+    if not is_program:
+        return [
+            ProductionQACheck(
+                code,
+                "program_audio",
+                "skipped",
+                "Legacy narration-only render intentionally has no Program Audio contract.",
+            )
+            for code in (
+                "audio_mix_plan_identity",
+                "music_asset_identity",
+                "program_audio_format",
+                "program_audio_loudness",
+                "program_audio_true_peak",
+                "program_master_identity",
+            )
+        ]
+    raw = (getattr(inputs.render, "metrics", None) or {}).get("programAudio")
+    metrics = raw if isinstance(raw, dict) else {}
+    plan_fingerprint = metrics.get("audioMixPlanFingerprint")
+    music_asset_id = metrics.get("musicAssetId")
+    music_sha = metrics.get("musicSha256")
+    after = metrics.get("after") if isinstance(metrics.get("after"), dict) else {}
+    loudness = after.get("integratedLufs")
+    true_peak = after.get("truePeakDbtp")
+    target_lufs = metrics.get("targetLufs")
+    max_true_peak = metrics.get("maxTruePeakDbtp")
+    checks = [
+        ProductionQACheck(
+            "audio_mix_plan_identity",
+            "program_audio",
+            "passed" if isinstance(plan_fingerprint, str) and len(plan_fingerprint) == 64 else "failed",
+            "AudioMixPlan canonical identity is persisted with the render.",
+            actual=plan_fingerprint,
+        ),
+        ProductionQACheck(
+            "music_asset_identity",
+            "program_audio",
+            "passed"
+            if (
+                (music_asset_id is None and music_sha is None)
+                or (
+                    isinstance(music_asset_id, str)
+                    and bool(music_asset_id)
+                    and isinstance(music_sha, str)
+                    and len(music_sha) == 64
+                )
+            )
+            else "failed",
+            "Concrete immutable music identity is present when music is enabled.",
+            actual={"asset_id": music_asset_id, "sha256": music_sha},
+        ),
+        ProductionQACheck(
+            "program_audio_format",
+            "program_audio",
+            "passed"
+            if metrics.get("outputChannels") == 2 and metrics.get("outputSampleRate") == 48_000
+            else "failed",
+            "Program Audio output is explicitly 48 kHz stereo.",
+            expected={"channels": 2, "sample_rate": 48_000},
+            actual={
+                "channels": metrics.get("outputChannels"),
+                "sample_rate": metrics.get("outputSampleRate"),
+            },
+        ),
+        ProductionQACheck(
+            "program_audio_loudness",
+            "program_audio",
+            "passed"
+            if isinstance(loudness, int | float)
+            and isinstance(target_lufs, int | float)
+            and math.isclose(loudness, target_lufs, abs_tol=0.6)
+            else "failed",
+            "Measured full-program loudness satisfies the candidate profile.",
+            expected={"target_lufs": target_lufs, "tolerance": 0.6},
+            actual=loudness,
+        ),
+        ProductionQACheck(
+            "program_audio_true_peak",
+            "program_audio",
+            "passed"
+            if isinstance(true_peak, int | float)
+            and isinstance(max_true_peak, int | float)
+            and true_peak <= max_true_peak + 0.1
+            else "failed",
+            "Measured full-program True Peak satisfies the candidate ceiling.",
+            expected={"maximum_dbtp": max_true_peak, "tolerance": 0.1},
+            actual=true_peak,
+        ),
+        ProductionQACheck(
+            "program_master_identity",
+            "program_audio",
+            "passed"
+            if metrics.get("programMasterProfile") == "youtube_program_master_v1_candidate"
+            else "failed",
+            "Program master profile identity is explicit and distinct from narration mastering.",
+            actual=metrics.get("programMasterProfile"),
+        ),
+    ]
+    return checks
+
+
 def check_render_timeline_identity(inputs: ProductionQAInputs) -> ProductionQACheck:
     valid = (
         inputs.render.production_timeline_id == inputs.timeline.id
@@ -890,6 +994,7 @@ def check_render_output_profile(inputs: ProductionQAInputs) -> ProductionQACheck
         "video_codec": profile.video_codec,
         "audio_codec": profile.audio_codec,
         "audio_sample_rate": profile.audio_sample_rate,
+        "audio_channels": profile.audio_channels,
     }
     actual = {
         "profile_identity": render.render_profile_identity,
@@ -899,6 +1004,13 @@ def check_render_output_profile(inputs: ProductionQAInputs) -> ProductionQACheck
         "video_codec": render.output_video_codec,
         "audio_codec": render.output_audio_codec,
         "audio_sample_rate": render.output_audio_sample_rate,
+        "audio_channels": (
+            ((getattr(render, "metrics", None) or {}).get("programAudio") or {}).get(
+                "outputChannels"
+            )
+            if profile.audio_channels == 2
+            else 1
+        ),
     }
     valid = (
         actual["profile_identity"] == expected["profile_identity"]
@@ -909,6 +1021,7 @@ def check_render_output_profile(inputs: ProductionQAInputs) -> ProductionQACheck
         and actual["video_codec"] == expected["video_codec"]
         and actual["audio_codec"] == expected["audio_codec"]
         and actual["audio_sample_rate"] == expected["audio_sample_rate"]
+        and actual["audio_channels"] == expected["audio_channels"]
     )
     return ProductionQACheck(
         "render_output_profile",
@@ -972,6 +1085,7 @@ def standard_local_checks(inputs: ProductionQAInputs) -> list[ProductionQACheck]
         check_source_types(inputs),
         check_hybrid_source_contracts(inputs),
         check_render_status(inputs),
+        *check_program_audio(inputs),
         check_render_timeline_identity(inputs),
         check_render_output_profile(inputs),
         check_render_duration(inputs),
@@ -1098,6 +1212,8 @@ def deep_ffprobe_check(probe: dict[str, Any], inputs: ProductionQAInputs) -> Pro
         mismatches.append("audio_codec")
     if str(audio.get("sample_rate")) != str(profile.audio_sample_rate):
         mismatches.append("audio_sample_rate")
+    if audio.get("channels") != profile.audio_channels:
+        mismatches.append("audio_channels")
     if duration is None or abs(duration - inputs.timeline.duration_seconds) > tolerance:
         mismatches.append("duration")
     persisted = inputs.render
@@ -1141,6 +1257,7 @@ def deep_ffprobe_check(probe: dict[str, Any], inputs: ProductionQAInputs) -> Pro
             "video_codec": video.get("codec_name"),
             "audio_codec": audio.get("codec_name"),
             "audio_sample_rate": audio.get("sample_rate"),
+            "audio_channels": audio.get("channels"),
             "duration_seconds": duration,
         },
     )

@@ -32,8 +32,9 @@ PYTHONPATH=backend backend/.venv/bin/python \
 
 This produces A raw, B conservative and C balanced plus `manifest.json` and listening
 instructions. No candidate is promoted automatically. These are narration stems, not final
-program masters: a future music/gameplay/SFX layer will mix stems first, then apply final
-program loudness and limiting.
+program masters. Program Audio V1 now mixes the canonical narration stem with one controlled
+instrumental music stem and then applies a separate transparent program loudness pass. Gameplay
+audio and SFX remain excluded.
 
 ## Duration telemetry and production errors
 

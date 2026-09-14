@@ -1,22 +1,24 @@
-# Production voice baseline — 2026-08-29
+# Production voice baseline — 2026-09-13
 
 The normal Orchestrator narration workflow is frozen to:
 
-- `VOICE_PROFILE=bernardo_xvec_v2`
-- voice identity `c4e74a0da51bd5fbc18c4d9b0bc5623d2e4ea91ff8d873374b6c1e41632b802b`
+- `VOICE_PROFILE=bernardo_xvec_v3`
+- voice identity `bf047b087b09e7a2566a1282a8a9eeb4a043ef44051b2030859ca94ae46dde4f`
 - `VOICE_GENERATION_PROFILE=narration_v2`
 - generation identity `e5433e1cb8b20f91913ad37763b891f3b327a50be2f5c7d09e9a5fdaa97f05d7`
 - `VOICE_SEED=303`
 - Qwen synthesis language `Portuguese`
-- reference `ref_full_processed_raw.wav`, SHA-256
-  `8856924e05f76d1a3a5b8554218f80b5e1a898aebfe211ec1b65b60eabdbc70b`
+- reference `ref_full_processed_raw_normalized.wav`, SHA-256
+  `11b7b30c41c3d365c4122a1549cd505d16876219f75fa213f87fa15e341be546`
 - clone mode `x_vector_only`
 - model `Qwen/Qwen3-TTS-12Hz-1.7B-Base`, revision
   `fd4b254389122332181a7c3db7f27e918eec64e3`
 - main temperature `0.95`, subtalker temperature `0.90`; all remaining controls are owned by the
   versioned Qwen `narration_v2` profile.
 
-`narration_v1`, `bernardo_v1` and `bernardo_xvec_v1` are retained for historical reproduction.
+`narration_v1`, `bernardo_v1`, `bernardo_xvec_v1` and `bernardo_xvec_v2` are retained for
+historical reproduction. V3 was selected by the controlled human reference benchmark and keeps
+the transcript-free `x_vector_only` semantics.
 Transport retries replay the same semantic request, idempotency key and seed. Only the existing
 bounded quality retry policy derives a new, recorded seed; deterministic Qwen chunk seeds remain
 provider-owned.

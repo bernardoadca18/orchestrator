@@ -14,6 +14,8 @@ future QA stage. This document is a boundary contract, not a Stage 18 implementa
   fingerprints;
 - durable `WorkflowRender` mirror with Composer/profile/manifest identities, progress, result
   checksum, duration, resolution, FPS, codecs, frame count and render timing metrics;
+- for Program Audio V1, AudioMixPlan/music identities and separate pre/post program-master
+  measurements under the `programAudio` metrics namespace;
 - controlled `GET /workflow/{id}/video` MP4 stream with byte-range support.
 
 Every artifact remains separate. QA can trace a rendered frame window back through the render's
@@ -26,8 +28,10 @@ Audio already reports Integrated LUFS, sample peak, True Peak, duration and iden
 alignment reports canonical/synthesis/ASR coverage and ambiguous/unresolved query counts. The
 Visual Director reports resolution strategy and source scores. Production Timeline reports visual
 coverage, explicit gap duration/severity, cut count and average shot duration. Video Composer
-reports render/validation timing, render factor and validates H.264/yuv420p video plus one AAC 48
-kHz narration stream for the canonical profile.
+reports render/validation timing and render factor. Narration-only profiles retain one mono AAC
+48 kHz stream. The Program Audio profile requires one stereo AAC 48 kHz stream and adds distinct
+plan/music identity, format, loudness, True Peak, and program-master checks without reinterpreting
+narration mastering metrics.
 
 ## Preconditions and deferred work
 

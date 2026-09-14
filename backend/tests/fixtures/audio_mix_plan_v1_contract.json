@@ -1,0 +1,82 @@
+{
+  "schema_version": "audio_mix_plan_v1",
+  "strategy_version": "longform_program_audio_v1",
+  "profile_id": "music_mix_profile_v1_candidate",
+  "duration_seconds": 6,
+  "narration": {
+    "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "duration_seconds": 6,
+    "sample_rate": 48000,
+    "channels": 1
+  },
+  "music": {
+    "enabled": true,
+    "asset": {
+      "asset_id": "synthetic-01",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "byte_size": 1234,
+      "content_type": "audio/wav",
+      "format": "wav",
+      "duration_seconds": 6,
+      "sample_rate": 48000,
+      "channels": 2,
+      "integrated_lufs": -23,
+      "true_peak_dbtp": -3,
+      "moods": ["analytical"],
+      "styles": ["documentary"],
+      "energy": 0.4,
+      "vocals": false,
+      "loopable": true,
+      "source_owner": "NeoVids test",
+      "source_reference": "deterministic synthetic fixture",
+      "license_type": "owned",
+      "monetization_allowed": true,
+      "attribution_required": false,
+      "attribution_text": null
+    },
+    "source_start_seconds": 0,
+    "source_end_seconds": 6,
+    "loop_policy": "no_loop_v1",
+    "normalization_policy": "music_loudnorm_v1",
+    "normalization_target_lufs": -23,
+    "segments": [
+      {
+        "start_seconds": 0,
+        "end_seconds": 6,
+        "gain_adjustment_db": 0,
+        "fade_in_seconds": 0.2,
+        "fade_out_seconds": 0.2,
+        "transition_preset": "smooth_v1"
+      }
+    ]
+  },
+  "ducking": {
+    "policy_version": "speech_envelope_v1",
+    "base_gain_db": -9,
+    "ducked_gain_db": -20,
+    "attack_seconds": 0.25,
+    "release_seconds": 0.5,
+    "merge_gap_seconds": 0.35,
+    "speech_regions": [
+      {
+        "start_seconds": 0.5,
+        "end_seconds": 2
+      }
+    ]
+  },
+  "program_master": {
+    "profile_id": "youtube_program_master_v1_candidate",
+    "policy_version": "ffmpeg_loudnorm_two_pass_v1",
+    "target_lufs": -14,
+    "max_true_peak_dbtp": -1,
+    "target_lra": 11
+  },
+  "output": {
+    "profile_id": "youtube_1080p30_program_audio_v1",
+    "codec": "aac",
+    "bitrate": "192k",
+    "sample_rate": 48000,
+    "channels": 2
+  },
+  "fingerprint": "a542e8fb3ee83d774ca718fefa042d456039eaba6a76a6f6ad90a90070e7ebbd"
+}

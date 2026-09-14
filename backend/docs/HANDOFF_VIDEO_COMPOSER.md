@@ -60,8 +60,11 @@ Before completion, `production_timeline_validator_v1` guarantees:
 - gaps exactly cover every interval not occupied by gameplay;
 - coverage and severity metrics reconcile with total duration.
 
-## Deliberately unresolved for Stage 16
+## Program Audio handoff within Stage 17
 
-The renderer must define the canonical FPS, resolution, codec/container, source materialization and
-behavior for explicit gaps. Music, SFX, subtitles, overlays, creative transitions and motion
-graphics are not present in the Stage 15 schema.
+The coherent composer endpoint preserves `composer_render_input_v1` for narration-only V1/V2/V3
+renders. When the immutable script contains `audio_intent`, the Orchestrator emits
+`composer_render_input_v2` with a fingerprinted `audio_mix_plan_v1`. That plan, not the Timeline,
+freezes the concrete controlled music asset, enabled ranges, fades, gain/duck envelope, separate
+program-master policy and 48 kHz stereo output. Video Composer emits V4 only for this path. SFX and
+gameplay audio remain out of scope; source proxies stay silent. See `AUDIO_MIX_PLAN_V1.md`.

@@ -4,7 +4,7 @@ from app.services.audio_service import derive_quality_retry_seed
 
 def test_production_voice_defaults_are_frozen_and_overrideable() -> None:
     defaults = Settings(_env_file=None)
-    assert defaults.voice_profile == "bernardo_xvec_v2"
+    assert defaults.voice_profile == "bernardo_xvec_v3"
     assert defaults.voice_generation_profile == "narration_v2"
     assert defaults.voice_seed == 303
     assert defaults.voice_language == "Portuguese"

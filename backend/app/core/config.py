@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     video_composer_poll_interval_seconds: float = 2.0
     video_composer_render_timeout_seconds: float = 3600.0
     video_composer_render_profile: str = "youtube_1080p30_v1"
+    video_composer_program_audio_render_profile: str = "youtube_1080p30_program_audio_v1"
 
     production_qa_strategy_version: str = "production_qa_v2"
     production_qa_deep_max_video_bytes: int = 10 * 1024 * 1024 * 1024
@@ -62,6 +63,8 @@ class Settings(BaseSettings):
 
     # --- Armazenamento de áudio ----------------------------------------------
     audio_storage_path: str = "/data/audio"
+    music_library_root: Path = Path("/data/music")
+    music_registry_path: Path = Path("/data/music/registry.json")
     pronunciation_glossary_path: Path = Path("config/pronunciation_glossary.yaml")
     pronunciation_locale: str = "pt-BR"
     text_normalizer_version: str = "pt_br_text_normalizer_v1"

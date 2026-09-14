@@ -145,7 +145,7 @@ docker compose run --rm api alembic upgrade head
 docker compose up -d --build api worker frontend
 ```
 
-The current production freeze uses the separately versioned `bernardo_xvec_v2` and
+The current production freeze uses the separately versioned `bernardo_xvec_v3` and
 `narration_v2`; see `PRODUCTION_VOICE_BASELINE.md`. The historical profiles above remain
 registered and this document's comparison commands stay reproducible.
 

@@ -233,6 +233,56 @@ def test_healthy_artifact_chain_passes_every_mandatory_local_check() -> None:
     assert aggregate.publication_ready is True
 
 
+def test_program_audio_checks_are_distinct_from_narration_stem_checks() -> None:
+    inputs = _inputs()
+    inputs.render.render_profile = "youtube_1080p30_program_audio_v1"
+    inputs.render.metrics = {
+        "programAudio": {
+            "audioMixPlanFingerprint": "9" * 64,
+            "musicAssetId": "owned-track-01",
+            "musicSha256": "8" * 64,
+            "outputChannels": 2,
+            "outputSampleRate": 48_000,
+            "targetLufs": -14.0,
+            "maxTruePeakDbtp": -1.0,
+            "targetLra": 11.0,
+            "after": {"integratedLufs": -14.1, "truePeakDbtp": -1.1},
+            "programMasterProfile": "youtube_program_master_v1_candidate",
+        }
+    }
+    object.__setattr__(
+        inputs,
+        "render_profile",
+        ComposerRenderProfile(
+            name="youtube_1080p30_program_audio_v1",
+            version="render_profile_program_audio_v1",
+            identity="e" * 64,
+            width=1920,
+            height=1080,
+            fps=30,
+            container="mp4",
+            video_codec="h264",
+            audio_codec="aac",
+            audio_sample_rate=48_000,
+            audio_channels=2,
+            fit_mode="contain",
+            final_gap_policy="reject",
+            preview_gap_policy="diagnostic_black",
+        ),
+    )
+    checks = _checks(inputs)
+    for code in (
+        "audio_mix_plan_identity",
+        "music_asset_identity",
+        "program_audio_format",
+        "program_audio_loudness",
+        "program_audio_true_peak",
+        "program_master_identity",
+    ):
+        assert checks[code].result == "passed"
+    assert checks["mastering_loudness"].result == "passed"
+
+
 def test_stale_timeline_fingerprint_fails_chain_and_render_identity() -> None:
     inputs = _inputs()
     inputs.render.production_timeline_fingerprint = "0" * 64

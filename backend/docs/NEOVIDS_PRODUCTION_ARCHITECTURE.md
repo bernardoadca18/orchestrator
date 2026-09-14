@@ -14,10 +14,12 @@
 - **Video Composer** owns source materialization, deterministic frame quantization/rendering,
   output validation and authoritative MP4 storage/streaming.
 
-The Stage 17 Composer input is ProductionTimeline + PresentationSpec V1. PresentationSpec is
-resolved from final-audio transcription and explicit editorial metadata inside the Orchestrator;
-it is not Stage 19. Its fingerprint participates in render request identity and stale-render
-reconciliation. The Composer never rebuilds it from transcription or script endpoints.
+The Stage 17 Composer input is ProductionTimeline + optional PresentationSpec V1 + optional
+AudioMixPlan V1. PresentationSpec is resolved from final-audio transcription and explicit
+editorial metadata. AudioMixPlan resolves immutable script `audio_intent` to a concrete licensed
+music asset, timing, ducking, and a separate program-master policy. Both are owned by the
+Orchestrator; neither is Stage 19. Their fingerprints participate in render request identity and
+stale-render reconciliation. The Composer never rebuilds either from independent endpoints.
 
 ```text
 media ingestion
@@ -29,6 +31,7 @@ media ingestion
   -> NarrationAlignment + versioned speech-quality gate
   -> VisualPlan
   -> ProductionTimeline
+  -> AudioMixPlan (when audio_intent is present)
   -> WorkflowRender / Video Composer MP4
   -> ProductionQAReport
   -> release-ready artifact (or explicit failed/blocked gate)
@@ -39,7 +42,10 @@ own versioned report. It does not call Qwen, Whisper, Media Search or any upstre
 never creates a Composer render. Standard QA uses a one-byte range request. Deep QA is explicit and
 streams a temporary MP4 for independent SHA/ffprobe validation with guaranteed cleanup.
 
-Audio mastering is intentionally transparent gain and True Peak protection. It cannot repair
+Narration mastering is intentionally transparent gain and True Peak protection. Program Audio V1
+keeps that mono narration artifact as a stem, mixes only one controlled instrumental music stem,
+then measures and transparently masters the complete stereo program to a candidate policy. These
+metrics and identities remain separate. Neither form of mastering can repair
 repeated, missing or otherwise incorrect speech. Catastrophic Qwen chunks are rejected before
 publication; any failure that escapes the chunk guard is blocked by conservative block-duration
 and Faster-Whisper/alignment evidence. Diagnostic audio remains preserved.

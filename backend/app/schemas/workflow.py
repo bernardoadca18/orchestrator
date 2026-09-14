@@ -854,6 +854,161 @@ class ComposerRenderInputPackageOut(BaseModel):
     presentation: PresentationSpecOut | None
 
 
+class ProgramNarrationInputOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    duration_seconds: float = Field(gt=0)
+    sample_rate: Literal[48000]
+    channels: Literal[1]
+
+
+class ProgramMusicAssetOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    asset_id: str = Field(pattern=r"^[a-z0-9][a-z0-9._-]{0,95}$")
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    byte_size: int = Field(gt=0)
+    content_type: Literal["audio/wav", "audio/flac"]
+    format: Literal["wav", "flac"]
+    duration_seconds: float = Field(gt=0)
+    sample_rate: int = Field(ge=8000, le=192000)
+    channels: int = Field(ge=1, le=2)
+    integrated_lufs: float = Field(ge=-70, le=0)
+    true_peak_dbtp: float = Field(ge=-70, le=3)
+    moods: list[str] = Field(max_length=32)
+    styles: list[str] = Field(max_length=32)
+    energy: float = Field(ge=0, le=1)
+    vocals: bool
+    loopable: bool
+    source_owner: str = Field(min_length=1, max_length=200)
+    source_reference: str = Field(min_length=1, max_length=500)
+    license_type: Literal["owned", "commissioned", "cc0", "royalty_free"]
+    monetization_allowed: Literal[True]
+    attribution_required: bool
+    attribution_text: str | None = Field(default=None, max_length=1000)
+
+    @model_validator(mode="after")
+    def validate_attribution(self) -> ProgramMusicAssetOut:
+        if self.attribution_required and not (self.attribution_text or "").strip():
+            raise ValueError("attribution text is required")
+        return self
+
+
+class ProgramMusicSegmentOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+    gain_adjustment_db: float = Field(ge=-3, le=3)
+    fade_in_seconds: float = Field(ge=0, le=2)
+    fade_out_seconds: float = Field(ge=0, le=2)
+    transition_preset: Literal["none_v1", "smooth_v1"]
+
+    @model_validator(mode="after")
+    def validate_range(self) -> ProgramMusicSegmentOut:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("music segment range is invalid")
+        duration = self.end_seconds - self.start_seconds
+        if self.fade_in_seconds + self.fade_out_seconds > duration:
+            raise ValueError("music fades exceed segment duration")
+        return self
+
+
+class ProgramMusicDisabledOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: Literal[False]
+
+
+class ProgramMusicEnabledOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: Literal[True]
+    asset: ProgramMusicAssetOut
+    source_start_seconds: Literal[0.0]
+    source_end_seconds: float = Field(gt=0)
+    loop_policy: Literal["no_loop_v1", "repeat_from_start_v1"]
+    normalization_policy: Literal["music_loudnorm_v1"]
+    normalization_target_lufs: float = Field(ge=-30, le=-16)
+    segments: list[ProgramMusicSegmentOut] = Field(min_length=1, max_length=512)
+
+
+ProgramMusicOut = Annotated[
+    ProgramMusicDisabledOut | ProgramMusicEnabledOut,
+    Field(discriminator="enabled"),
+]
+
+
+class SpeechRegionOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    start_seconds: float = Field(ge=0)
+    end_seconds: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def validate_range(self) -> SpeechRegionOut:
+        if self.end_seconds <= self.start_seconds:
+            raise ValueError("speech region range is invalid")
+        return self
+
+
+class ProgramDuckingOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    policy_version: Literal["speech_envelope_v1"]
+    base_gain_db: float = Field(ge=-24, le=0)
+    ducked_gain_db: float = Field(ge=-36, le=-6)
+    attack_seconds: float = Field(gt=0, le=2)
+    release_seconds: float = Field(gt=0, le=3)
+    merge_gap_seconds: float = Field(ge=0, le=2)
+    speech_regions: list[SpeechRegionOut] = Field(max_length=512)
+
+    @model_validator(mode="after")
+    def validate_levels_and_order(self) -> ProgramDuckingOut:
+        if self.ducked_gain_db >= self.base_gain_db:
+            raise ValueError("ducked gain must be below base gain")
+        if any(
+            right.start_seconds < left.end_seconds
+            for left, right in zip(self.speech_regions, self.speech_regions[1:], strict=False)
+        ):
+            raise ValueError("speech regions overlap")
+        return self
+
+
+class ProgramMasterOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_id: Literal["youtube_program_master_v1_candidate"]
+    policy_version: Literal["ffmpeg_loudnorm_two_pass_v1"]
+    target_lufs: float = Field(ge=-24, le=-10)
+    max_true_peak_dbtp: float = Field(ge=-3, le=-0.1)
+    target_lra: float = Field(ge=1, le=20)
+
+
+class ProgramOutputAudioOut(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    profile_id: Literal["youtube_1080p30_program_audio_v1"]
+    codec: Literal["aac"]
+    bitrate: Literal["192k"]
+    sample_rate: Literal[48000]
+    channels: Literal[2]
+
+
+class AudioMixPlanV1Out(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["audio_mix_plan_v1"]
+    strategy_version: Literal["longform_program_audio_v1"]
+    profile_id: Literal["music_mix_profile_v1_candidate"]
+    duration_seconds: float = Field(gt=0)
+    narration: ProgramNarrationInputOut
+    music: ProgramMusicOut
+    ducking: ProgramDuckingOut
+    program_master: ProgramMasterOut
+    output: ProgramOutputAudioOut
+    fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ComposerRenderInputPackageV2Out(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    schema_version: Literal["composer_render_input_v2"]
+    production_timeline: ProductionTimelineOut
+    presentation: PresentationSpecOut | None
+    audio_mix_plan: AudioMixPlanV1Out
+
+
 class WorkflowRenderOutputOut(BaseModel):
     sha256: str
     byte_size: int = Field(gt=0)

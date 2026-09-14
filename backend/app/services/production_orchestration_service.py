@@ -29,6 +29,7 @@ from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import build_presentation_spec
 from app.services.production_timeline_service import ProductionTimelineService
+from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
 from app.services.visual_director_service import VisualDirectorService
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
@@ -231,6 +232,11 @@ class ProductionOrchestrationService:
             if current is not None and not self._cancelled(current):
                 await self._fail(current, "composer_request", self._safe_message(exc))
             return OrchestrationResult(terminal=True)
+        except ProgramAudioError as exc:
+            current = await self.workflows.obter_por_id(workflow_id)
+            if current is not None and not self._cancelled(current):
+                await self._fail(current, exc.category, str(exc))
+            return OrchestrationResult(terminal=True)
         except Exception as exc:
             logger.exception(
                 "production orchestration failed", extra={"workflow_id": str(workflow_id)}
@@ -319,8 +325,14 @@ class ProductionOrchestrationService:
         if timeline is None:
             return None
         presentation_fingerprint = await self._presentation_fingerprint(workflow_id, timeline)
+        audio_mix_plan_fingerprint = await self._audio_mix_plan_fingerprint(workflow_id, timeline)
+        render_profile = self._render_profile(audio_mix_plan_fingerprint)
         fingerprint = self.render_request_fingerprint(
-            workflow_id, timeline, presentation_fingerprint=presentation_fingerprint
+            workflow_id,
+            timeline,
+            presentation_fingerprint=presentation_fingerprint,
+            audio_mix_plan_fingerprint=audio_mix_plan_fingerprint,
+            render_profile=render_profile,
         )
         return await self.renders.get_by_request_fingerprint(fingerprint)
 
@@ -328,15 +340,21 @@ class ProductionOrchestrationService:
         self, workflow: WorkflowExecucao, timeline: ProductionTimeline
     ) -> WorkflowRender:
         presentation_fingerprint = await self._presentation_fingerprint(workflow.id, timeline)
+        audio_mix_plan_fingerprint = await self._audio_mix_plan_fingerprint(workflow.id, timeline)
+        render_profile = self._render_profile(audio_mix_plan_fingerprint)
         fingerprint = self.render_request_fingerprint(
-            workflow.id, timeline, presentation_fingerprint=presentation_fingerprint
+            workflow.id,
+            timeline,
+            presentation_fingerprint=presentation_fingerprint,
+            audio_mix_plan_fingerprint=audio_mix_plan_fingerprint,
+            render_profile=render_profile,
         )
         key = f"neovids-render:{workflow.id}:{fingerprint[:32]}"
         render, _ = await self.renders.create_or_get(
             workflow_execucao_id=workflow.id,
             production_timeline_id=timeline.id,
             production_timeline_fingerprint=timeline.fingerprint,
-            render_profile=self.config.video_composer_render_profile,
+            render_profile=render_profile,
             mode="final",
             request_fingerprint=fingerprint,
             idempotency_key=key,
@@ -351,21 +369,30 @@ class ProductionOrchestrationService:
         timeline: ProductionTimeline,
         *,
         presentation_fingerprint: str | None = None,
+        audio_mix_plan_fingerprint: str | None = None,
+        render_profile: str | None = None,
     ) -> str:
+        effective_profile = render_profile or self._render_profile(audio_mix_plan_fingerprint)
         payload = {
             "contract": (
-                "stage_17_workflow_render_v2_presentation"
-                if presentation_fingerprint
-                else "stage_17_workflow_render_v1"
+                "stage_17_workflow_render_v3_program_audio"
+                if audio_mix_plan_fingerprint
+                else (
+                    "stage_17_workflow_render_v2_presentation"
+                    if presentation_fingerprint
+                    else "stage_17_workflow_render_v1"
+                )
             ),
             "workflow_id": str(workflow_id),
             "production_timeline_id": str(timeline.id),
             "production_timeline_fingerprint": timeline.fingerprint,
-            "render_profile": self.config.video_composer_render_profile,
+            "render_profile": effective_profile,
             "mode": "final",
         }
         if presentation_fingerprint:
             payload["presentation_fingerprint"] = presentation_fingerprint
+        if audio_mix_plan_fingerprint:
+            payload["audio_mix_plan_fingerprint"] = audio_mix_plan_fingerprint
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(encoded.encode()).hexdigest()
 
@@ -379,6 +406,22 @@ class ProductionOrchestrationService:
             return None
         presentation = build_presentation_spec(workflow, duration_seconds=timeline.duration_seconds)
         return presentation.fingerprint if presentation else None
+
+    async def _audio_mix_plan_fingerprint(
+        self, workflow_id: uuid.UUID, timeline: ProductionTimeline
+    ) -> str | None:
+        workflow = await self.workflows.obter_por_id(
+            workflow_id, com_blocos=True, com_transcricao=True
+        )
+        if workflow is None:
+            return None
+        plan = build_audio_mix_plan(workflow, timeline, self.config)
+        return plan.fingerprint if plan else None
+
+    def _render_profile(self, audio_mix_plan_fingerprint: str | None) -> str:
+        if audio_mix_plan_fingerprint:
+            return self.config.video_composer_program_audio_render_profile
+        return self.config.video_composer_render_profile
 
     def _visual_diversity_policy(
         self, timeline: ProductionTimeline | None = None
@@ -590,6 +633,9 @@ class ProductionOrchestrationService:
         current_presentation_fingerprint = await self._presentation_fingerprint(
             workflow.id, current
         )
+        current_audio_mix_plan_fingerprint = await self._audio_mix_plan_fingerprint(
+            workflow.id, current
+        )
         if remote.presentation_fingerprint != current_presentation_fingerprint:
             await self._block(
                 workflow,
@@ -598,10 +644,20 @@ class ProductionOrchestrationService:
                 "Video Composer returned another PresentationSpec identity",
             )
             return OrchestrationResult(terminal=True)
+        if getattr(remote, "audio_mix_plan_fingerprint", None) != current_audio_mix_plan_fingerprint:
+            await self._block(
+                workflow,
+                "render",
+                "composer_audio_mix_plan_mismatch",
+                "Video Composer returned another AudioMixPlan identity",
+            )
+            return OrchestrationResult(terminal=True)
         if render.request_fingerprint != self.render_request_fingerprint(
             workflow.id,
             current,
             presentation_fingerprint=current_presentation_fingerprint,
+            audio_mix_plan_fingerprint=current_audio_mix_plan_fingerprint,
+            render_profile=render.render_profile,
         ):
             await self._block(
                 workflow,

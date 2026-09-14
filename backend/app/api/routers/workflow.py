@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -20,6 +20,7 @@ from app.clients.video_composer_client import (
     VideoComposerError,
     VideoComposerNotFoundError,
 )
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.workflow import (
     AudioBloco,
@@ -39,6 +40,7 @@ from app.schemas.workflow import (
     AudioEditApplyOut,
     AudioEditUpdateOut,
     ComposerRenderInputPackageOut,
+    ComposerRenderInputPackageV2Out,
     MediaScopeOut,
     NarrationAlignmentEnsureOut,
     NarrationBlockAlignmentOut,
@@ -92,6 +94,12 @@ from app.services.production_qa_service import (
 from app.services.production_timeline_service import (
     ProductionTimelineNotFoundError,
     ProductionTimelineService,
+)
+from app.services.program_audio import (
+    ProgramAudioError,
+    build_audio_mix_plan,
+    load_music_registry,
+    verify_music_asset,
 )
 from app.services.pronunciation_candidates import PronunciationCandidateService
 from app.services.speaking_rate_calibration import SpeakingRateCalibrationService
@@ -944,7 +952,7 @@ async def obter_production_timeline(
 
 @router.get(
     "/{workflow_id}/composer-render-input",
-    response_model=ComposerRenderInputPackageOut,
+    response_model=ComposerRenderInputPackageOut | ComposerRenderInputPackageV2Out,
 )
 async def obter_composer_render_input(
     workflow_id: uuid.UUID,
@@ -964,12 +972,61 @@ async def obter_composer_render_input(
         raise HTTPException(404, "Workflow não encontrado")
     try:
         presentation = build_presentation_spec(workflow, duration_seconds=timeline.duration_seconds)
+        audio_mix_plan = build_audio_mix_plan(workflow, timeline, settings)
     except PresentationInputError as exc:
         raise HTTPException(409, str(exc)) from exc
+    except ProgramAudioError as exc:
+        raise HTTPException(409, detail={"category": exc.category, "message": str(exc)}) from exc
+    if audio_mix_plan is not None:
+        return ComposerRenderInputPackageV2Out(
+            schema_version="composer_render_input_v2",
+            production_timeline=_production_timeline_response(timeline),
+            presentation=presentation,
+            audio_mix_plan=audio_mix_plan,
+        )
     return ComposerRenderInputPackageOut(
         schema_version="composer_render_input_v1",
         production_timeline=_production_timeline_response(timeline),
         presentation=presentation,
+    )
+
+
+@router.get("/{workflow_id}/music-assets/{asset_id}")
+async def obter_music_asset(
+    workflow_id: uuid.UUID,
+    asset_id: str,
+    sha256: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Serve only the immutable registry asset selected for this workflow's current plan."""
+    workflow = await WorkflowRepository(session).obter_por_id(
+        workflow_id, com_blocos=True, com_transcricao=True
+    )
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    try:
+        timeline = await ProductionTimelineService(session).current(workflow_id)
+        if timeline is None:
+            raise HTTPException(404, "Production Timeline compatível ainda não disponível")
+        registry = load_music_registry(settings)
+        plan = build_audio_mix_plan(workflow, timeline, settings, registry=registry)
+        if plan is None or not plan.music.enabled or plan.music.asset.asset_id != asset_id:
+            raise HTTPException(404, "Music asset não pertence ao plano corrente")
+        if plan.music.asset.sha256 != sha256:
+            raise HTTPException(409, "Music asset SHA não corresponde ao plano corrente")
+        path = verify_music_asset(settings, plan.music.asset)
+    except ProgramAudioError as exc:
+        raise HTTPException(409, detail={"category": exc.category, "message": str(exc)}) from exc
+    return FileResponse(
+        path,
+        media_type=plan.music.asset.content_type,
+        filename=f"{plan.music.asset.asset_id}.{plan.music.asset.format}",
+        content_disposition_type="inline",
+        headers={
+            "ETag": f'"{plan.music.asset.sha256}"',
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "X-Audio-SHA256": plan.music.asset.sha256,
+        },
     )
 
 

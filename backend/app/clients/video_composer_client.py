@@ -46,6 +46,7 @@ class ComposerRenderOutput(BaseModel):
     video_codec: str = Field(alias="videoCodec", min_length=1)
     audio_codec: str = Field(alias="audioCodec", min_length=1)
     audio_sample_rate: int = Field(alias="audioSampleRate", gt=0)
+    audio_channels: int = Field(alias="audioChannels", default=1, gt=0)
     mime_type: str = Field(alias="mimeType", min_length=1)
     filename: str = Field(min_length=1)
 
@@ -74,6 +75,7 @@ class ComposerRenderJob(BaseModel):
     render_fingerprint: str
     manifest_fingerprint: str
     presentation_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    audio_mix_plan_fingerprint: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     output: ComposerRenderOutput | None = None
     metrics: dict[str, Any] | None = None
     error: ComposerRenderError | None = None
@@ -109,6 +111,7 @@ class ComposerRenderProfile(BaseModel):
     video_codec: str
     audio_codec: str
     audio_sample_rate: int = Field(gt=0)
+    audio_channels: int = Field(default=1, gt=0)
     fit_mode: str
     final_gap_policy: str
     preview_gap_policy: str

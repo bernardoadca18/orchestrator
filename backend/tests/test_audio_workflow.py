@@ -471,7 +471,7 @@ async def test_end_to_end_reuses_valid_blocks_and_transcription_by_audio_hash(
     assert len(repo.blocks[0].text_normalizer_identity) == 64
     assert repo.blocks[0].resolved_seed == 303
     assert repo.blocks[1].resolved_seed == 303
-    assert voice.created[0]["voice_profile"] == "bernardo_xvec_v2"
+    assert voice.created[0]["voice_profile"] == "bernardo_xvec_v3"
     assert voice.created[0]["generation_profile"] == "narration_v2"
     assert voice.created[0]["seed"] == 303
     assert repo.blocks[0].voice_profile_identity == "v" * 64
