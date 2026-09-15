@@ -7,6 +7,7 @@ import { createActionKey } from "../../data/operatorAction";
 import { useColdArtifact } from "../../hooks/useColdArtifact";
 import { useOperatorAction } from "../../hooks/useOperatorAction";
 import { useWorkflowContext } from "../workflow/WorkflowWorkspace";
+import { presentRenderProgress } from "./renderProgress";
 
 export function reviewBanner(state: string, historicalStatus?: string | null) {
   if (state === "stale") return `${(historicalStatus || "REVISÃO").toUpperCase()} HISTÓRICA — RENDER CORRENTE NÃO REVISADO`;
@@ -52,6 +53,7 @@ export default function RenderPage() {
 
   const hasVideo = render.data?.status === "completed" && render.data.output;
   const reviewState = workflow.human_review.state;
+  const renderProgress = render.data ? presentRenderProgress(render.data) : null;
 
   return <div className="review-room">
     {/* Left: Video Player Section */}
@@ -73,7 +75,9 @@ export default function RenderPage() {
                 <div style={{ textAlign: "center" }}>
                   <StatusBadge value={render.data.status} />
                   <p style={{ marginTop: "0.5rem" }}>{render.data.phase}</p>
-                  {render.data.progress < 1 && <Progress value={render.data.progress} label="Renderizando…" />}
+                  {renderProgress?.kind === "progress"
+                    ? <Progress value={renderProgress.value} label={renderProgress.label} />
+                    : renderProgress && <p>{renderProgress.label}</p>}
                 </div>
               </div>
             )}

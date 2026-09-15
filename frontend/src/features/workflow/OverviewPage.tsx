@@ -4,6 +4,7 @@ import { Alert, ActionButton, Card, ConfirmDialog, DefinitionList, Diagnostics, 
 import { coldArtifactCache } from "../../data/coldArtifactCache";
 import { createActionKey } from "../../data/operatorAction";
 import { useOperatorAction } from "../../hooks/useOperatorAction";
+import { presentRenderProgress } from "../render/renderProgress";
 import { useWorkflowContext } from "./WorkflowWorkspace";
 
 const stages = [
@@ -45,7 +46,7 @@ export default function OverviewPage() {
   }
 
   const renderProgress = workflow.render?.status && !["completed", "failed"].includes(workflow.render.status)
-    ? workflow.render.progress
+    ? presentRenderProgress(workflow.render)
     : null;
   return <div className="workspace-grid">
     <Card title="Progresso da produção" className="span-full">
@@ -53,7 +54,9 @@ export default function OverviewPage() {
         const state = stagePresentation(workflow.production_phase, workflow.production_status, key);
         return <div className={`stage-card ${state}`} key={key}><StatusBadge value={state} /><strong>{label}</strong><small>{key === workflow.production_phase ? workflow.current_error_message : ""}</small></div>;
       })}</div>
-      {renderProgress !== null && <Progress value={renderProgress} label={`Render ativo (${workflow.render?.frames_rendered || 0}/${workflow.render?.total_frames || "?"} frames)`} />}
+      {renderProgress?.kind === "progress"
+        ? <Progress value={renderProgress.value} label={renderProgress.label} />
+        : renderProgress && <p>{renderProgress.label}</p>}
     </Card>
     <Card title="Estado atual">
       <DefinitionList items={[

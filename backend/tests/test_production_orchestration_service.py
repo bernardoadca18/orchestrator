@@ -724,6 +724,29 @@ async def test_remote_failure_does_not_demote_legacy_audio_status() -> None:
 
 
 @pytest.mark.asyncio
+async def test_asset_materialization_failure_is_preserved_for_operator_retry() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    payload = _remote(workflow.id, timeline, "failed").model_dump(mode="json")
+    payload["error"] = {
+        "category": "asset_materialization_failed",
+        "message": "Falha ao materializar mídia necessária para o render.",
+    }
+    remote = ComposerRender.model_validate(payload)
+    composer = FakeComposer(remote)
+    renders = FakeRenderRepo()
+
+    await _service(workflow, timeline, composer, renders).process(workflow.id)
+
+    assert renders.render.error_category == "asset_materialization_failed"
+    assert renders.render.error_message == ("Falha ao materializar mídia necessária para o render.")
+    assert workflow.production_error_category == "composer:asset_materialization_failed"
+    assert workflow.production_error_message == (
+        "Falha ao materializar mídia necessária para o render."
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "failure",
     [
