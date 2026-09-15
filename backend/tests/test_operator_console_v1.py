@@ -7,12 +7,15 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from app.api.routers.operator import (
     _safe_audio_mix_payload,
     get_operator_workflow,
     list_music_assets,
 )
+from app.core.database import get_db
+from app.main import app
 from app.schemas.operator import HumanReviewStateOut
 from app.schemas.workflow import ProgramMusicAssetOut
 from app.services.operator_console import (
@@ -20,6 +23,7 @@ from app.services.operator_console import (
     derive_attention,
     derive_capabilities,
 )
+from app.services.presentation_spec import PresentationInputError
 from app.services.program_audio import MusicRegistryDocument, ProgramAudioError
 
 
@@ -113,6 +117,128 @@ async def test_operator_snapshot_endpoint_returns_404_for_unknown_workflow() -> 
     ):
         await get_operator_workflow(uuid.uuid4(), MagicMock())
     assert error.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_summary_degrades_only_known_presentation_projection_failure() -> None:
+    failed = workflow(
+        production_status="failed",
+        production_phase="render",
+        production_error_category="presentation_input_invalid",
+        production_error_message="caption input rejected",
+    )
+    healthy = workflow(production_status="completed", production_phase="completed")
+    service = OperatorConsoleService(MagicMock())
+    service.workflows.listar = AsyncMock(return_value=[failed, healthy])
+    service.reviews.list_for_workflow = AsyncMock(return_value=[])
+
+    async def current_render(workflow_id):
+        if workflow_id == failed.id:
+            raise PresentationInputError(
+                "caption word timestamp invalid",
+                reason="end_not_after_start",
+                details={"word_index": 680, "token": "explicar,"},
+            )
+        return None
+
+    service.production.current_render = AsyncMock(side_effect=current_render)
+    summaries = await service.list_summaries()
+    assert {item.id for item in summaries} == {failed.id, healthy.id}
+    degraded = next(item for item in summaries if item.id == failed.id)
+    assert degraded.render is None
+    assert degraded.production_status == "failed"
+    assert degraded.production_phase == "render"
+    assert degraded.current_error_message == "caption input rejected"
+    assert "service_degraded" in {item.code for item in degraded.attention}
+
+
+@pytest.mark.asyncio
+async def test_summary_does_not_swallow_unknown_programming_or_database_errors() -> None:
+    service = OperatorConsoleService(MagicMock())
+    service.production.current_render = AsyncMock(side_effect=RuntimeError("database offline"))
+    with pytest.raises(RuntimeError, match="database offline"):
+        await service.summary(workflow())
+
+
+def test_operator_http_reads_survive_one_failed_presentation_and_keep_it_visible() -> None:
+    failed = workflow(
+        production_status="failed",
+        production_phase="render",
+        production_error_category="presentation_input_invalid",
+        production_error_message="caption input rejected",
+    )
+    healthy = workflow(production_status="completed", production_phase="completed")
+    fake_session = MagicMock()
+
+    async def fake_db():
+        yield fake_session
+
+    async def current_render(workflow_id):
+        if workflow_id == failed.id:
+            raise PresentationInputError(
+                "caption word timestamp invalid",
+                reason="end_not_after_start",
+                details={"word_index": 680, "token": "explicar,"},
+            )
+        return None
+
+    async def get_workflow(workflow_id, **_):
+        if workflow_id == failed.id:
+            return failed
+        if workflow_id == healthy.id:
+            return healthy
+        return None
+
+    app.dependency_overrides[get_db] = fake_db
+    try:
+        with (
+            patch(
+                "app.services.operator_console.WorkflowRepository.listar",
+                new=AsyncMock(return_value=[failed, healthy]),
+            ),
+            patch(
+                "app.services.operator_console.WorkflowRepository.obter_por_id",
+                new=AsyncMock(side_effect=get_workflow),
+            ),
+            patch(
+                "app.services.operator_console.ProductionOrchestrationService.current_render",
+                new=AsyncMock(side_effect=current_render),
+            ),
+            patch(
+                "app.services.operator_console.HumanReviewRepository.list_for_workflow",
+                new=AsyncMock(return_value=[]),
+            ),
+            patch(
+                "app.services.operator_console.NarrationAlignmentService.current",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.services.operator_console.VisualDirectorService.current",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.services.operator_console.ProductionTimelineService.current",
+                new=AsyncMock(return_value=None),
+            ),
+            TestClient(app) as client,
+        ):
+            listed = client.get("/operator/workflows")
+            detail = client.get(f"/operator/workflows/{failed.id}")
+            review_queue = client.get("/operator/review-queue")
+    finally:
+        app.dependency_overrides.clear()
+
+    assert listed.status_code == 200
+    assert {item["id"] for item in listed.json()} == {str(failed.id), str(healthy.id)}
+    failed_summary = next(item for item in listed.json() if item["id"] == str(failed.id))
+    assert failed_summary["render"] is None
+    assert failed_summary["production_status"] == "failed"
+    assert failed_summary["production_phase"] == "render"
+    assert detail.status_code == 200
+    assert detail.json()["workflow"]["id"] == str(failed.id)
+    assert detail.json()["workflow"]["render"] is None
+    assert review_queue.status_code == 200
+    assert review_queue.json() == []
 
 
 @pytest.mark.asyncio

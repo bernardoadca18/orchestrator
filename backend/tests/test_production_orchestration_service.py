@@ -865,6 +865,83 @@ async def test_explicit_cancelled_resume_reuses_current_upstream_at_render() -> 
 
 
 @pytest.mark.asyncio
+async def test_failed_presentation_retry_reuses_qwen_alignment_visual_plan_and_timeline() -> None:
+    workflow = _workflow(phase="render", status="failed")
+    workflow.roteiro_snapshot = {"titulo": "Video", "blocos": []}
+    workflow.blocos = []
+    workflow.transcricao = SimpleNamespace(
+        audio_sha256=workflow.audio_final_sha256,
+        palavras_timestamps=[
+            {"palavra": "explicar,", "inicio": 264.18, "fim": 264.18},
+            {"palavra": "porque", "inicio": 264.46, "fim": 264.92},
+            {"palavra": "se", "inicio": 711.64, "fim": 711.64},
+            {"palavra": "a", "inicio": 711.64, "fim": 711.76},
+        ],
+    )
+    workflow.duracao_audio_segundos = 876.32
+    timeline = _timeline(workflow.id)
+    timeline.duration_seconds = 876.32
+    composer = FakeComposer(_remote(workflow.id, timeline, "queued"))
+    service = _service(workflow, timeline, composer)
+    voice_generation = AsyncMock()
+    service.audio_processor.side_effect = lambda *_: voice_generation()
+
+    await service.explicit_retry(workflow)
+    result = await service.process(workflow.id)
+
+    assert workflow.production_status == "running"
+    assert workflow.production_phase == "render"
+    assert result.poll_render_id is not None
+    assert composer.create_calls and len(composer.create_calls) == 1
+    service.audio_processor.assert_not_awaited()
+    voice_generation.assert_not_awaited()
+    service.alignments.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()
+    service.timelines.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_presentation_failure_persists_actionable_state_and_structured_log(caplog) -> None:
+    workflow = _workflow(phase="render", status="running")
+    workflow.roteiro_snapshot = {"titulo": "Video", "blocos": []}
+    workflow.blocos = []
+    workflow.transcricao = SimpleNamespace(
+        audio_sha256=workflow.audio_final_sha256,
+        palavras_timestamps=[
+            {"palavra": "one", "inicio": 0.0, "fim": 0.5},
+            {"palavra": "broken", "inicio": 0.2, "fim": 0.8},
+        ],
+    )
+    timeline = _timeline(workflow.id)
+    timeline.narration_alignment_id = uuid.uuid4()
+    composer = FakeComposer(_remote(workflow.id, timeline, "queued"))
+    service = _service(workflow, timeline, composer)
+
+    result = await service.process(workflow.id)
+
+    assert result.terminal
+    assert workflow.production_status == "failed"
+    assert workflow.production_phase == "render"
+    assert workflow.production_error_category == "presentation_input_invalid"
+    assert "reason=overlaps_previous_word" in workflow.production_error_message
+    record = next(
+        item for item in caplog.records if item.message == "presentation spec input rejected"
+    )
+    assert record.workflow_id == str(workflow.id)
+    assert record.alignment_id == str(timeline.narration_alignment_id)
+    assert record.timeline_id == str(timeline.id)
+    assert record.reason == "overlaps_previous_word"
+    assert record.word_index == 1
+    assert record.token == "broken"
+    assert record.start == 0.2
+    assert record.end == 0.8
+    assert record.previous_end == 0.5
+    assert record.word_duration_seconds == pytest.approx(0.6)
+    assert record.overlap_seconds == pytest.approx(0.3)
+    assert record.timeline_duration == 5.0
+
+
+@pytest.mark.asyncio
 async def test_explicit_cancelled_resume_reconciles_compatible_remote_completion() -> None:
     workflow = _workflow(phase="render", status="cancelled")
     timeline = _timeline(workflow.id)

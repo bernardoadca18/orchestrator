@@ -7,6 +7,8 @@ from typing import Literal
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.timestamp_contract import WORD_TIMESTAMP_TOLERANCE_SECONDS
+
 STATIC_IMAGE_MINIMUM_HOLD_SECONDS = 2.0
 STATIC_IMAGE_PREFERRED_HOLD_SECONDS = 5.0
 STATIC_IMAGE_MAXIMUM_HOLD_SECONDS = 8.0
@@ -116,7 +118,7 @@ class Settings(BaseSettings):
     narration_alignment_ambiguity_delta: float = 0.03
     narration_alignment_min_speech_coverage: float = 0.60
     narration_alignment_block_tolerance_seconds: float = 0.05
-    narration_alignment_timestamp_tolerance_seconds: float = 0.25
+    narration_alignment_timestamp_tolerance_seconds: float = WORD_TIMESTAMP_TOLERANCE_SECONDS
     narration_alignment_max_tokens: int = 2_500
     narration_alignment_max_cells: int = 2_000_000
     narration_quality_policy_version: str = "narration_speech_quality_v2"

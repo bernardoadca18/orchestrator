@@ -108,6 +108,37 @@ def test_invalid_timestamp_payload_is_rejected() -> None:
         )
 
 
+def test_alignment_and_presentation_share_bounded_overlap_contract() -> None:
+    validate_timed_words(
+        (TimedWord("one", 0.0, 0.5), TimedWord("two", 0.3, 0.8)),
+        duration_seconds=1.0,
+    )
+    validate_timed_words(
+        (TimedWord("point", 0.5, 0.5), TimedWord("after", 0.5, 0.8)),
+        duration_seconds=1.0,
+    )
+    with pytest.raises(AlignmentAlgorithmError, match="overlap exceeds"):
+        validate_timed_words(
+            (TimedWord("one", 0.0, 0.5), TimedWord("two", 0.249, 0.8)),
+            duration_seconds=1.0,
+        )
+    with pytest.raises(AlignmentAlgorithmError, match="no normalizable duration"):
+        validate_timed_words(
+            (TimedWord("one", 0.0, 0.5), TimedWord("nested", 0.4, 0.45)),
+            duration_seconds=1.0,
+        )
+    with pytest.raises(AlignmentAlgorithmError, match="no normalizable duration"):
+        validate_timed_words(
+            (TimedWord("point-at-eof", 1.0, 1.0),),
+            duration_seconds=1.0,
+        )
+    with pytest.raises(AlignmentAlgorithmError, match="duration exceeds"):
+        validate_timed_words(
+            (TimedWord("too-long", 0.0, 5.6),),
+            duration_seconds=6.0,
+        )
+
+
 def test_excerpt_matching_prefers_exact_then_normalized_then_fuzzy() -> None:
     canonical = "Quando Geralt aprende o primeiro sinal, Aard, tudo muda."
     literal = match_excerpt(canonical, "Geralt aprende o primeiro sinal")

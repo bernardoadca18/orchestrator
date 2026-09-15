@@ -14,6 +14,7 @@ from typing import Any, cast
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, settings
+from app.core.timestamp_contract import WORD_TIMESTAMP_TOLERANCE_SECONDS
 from app.models.workflow import (
     AudioBloco,
     NarrationAlignment,
@@ -87,9 +88,7 @@ def _script_identity(workflow: WorkflowExecucao) -> str:
                         "visual_beat_id": query.get("visual_beat_id"),
                         "coverage_start_char": query.get("coverage_start_char"),
                         "coverage_end_char": query.get("coverage_end_char"),
-                        "coverage_policy_version": query.get(
-                            "coverage_policy_version"
-                        ),
+                        "coverage_policy_version": query.get("coverage_policy_version"),
                     }
                     for query_index, query in enumerate(queries)
                     if isinstance(query, dict)
@@ -164,8 +163,9 @@ class NarrationAlignmentService:
         self.ambiguity_delta = config.narration_alignment_ambiguity_delta
         self.minimum_speech_coverage = config.narration_alignment_min_speech_coverage
         self.block_boundary_tolerance_seconds = config.narration_alignment_block_tolerance_seconds
-        self.transcription_tolerance_seconds = (
-            config.narration_alignment_timestamp_tolerance_seconds
+        self.transcription_tolerance_seconds = min(
+            config.narration_alignment_timestamp_tolerance_seconds,
+            WORD_TIMESTAMP_TOLERANCE_SECONDS,
         )
         self.max_tokens_per_sequence = config.narration_alignment_max_tokens
         self.max_alignment_cells = config.narration_alignment_max_cells
@@ -424,9 +424,7 @@ class NarrationAlignmentService:
                 coverage_start = query.get("coverage_start_char")
                 coverage_end = query.get("coverage_end_char")
                 if coverage_start is not None or coverage_end is not None:
-                    if not isinstance(coverage_start, int) or not isinstance(
-                        coverage_end, int
-                    ):
+                    if not isinstance(coverage_start, int) or not isinstance(coverage_end, int):
                         raise AlignmentAlgorithmError(
                             "host-owned visual coverage span must use integer offsets"
                         )
@@ -510,9 +508,7 @@ class NarrationAlignmentService:
             ContentCoverageSegment(
                 key=f"block:{block.ordem}",
                 reference_text=block.synthesis_text or block.texto,
-                hypothesis_text=" ".join(
-                    word.word for word in words_by_block.get(block.ordem, ())
-                ),
+                hypothesis_text=" ".join(word.word for word in words_by_block.get(block.ordem, ())),
             )
             for block in audio_blocks
         )
@@ -577,9 +573,7 @@ class NarrationAlignmentService:
             boundary = (left.narration_end_seconds + right.narration_start_seconds) / 2
             boundaries.append(max(boundaries[-1], min(boundary, block_end)))
         boundaries.append(block_end)
-        for item, start, end in zip(
-            ordered, boundaries[:-1], boundaries[1:], strict=True
-        ):
+        for item, start, end in zip(ordered, boundaries[:-1], boundaries[1:], strict=True):
             item.narration_start_seconds = start
             item.narration_end_seconds = end
             item.diagnostics = {
@@ -616,8 +610,7 @@ class NarrationAlignmentService:
                 or right.excerpt_match_method != "host_owned_span"
                 or left.narration_end_seconds is None
                 or right.narration_start_seconds is None
-                or (left.diagnostics or {}).get("timeline_projection")
-                != "host_owned_contiguous_v1"
+                or (left.diagnostics or {}).get("timeline_projection") != "host_owned_contiguous_v1"
                 or (right.diagnostics or {}).get("timeline_projection")
                 != "host_owned_contiguous_v1"
             ):

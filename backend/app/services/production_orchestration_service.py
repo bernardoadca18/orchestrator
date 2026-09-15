@@ -27,7 +27,7 @@ from app.repositories.workflow_render_repository import WorkflowRenderRepository
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
-from app.services.presentation_spec import build_presentation_spec
+from app.services.presentation_spec import PresentationInputError, build_presentation_spec
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
 from app.services.visual_director_service import VisualDirectorService
@@ -236,6 +236,29 @@ class ProductionOrchestrationService:
             current = await self.workflows.obter_por_id(workflow_id)
             if current is not None and not self._cancelled(current):
                 await self._fail(current, exc.category, str(exc))
+            return OrchestrationResult(terminal=True)
+        except PresentationInputError as exc:
+            current = await self.workflows.obter_por_id(workflow_id)
+            timeline = await self.timelines.current(workflow_id)
+            logger.error(
+                "presentation spec input rejected",
+                extra={
+                    "workflow_id": str(workflow_id),
+                    "alignment_id": (
+                        str(getattr(timeline, "narration_alignment_id", None))
+                        if timeline is not None
+                        and getattr(timeline, "narration_alignment_id", None)
+                        else None
+                    ),
+                    "timeline_id": str(timeline.id) if timeline is not None else None,
+                    "timeline_duration": (
+                        timeline.duration_seconds if timeline is not None else None
+                    ),
+                    **exc.log_fields,
+                },
+            )
+            if current is not None and not self._cancelled(current):
+                await self._fail(current, "presentation_input_invalid", str(exc))
             return OrchestrationResult(terminal=True)
         except Exception as exc:
             logger.exception(

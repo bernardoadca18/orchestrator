@@ -14,6 +14,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.core.timestamp_contract import (
+    MAX_CAPTION_WORD_DURATION_SECONDS,
+    MAX_WORD_OVERLAP_NORMALIZATION_SECONDS,
+    TIMESTAMP_EPSILON_SECONDS,
+    WORD_TIMESTAMP_TOLERANCE_SECONDS,
+)
 from app.models.workflow import WorkflowExecucao
 from app.schemas.workflow import (
     BrandingDisabledOut,
@@ -33,11 +39,14 @@ PRESENTATION_PROFILE_ID = "longform_professional_v1"
 class CaptionPolicy:
     max_line_chars: int = 42
     max_lines: int = 2
-    max_cue_seconds: float = 5.5
+    max_cue_seconds: float = MAX_CAPTION_WORD_DURATION_SECONDS
     preferred_min_seconds: float = 0.8
     pause_break_seconds: float = 0.75
     max_cues: int = 5000
     max_words: int = 50_000
+    timestamp_epsilon_seconds: float = TIMESTAMP_EPSILON_SECONDS
+    max_word_overlap_normalization_seconds: float = MAX_WORD_OVERLAP_NORMALIZATION_SECONDS
+    duration_tolerance_seconds: float = WORD_TIMESTAMP_TOLERANCE_SECONDS
 
 
 CAPTION_POLICY_V1 = CaptionPolicy()
@@ -47,7 +56,82 @@ _SENTENCE_END = re.compile(r"[.!?…][\"'\u201d\u2019\)\]]*$")
 
 
 class PresentationInputError(ValueError):
-    pass
+    """Compact, structured failure for a rejected presentation input."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str | None = None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        self.reason = reason
+        self.details = details or {}
+        suffix = " ".join(
+            f"{key}={json.dumps(value, ensure_ascii=False)}"
+            for key, value in self.details.items()
+            if value is not None
+        )
+        rendered = message
+        if reason:
+            rendered += f": reason={reason}"
+        if suffix:
+            rendered += f" {suffix}"
+        super().__init__(rendered)
+
+    @property
+    def log_fields(self) -> dict[str, object]:
+        return {"reason": self.reason, **self.details}
+
+
+def _timestamp_error(
+    *,
+    reason: str,
+    word_index: int,
+    token: str,
+    start: float,
+    end: float,
+    previous_start: float | None,
+    previous_end: float | None,
+    previous_normalized_end: float | None,
+    duration_seconds: float,
+    block_order: int | None,
+) -> PresentationInputError:
+    return PresentationInputError(
+        "caption word timestamp invalid",
+        reason=reason,
+        details={
+            "word_index": word_index,
+            "token": token,
+            "start": start,
+            "end": end,
+            "previous_start": previous_start,
+            "previous_end": previous_end,
+            "previous_normalized_end": previous_normalized_end,
+            "duration_seconds": duration_seconds,
+            "word_duration_seconds": end - start,
+            "overlap_seconds": (
+                max(0.0, previous_normalized_end - start)
+                if previous_normalized_end is not None
+                else 0.0
+            ),
+            "block_order": block_order,
+        },
+    )
+
+
+def _block_order_for_word(
+    start: float,
+    end: float,
+    block_ranges: list[tuple[int, float, float]] | None,
+) -> int | None:
+    if not block_ranges:
+        return None
+    midpoint = start + max(0.0, end - start) / 2
+    for order, block_start, block_end in block_ranges:
+        if block_start <= midpoint <= block_end:
+            return order
+    return None
 
 
 def canonical_hash(payload: object) -> str:
@@ -110,16 +194,19 @@ def segment_captions(
     *,
     duration_seconds: float,
     policy: CaptionPolicy = CAPTION_POLICY_V1,
+    block_ranges: list[tuple[int, float, float]] | None = None,
 ) -> list[CaptionCueOut]:
-    """Segment timestamped words without altering any source timing."""
+    """Segment words with bounded, local timing normalization for caption cues."""
 
     if not math.isfinite(duration_seconds) or duration_seconds <= 0:
         raise PresentationInputError("narration duration must be finite and positive")
     if len(raw_words) > policy.max_words:
         raise PresentationInputError("caption word limit exceeded")
     parsed: list[tuple[str, float, float]] = []
-    previous_end = 0.0
-    for raw in raw_words:
+    previous_start: float | None = None
+    previous_end: float | None = None
+    previous_normalized_end: float | None = None
+    for word_index, raw in enumerate(raw_words):
         if not isinstance(raw, dict):
             raise PresentationInputError("caption word payload must be an object")
         try:
@@ -128,18 +215,74 @@ def segment_captions(
             end = float(raw["fim"])
         except (KeyError, TypeError, ValueError) as exc:
             raise PresentationInputError("caption word payload is malformed") from exc
-        if (
-            not math.isfinite(start)
-            or not math.isfinite(end)
-            or start < 0
-            or end <= start
-            or end > duration_seconds
-            or start < previous_end
-            or end - start > policy.max_cue_seconds
-        ):
-            raise PresentationInputError("caption word timestamps are invalid")
-        parsed.append((token, start, end))
+        block_order = _block_order_for_word(start, end, block_ranges)
+        reason = None
+        if not math.isfinite(start):
+            reason = "non_finite_start"
+        elif not math.isfinite(end):
+            reason = "non_finite_end"
+        elif start < 0:
+            reason = "negative_start"
+        elif end < start:
+            reason = "end_not_after_start"
+        elif end > duration_seconds + policy.duration_tolerance_seconds:
+            reason = "end_exceeds_duration"
+        elif end - start > policy.max_cue_seconds:
+            reason = "word_duration_exceeds_policy"
+        if reason:
+            raise _timestamp_error(
+                reason=reason,
+                word_index=word_index,
+                token=token,
+                start=start,
+                end=end,
+                previous_start=previous_start,
+                previous_end=previous_end,
+                previous_normalized_end=previous_normalized_end,
+                duration_seconds=duration_seconds,
+                block_order=block_order,
+            )
+
+        normalized_end = min(end, duration_seconds)
+        if normalized_end == start:
+            normalized_end = min(
+                duration_seconds,
+                start + policy.timestamp_epsilon_seconds,
+            )
+        normalized_start = start
+        if previous_normalized_end is not None and normalized_start < previous_normalized_end:
+            overlap = previous_normalized_end - normalized_start
+            if overlap > policy.max_word_overlap_normalization_seconds:
+                raise _timestamp_error(
+                    reason="overlaps_previous_word",
+                    word_index=word_index,
+                    token=token,
+                    start=start,
+                    end=end,
+                    previous_start=previous_start,
+                    previous_end=previous_end,
+                    previous_normalized_end=previous_normalized_end,
+                    duration_seconds=duration_seconds,
+                    block_order=block_order,
+                )
+            normalized_start = previous_normalized_end
+        if normalized_end <= normalized_start:
+            raise _timestamp_error(
+                reason="end_not_after_normalization",
+                word_index=word_index,
+                token=token,
+                start=start,
+                end=end,
+                previous_start=previous_start,
+                previous_end=previous_end,
+                previous_normalized_end=previous_normalized_end,
+                duration_seconds=duration_seconds,
+                block_order=block_order,
+            )
+        parsed.append((token, normalized_start, normalized_end))
+        previous_start = start
         previous_end = end
+        previous_normalized_end = normalized_end
 
     cues: list[CaptionCueOut] = []
     current: list[tuple[str, float, float]] = []
@@ -245,6 +388,15 @@ def build_presentation_spec(
     cues = segment_captions(
         transcription.palavras_timestamps,
         duration_seconds=duration_seconds,
+        block_ranges=[
+            (
+                block.ordem,
+                float(block.narration_start_seconds),
+                float(block.narration_end_seconds),
+            )
+            for block in (workflow.blocos or [])
+            if block.narration_start_seconds is not None and block.narration_end_seconds is not None
+        ],
     )
     section_titles = _explicit_section_titles(workflow, duration_seconds=duration_seconds)
     transitions = [

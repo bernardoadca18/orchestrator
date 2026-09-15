@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.schemas.workflow import PresentationSpecOut
 from app.services.presentation_spec import (
+    CAPTION_POLICY_V1,
     PresentationInputError,
     build_presentation_spec,
     canonical_hash,
@@ -17,6 +18,9 @@ from app.services.presentation_spec import (
 )
 
 FIXTURE = Path(__file__).parent / "fixtures" / "presentation_spec_v1_contract.json"
+REAL_ZERO_DURATION_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "real_presentation_zero_duration_words.json"
+)
 
 
 def _words(*values: tuple[str, float, float]) -> list[dict]:
@@ -116,18 +120,94 @@ def test_caption_policy_long_phrase_uses_at_most_two_bounded_lines() -> None:
 
 
 @pytest.mark.parametrize(
-    "words,duration",
+    ("words", "duration", "reason"),
     [
-        (_words(("bad", -0.1, 0.2)), 1.0),
-        (_words(("bad", 0.4, 0.3)), 1.0),
-        (_words(("one", 0.0, 0.5), ("overlap", 0.4, 0.8)), 1.0),
-        (_words(("late", 0.8, 1.1)), 1.0),
-        ([{"palavra": "missing", "inicio": 0.0}], 1.0),
+        (_words(("bad", -0.1, 0.2)), 1.0, "negative_start"),
+        (_words(("bad", 0.4, 0.3)), 1.0, "end_not_after_start"),
+        (
+            _words(("one", 0.0, 0.5), ("overlap", 0.249, 0.8)),
+            1.0,
+            "overlaps_previous_word",
+        ),
+        (_words(("late", 0.8, 1.251)), 1.0, "end_exceeds_duration"),
+        (_words(("long", 0.0, 5.6)), 6.0, "word_duration_exceeds_policy"),
+        (_words(("nan", float("nan"), 0.2)), 1.0, "non_finite_start"),
+        (_words(("inf", 0.0, float("inf"))), 1.0, "non_finite_end"),
     ],
 )
-def test_caption_policy_rejects_invalid_timestamps(words: list[dict], duration: float) -> None:
-    with pytest.raises(PresentationInputError):
+def test_caption_policy_rejects_invalid_timestamps(
+    words: list[dict], duration: float, reason: str
+) -> None:
+    with pytest.raises(PresentationInputError) as error:
         segment_captions(words, duration_seconds=duration)
+    assert error.value.reason == reason
+    assert error.value.details["word_index"] == len(words) - 1
+    assert reason in str(error.value)
+
+
+def test_caption_policy_reports_malformed_payload_separately() -> None:
+    with pytest.raises(PresentationInputError, match="payload is malformed"):
+        segment_captions([{"palavra": "missing", "inicio": 0.0}], duration_seconds=1.0)
+
+
+def test_tiny_overlap_is_normalized_without_mutating_source_words() -> None:
+    words = _words(("one", 0.0, 0.5), ("two", 0.4995, 0.8))
+    original = [dict(item) for item in words]
+    cues = segment_captions(words, duration_seconds=1.0)
+    assert words == original
+    assert cues[0].start_seconds == 0.0
+    assert cues[0].end_seconds == 0.8
+
+
+def test_tiny_end_over_duration_is_clamped_but_material_overrun_fails() -> None:
+    cues = segment_captions(
+        _words(("fim.", 0.8, 1.0005)),
+        duration_seconds=1.0,
+    )
+    assert cues[0].end_seconds == 1.0
+    with pytest.raises(PresentationInputError) as error:
+        segment_captions(
+            _words(("fim.", 0.8, 1.0 + CAPTION_POLICY_V1.duration_tolerance_seconds + 0.001)),
+            duration_seconds=1.0,
+        )
+    assert error.value.reason == "end_exceeds_duration"
+
+
+def test_real_zero_duration_failure_shape_gets_only_bounded_derived_timing() -> None:
+    words = json.loads(REAL_ZERO_DURATION_FIXTURE.read_text(encoding="utf-8"))
+    assert [
+        (item["word_index"], item["palavra"]) for item in words if item["inicio"] == item["fim"]
+    ] == [
+        (680, "explicar,"),
+        (1764, "se"),
+    ]
+    original = [dict(item) for item in words]
+    first = segment_captions(words, duration_seconds=876.32)
+    second = segment_captions(words, duration_seconds=876.32)
+    assert words == original
+    assert first == second
+    assert any("explicar," in cue.text for cue in first)
+    assert any("se a Rockstar" in cue.text for cue in first)
+
+
+def test_zero_duration_at_physical_end_remains_invalid() -> None:
+    with pytest.raises(PresentationInputError) as error:
+        segment_captions(_words(("fim", 1.0, 1.0)), duration_seconds=1.0)
+    assert error.value.reason == "end_not_after_normalization"
+
+
+def test_cross_block_boundary_is_deterministic_after_point_normalization() -> None:
+    words = _words(
+        ("primeiro.", 0.0, 1.0),
+        ("limite", 1.0, 1.0),
+        ("seguinte.", 1.0, 1.4),
+    )
+    ranges = [(0, 0.0, 1.0), (1, 1.0, 2.0)]
+    first = segment_captions(words, duration_seconds=2.0, block_ranges=ranges)
+    second = segment_captions(words, duration_seconds=2.0, block_ranges=ranges)
+    assert first == second
+    assert [cue.text for cue in first] == ["primeiro.", "limite seguinte."]
+    assert first[1].start_seconds == 1.0
 
 
 def test_cue_may_end_exactly_at_audio_duration() -> None:

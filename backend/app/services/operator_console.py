@@ -312,6 +312,10 @@ class OperatorConsoleService:
         projection_error: str | None = None
         try:
             render = await self.production.current_render(workflow.id)
+        except PresentationInputError as exc:
+            projection_error = (
+                f"Presentation indisponível ({exc.reason or 'presentation_input_invalid'})."
+            )
         except ProgramAudioError as exc:
             projection_error = f"Program Audio indisponível ({exc.category})."
         qa = await self._current_qa(workflow.id, render)

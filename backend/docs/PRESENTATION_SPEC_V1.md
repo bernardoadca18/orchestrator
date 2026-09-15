@@ -12,9 +12,13 @@ historical rendering behavior.
 
 caption_policy_v1 consumes only TranscricaoAudio.palavras_timestamps after verifying
 TranscricaoAudio.audio_sha256 == WorkflowExecucao.audio_final_sha256. It validates finite,
-monotonic, non-overlapping word ranges within physical narration duration. Segmentation uses fixed
-pause, duration, punctuation, and two-line/42-character limits. Cue timings are the first and last
-source-word timings; no timing is invented and no ASR or LLM is called.
+monotonic word ranges against the same 250 ms bound used by NarrationAlignment. Caption projection
+does not mutate canonical ASR evidence: exact zero-duration points caused by millisecond persistence
+rounding receive a derived 1 ms interval, overlaps up to 250 ms advance only the derived start, and
+ends up to 250 ms beyond physical narration duration are clamped. A correction that consumes the
+word interval, or any larger violation, remains a hard input failure with structured diagnostics.
+Segmentation uses fixed pause, duration, punctuation, and two-line/42-character limits. No ASR or
+LLM is called.
 
 ## Titles, branding, and transitions
 

@@ -16,6 +16,12 @@ from collections import Counter
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 
+from app.core.timestamp_contract import (
+    MAX_CAPTION_WORD_DURATION_SECONDS,
+    TIMESTAMP_EPSILON_SECONDS,
+    WORD_TIMESTAMP_TOLERANCE_SECONDS,
+)
+
 TOKEN_PATTERN = re.compile(r"\w+(?:['\u2019]\w+)*", re.UNICODE)
 APOSTROPHE_TRANSLATION = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'"})
 
@@ -65,9 +71,7 @@ class AlignmentWindow:
 
     @property
     def cells(self) -> int:
-        return (self.source_end - self.source_start) * (
-            self.target_end - self.target_start
-        )
+        return (self.source_end - self.source_start) * (self.target_end - self.target_start)
 
 
 @dataclass(frozen=True)
@@ -322,9 +326,7 @@ def align_token_sequences_bounded(
         )
         for local_source, local_target in enumerate(local.source_to_target):
             if local_target is not None:
-                mapping[window.source_start + local_source] = (
-                    window.target_start + local_target
-                )
+                mapping[window.source_start + local_source] = window.target_start + local_target
     matched = sum(index is not None for index in mapping)
     return BoundedSequenceAlignment(
         source_to_target=tuple(mapping),
@@ -370,9 +372,7 @@ def _monotonic_unique_anchors(
     source_counts = Counter(source_ngrams)
     target_counts = Counter(target_ngrams)
     target_positions = {
-        ngram: index
-        for index, ngram in enumerate(target_ngrams)
-        if target_counts[ngram] == 1
+        ngram: index for index, ngram in enumerate(target_ngrams) if target_counts[ngram] == 1
     }
     candidates = [
         (source_index, target_positions[ngram])
@@ -485,23 +485,25 @@ def _coalesce_windows(
         )
         source_count = window.source_end - previous.source_start
         target_count = window.target_end - previous.target_start
-        same_evidence = (
-            previous.method == "proportional_fallback"
-        ) == (window.method == "proportional_fallback")
-        if contiguous and same_evidence and _window_fits(
-            source_count,
-            target_count,
-            max_tokens=coalesced_max_tokens,
-            max_cells=coalesced_max_cells,
+        same_evidence = (previous.method == "proportional_fallback") == (
+            window.method == "proportional_fallback"
+        )
+        if (
+            contiguous
+            and same_evidence
+            and _window_fits(
+                source_count,
+                target_count,
+                max_tokens=coalesced_max_tokens,
+                max_cells=coalesced_max_cells,
+            )
         ):
             result[-1] = AlignmentWindow(
                 previous.source_start,
                 window.source_end,
                 previous.target_start,
                 window.target_end,
-                "proportional_fallback"
-                if window.method == "proportional_fallback"
-                else "anchored",
+                "proportional_fallback" if window.method == "proportional_fallback" else "anchored",
             )
         else:
             result.append(window)
@@ -512,7 +514,7 @@ def validate_timed_words(
     words: tuple[TimedWord, ...],
     *,
     duration_seconds: float,
-    tolerance_seconds: float = 0.25,
+    tolerance_seconds: float = WORD_TIMESTAMP_TOLERANCE_SECONDS,
     max_words: int = 250_000,
 ) -> None:
     if not math.isfinite(duration_seconds) or duration_seconds <= 0:
@@ -520,6 +522,7 @@ def validate_timed_words(
     if len(words) > max_words:
         raise AlignmentAlgorithmError("transcription contains too many words")
     previous_start = -1.0
+    previous_normalized_end: float | None = None
     for word in words:
         if not word.word.strip():
             raise AlignmentAlgorithmError("transcription contains an empty word")
@@ -531,7 +534,28 @@ def validate_timed_words(
             raise AlignmentAlgorithmError("transcription words are not ordered by start time")
         if word.end_seconds > duration_seconds + tolerance_seconds:
             raise AlignmentAlgorithmError("transcription word exceeds final narration duration")
+        if word.end_seconds - word.start_seconds > MAX_CAPTION_WORD_DURATION_SECONDS:
+            raise AlignmentAlgorithmError("transcription word duration exceeds the caption policy")
+
+        normalized_end = min(word.end_seconds, duration_seconds)
+        if normalized_end == word.start_seconds:
+            normalized_end = min(
+                duration_seconds,
+                word.start_seconds + TIMESTAMP_EPSILON_SECONDS,
+            )
+        normalized_start = word.start_seconds
+        if previous_normalized_end is not None and normalized_start < previous_normalized_end:
+            if normalized_start + tolerance_seconds < previous_normalized_end:
+                raise AlignmentAlgorithmError(
+                    "transcription word overlap exceeds the timestamp tolerance"
+                )
+            normalized_start = previous_normalized_end
+        if normalized_end <= normalized_start:
+            raise AlignmentAlgorithmError(
+                "transcription word overlap leaves no normalizable duration"
+            )
         previous_start = word.start_seconds
+        previous_normalized_end = normalized_end
 
 
 def partition_words_by_block(
