@@ -115,6 +115,7 @@ export interface RevisionPreparation {
   roteiro_id: string;
   parent_roteiro_id: string | null;
   versao: number;
+  revision_kind: string;
   status: string;
   production_readiness: ProductionReadiness;
 }
@@ -516,6 +517,8 @@ export const api = {
     request<RevisionReadiness>(`/workflow/roteiros/${id}/production-readiness`, { signal }),
   aprovarRevisao: (id: string) =>
     request<RevisionPreparation>(`/workflow/roteiros/${id}/aprovar`, { method: "PATCH" }),
+  prepararProducao: (id: string) =>
+    request<RevisionPreparation>(`/workflow/roteiros/${id}/preparar-producao`, { method: "POST" }),
   listarProjetosMidia: (signal?: AbortSignal) =>
     request<MediaProject[]>("/workflow/media-projects", { signal }),
   listarSessoesMidia: (projectId: string, signal?: AbortSignal) =>

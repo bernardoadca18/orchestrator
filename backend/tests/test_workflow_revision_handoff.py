@@ -12,8 +12,15 @@ from app.api.routers.workflow import (
     aprovar_revisao_para_producao,
     criar_workflow,
     listar_roteiros_disponiveis,
+    preparar_visual_queries_para_producao,
     production_readiness_blockers,
     vincular_midia_para_producao,
+)
+from app.clients.ideas_hub_client import (
+    IdeasHubClientError,
+    IdeasHubContractError,
+    IdeasHubNotFoundError,
+    IdeasHubTransientError,
 )
 from app.clients.media_indexer_search import (
     MediaProjectMetadata,
@@ -164,9 +171,7 @@ async def test_media_scope_missing_returns_configure_media_without_workflow() ->
             media=False,
         )
     )
-    hub.obter_production_readiness = AsyncMock(
-        return_value=_readiness("media_scope_missing")
-    )
+    hub.obter_production_readiness = AsyncMock(return_value=_readiness("media_scope_missing"))
     repository = MagicMock()
     repository.criar = AsyncMock()
 
@@ -200,9 +205,7 @@ async def test_inline_approval_targets_exact_historical_revision() -> None:
     )
     hub = MagicMock()
     hub.aprovar_roteiro = AsyncMock(return_value=script)
-    hub.obter_production_readiness = AsyncMock(
-        return_value=_readiness("media_scope_missing")
-    )
+    hub.obter_production_readiness = AsyncMock(return_value=_readiness("media_scope_missing"))
 
     with patch("app.api.routers.workflow.ideas_hub_client", hub):
         result = await aprovar_revisao_para_producao(script_id)
@@ -422,3 +425,73 @@ async def test_visual_not_ready_remains_a_strict_blocker() -> None:
     assert caught.value.status_code == 409
     assert caught.value.detail["blockers"][0]["action"] == "REVIEW_VISUAL_ISSUES"
     repository.criar.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_visual_preparation_forwards_exact_id_and_returns_typed_child() -> None:
+    parent_id = uuid.uuid4()
+    child_id = uuid.uuid4()
+    child = _script(
+        script_id=child_id,
+        idea_id=uuid.uuid4(),
+        version=6,
+        status="aprovado",
+        media=True,
+    )
+    child["parent_roteiro_id"] = str(parent_id)
+    child["revision_kind"] = "visual_enrichment"
+    hub = MagicMock()
+    hub.preparar_producao = AsyncMock(return_value=child)
+    hub.obter_production_readiness = AsyncMock(return_value=_readiness())
+    hub.vincular_midia = AsyncMock()
+
+    with (
+        patch("app.api.routers.workflow.ideas_hub_client", hub),
+        patch("app.api.routers.workflow.WorkflowRepository") as repository,
+    ):
+        result = await preparar_visual_queries_para_producao(parent_id)
+
+    assert result.roteiro_id == child_id
+    assert result.parent_roteiro_id == parent_id
+    assert result.versao == 6
+    assert result.revision_kind == "visual_enrichment"
+    assert result.status == "aprovado"
+    assert result.production_readiness["status"] == "ready"
+    hub.preparar_producao.assert_awaited_once_with(parent_id)
+    hub.obter_production_readiness.assert_awaited_once_with(child_id)
+    hub.vincular_midia.assert_not_awaited()
+    repository.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_detail"),
+    [
+        (IdeasHubNotFoundError("missing"), 404, "Revisão não encontrada"),
+        (
+            IdeasHubTransientError("offline"),
+            503,
+            "Visual Enrichment está indisponível",
+        ),
+        (IdeasHubContractError("malformed"), 502, "revisão visual inválida"),
+        (IdeasHubClientError("validation detail"), 409, "validation detail"),
+    ],
+)
+async def test_visual_preparation_maps_upstream_failures_actionably(
+    failure: Exception,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    hub = MagicMock()
+    hub.preparar_producao = AsyncMock(side_effect=failure)
+    hub.obter_production_readiness = AsyncMock()
+
+    with (
+        patch("app.api.routers.workflow.ideas_hub_client", hub),
+        pytest.raises(HTTPException) as caught,
+    ):
+        await preparar_visual_queries_para_producao(uuid.uuid4())
+
+    assert caught.value.status_code == expected_status
+    assert expected_detail in str(caught.value.detail)
+    hub.obter_production_readiness.assert_not_awaited()

@@ -182,3 +182,46 @@ async def test_media_binding_mutation_is_single_attempt_and_preserves_scope() ->
         settings(retries=3), transport=httpx.MockTransport(handler)
     ).vincular_midia(script_id, scope)
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_visual_enrichment_uses_exact_revision_and_validates_child_lineage() -> None:
+    script_id = uuid.uuid4()
+    child = script_payload()
+    child["parent_roteiro_id"] = str(script_id)
+    child["revision_kind"] = "visual_enrichment"
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.method == "POST"
+        assert request.url.path == f"/roteiros/{script_id}/preparar-producao"
+        return httpx.Response(201, json=child)
+
+    result = await IdeasHubClient(
+        settings(retries=3), transport=httpx.MockTransport(handler)
+    ).preparar_producao(script_id)
+
+    assert calls == 1
+    assert result["id"] == child["id"]
+    assert result["parent_roteiro_id"] == str(script_id)
+    assert result["revision_kind"] == "visual_enrichment"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"status": "ok"},
+        {**script_payload(), "revision_kind": "human_edit"},
+    ],
+)
+async def test_visual_enrichment_rejects_malformed_or_invalid_upstream_revision(
+    payload: dict,
+) -> None:
+    script_id = uuid.uuid4()
+    transport = httpx.MockTransport(lambda request: httpx.Response(201, json=payload))
+
+    with pytest.raises(IdeasHubContractError):
+        await IdeasHubClient(settings(), transport=transport).preparar_producao(script_id)

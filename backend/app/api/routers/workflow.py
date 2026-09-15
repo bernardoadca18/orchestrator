@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients.ideas_hub_client import (
     IdeasHubClientError,
+    IdeasHubContractError,
     IdeasHubNotFoundError,
     IdeasHubTransientError,
     ideas_hub_client,
@@ -569,13 +570,8 @@ async def listar_roteiros_disponiveis():
     latest_versions: dict[str, int] = {}
     for script in roteiros:
         idea_id = str(script["ideia_id"])
-        latest_versions[idea_id] = max(
-            latest_versions.get(idea_id, 0), int(script["versao"])
-        )
-    return [
-        _available_script(script, latest_versions)
-        for script in roteiros
-    ]
+        latest_versions[idea_id] = max(latest_versions.get(idea_id, 0), int(script["versao"]))
+    return [_available_script(script, latest_versions) for script in roteiros]
 
 
 @router.get("/roteiros/{roteiro_id}/production-readiness")
@@ -609,6 +605,7 @@ async def aprovar_revisao_para_producao(roteiro_id: uuid.UUID):
         roteiro_id=script["id"],
         parent_roteiro_id=script.get("parent_roteiro_id"),
         versao=script["versao"],
+        revision_kind=script["revision_kind"],
         status=script["status"],
         production_readiness=readiness,
     )
@@ -634,9 +631,7 @@ async def listar_projetos_de_midia():
 )
 async def listar_sessoes_de_midia(project_id: uuid.UUID):
     try:
-        sessions = await MediaIndexerSearchProvider(settings).list_project_sessions(
-            project_id
-        )
+        sessions = await MediaIndexerSearchProvider(settings).list_project_sessions(project_id)
     except MediaIndexerUnavailableError as exc:
         raise HTTPException(503, "Media Indexer indisponível") from exc
     except MediaIndexerError as exc:
@@ -722,7 +717,41 @@ async def vincular_midia_para_producao(
         roteiro_id=bound_id,
         parent_roteiro_id=bound.get("parent_roteiro_id"),
         versao=bound["versao"],
+        revision_kind=bound["revision_kind"],
         status=bound["status"],
+        production_readiness=readiness,
+    )
+
+
+@router.post(
+    "/roteiros/{roteiro_id}/preparar-producao",
+    response_model=RevisionPreparationOut,
+    status_code=201,
+)
+async def preparar_visual_queries_para_producao(roteiro_id: uuid.UUID):
+    """Proxy the exact immutable revision to Ideas Hub visual enrichment."""
+
+    try:
+        enriched = await ideas_hub_client.preparar_producao(roteiro_id)
+        enriched_id = uuid.UUID(str(enriched["id"]))
+        readiness = await ideas_hub_client.obter_production_readiness(enriched_id)
+    except IdeasHubNotFoundError as exc:
+        raise HTTPException(404, "Revisão não encontrada no Ideas Hub") from exc
+    except IdeasHubTransientError as exc:
+        raise HTTPException(
+            503,
+            "O serviço responsável pelo Visual Enrichment está indisponível.",
+        ) from exc
+    except IdeasHubContractError as exc:
+        raise HTTPException(502, "Ideas Hub retornou uma revisão visual inválida") from exc
+    except IdeasHubClientError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RevisionPreparationOut(
+        roteiro_id=enriched_id,
+        parent_roteiro_id=enriched.get("parent_roteiro_id"),
+        versao=enriched["versao"],
+        revision_kind=enriched["revision_kind"],
+        status=enriched["status"],
         production_readiness=readiness,
     )
 

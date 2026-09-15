@@ -15,6 +15,12 @@ import {
   hasReadinessIssue,
   isHistoricalRevision,
 } from "./productionSetup";
+import { VisualQueriesActionPanel } from "./VisualQueriesActionPanel";
+import {
+  hasMissingVisualQueries,
+  visualQueriesFailure,
+  VisualQueriesPreparationFlight,
+} from "./visualQueriesPreparation";
 
 export default function NewProductionPage() {
   const navigate = useNavigate();
@@ -29,7 +35,10 @@ export default function NewProductionPage() {
   const [preparing, setPreparing] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [visualServiceUnavailable, setVisualServiceUnavailable] = useState(false);
   const [flight] = useState(() => new SingleFlightAction());
+  const [visualFlight] = useState(() => new VisualQueriesPreparationFlight());
   const selected = useMemo(
     () => scripts.find((script) => script.id === selectedId) ?? null,
     [scripts, selectedId],
@@ -140,6 +149,30 @@ export default function NewProductionPage() {
     }
   }
 
+  async function prepareVisualQueries(script: RoteiroDisponivel) {
+    setPreparing(true);
+    setError(null);
+    setSuccess(null);
+    setVisualServiceUnavailable(false);
+    try {
+      const prepared = await visualFlight.run(script.id, {
+        prepare: api.prepararProducao,
+        list: api.listarRoteirosDisponiveis,
+        readiness: api.obterReadinessRevisao,
+      });
+      setScripts(prepared.scripts);
+      setSelectedId(prepared.selectedId);
+      setReadiness(prepared.readiness);
+      setSuccess("VisualQueries geradas com sucesso. Nova revisão visual selecionada automaticamente.");
+    } catch (reason) {
+      const failure = visualQueriesFailure(reason);
+      setError(failure.message);
+      setVisualServiceUnavailable(failure.serviceUnavailable);
+    } finally {
+      setPreparing(false);
+    }
+  }
+
   async function create(script: RoteiroDisponivel) {
     if (!confirmHistorical(script, "usar esta revisão")) return;
     setSubmitting(true);
@@ -157,6 +190,7 @@ export default function NewProductionPage() {
   const report = readiness?.production_readiness ?? null;
   const mediaMissing = hasReadinessIssue(report, "media_scope_missing");
   const visualMissing = hasReadinessIssue(report, "visual_readiness_not_ready");
+  const visualQueriesMissing = hasMissingVisualQueries(report);
 
   return <div className="page narrow-page">
     <PageHeader
@@ -164,12 +198,22 @@ export default function NewProductionPage() {
       description="Escolha uma revisão imutável exata. A mais recente é apenas o default; gates técnicos continuam obrigatórios."
     />
     {error && <Alert tone="danger">{error}</Alert>}
+    {success && <Alert tone="success">{success}</Alert>}
     {loading ? <LoadingState /> : scripts.length === 0 ? (
       <EmptyState title="Nenhum roteiro disponível" detail="O Ideas Hub pode estar offline ou ainda não há revisões." />
     ) : <>
       <Card title="1. Escolher revisão">
         <label htmlFor="production-revision">Roteiro e revisão</label>
-        <select id="production-revision" value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
+        <select
+          id="production-revision"
+          value={selectedId}
+          disabled={preparing || submitting}
+          onChange={(event) => {
+            setSelectedId(event.target.value);
+            setSuccess(null);
+            setVisualServiceUnavailable(false);
+          }}
+        >
           {scripts.map((script) => (
             <option key={script.id} value={script.id}>
               {script.titulo} · v{script.versao} · {script.revision_kind} · {script.status}{script.is_latest ? " · mais recente" : ""}
@@ -226,7 +270,12 @@ export default function NewProductionPage() {
             </button>
           </div>}
 
-          {visualMissing && <p>A estrutura visual permanece bloqueada; corrija os issues exibidos antes da produção.</p>}
+          {visualQueriesMissing && <VisualQueriesActionPanel
+            preparing={preparing}
+            serviceUnavailable={visualServiceUnavailable}
+            onGenerate={() => void prepareVisualQueries(selected)}
+          />}
+          {visualMissing && !visualQueriesMissing && <p>A estrutura visual permanece bloqueada; corrija os issues exibidos antes da produção.</p>}
         </>}
       </Card>}
 

@@ -208,6 +208,26 @@ class IdeasHubClient:
         except (ValidationError, ValueError, TypeError) as exc:
             raise IdeasHubContractError("Ideas Hub media binding response is malformed") from exc
 
+    async def preparar_producao(self, roteiro_id: uuid.UUID) -> dict[str, Any]:
+        """Create one visual-enrichment child through the canonical Ideas Hub action."""
+
+        response = await self._mutate("POST", f"/roteiros/{roteiro_id}/preparar-producao")
+        try:
+            script = IdeasHubScript.model_validate(response.json())
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise IdeasHubContractError(
+                "Ideas Hub visual enrichment response is malformed"
+            ) from exc
+        if (
+            script.id == roteiro_id
+            or script.parent_roteiro_id != roteiro_id
+            or script.revision_kind != "visual_enrichment"
+        ):
+            raise IdeasHubContractError(
+                "Ideas Hub visual enrichment response has invalid revision lineage"
+            )
+        return script.model_dump(mode="json")
+
     async def obter_roteiro(self, roteiro_id: uuid.UUID) -> dict[str, Any]:
         response = await self._get(f"/roteiros/{roteiro_id}")
         try:

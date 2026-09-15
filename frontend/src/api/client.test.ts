@@ -58,6 +58,29 @@ test("explicit production resume uses the canonical operator endpoint", async ()
   assert.equal(result.production_phase, "render");
 });
 
+test("VisualQueries preparation uses the exact selected revision proxy", async () => {
+  let requestedUrl = "";
+  let requestedInit: RequestInit | undefined;
+  globalThis.fetch = async (input, init) => {
+    requestedUrl = String(input);
+    requestedInit = init;
+    return new Response(JSON.stringify({
+      roteiro_id: "v6",
+      parent_roteiro_id: "v5",
+      versao: 6,
+      revision_kind: "visual_enrichment",
+      status: "aprovado",
+      production_readiness: {},
+    }), { status: 201, headers: { "Content-Type": "application/json" } });
+  };
+
+  const result = await api.prepararProducao("v5");
+
+  assert.match(requestedUrl, /\/workflow\/roteiros\/v5\/preparar-producao$/);
+  assert.equal(requestedInit?.method, "POST");
+  assert.equal(result.roteiro_id, "v6");
+});
+
 test("network failures retain their category", async () => {
   globalThis.fetch = async () => { throw new TypeError("offline"); };
 

@@ -54,6 +54,7 @@ class RevisionPreparationOut(BaseModel):
     roteiro_id: uuid.UUID
     parent_roteiro_id: uuid.UUID | None = None
     versao: int
+    revision_kind: str
     status: str
     production_readiness: dict[str, Any]
 
