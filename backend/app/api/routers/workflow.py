@@ -13,7 +13,17 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients.ideas_hub_client import ideas_hub_client
+from app.clients.ideas_hub_client import (
+    IdeasHubClientError,
+    IdeasHubNotFoundError,
+    IdeasHubTransientError,
+    ideas_hub_client,
+)
+from app.clients.media_indexer_search import (
+    MediaIndexerError,
+    MediaIndexerSearchProvider,
+    MediaIndexerUnavailableError,
+)
 from app.clients.video_composer_client import (
     VideoComposerClient,
     VideoComposerConflictError,
@@ -51,7 +61,9 @@ from app.schemas.workflow import (
     AudioEditUpdateOut,
     ComposerRenderInputPackageOut,
     ComposerRenderInputPackageV2Out,
+    MediaProjectOut,
     MediaScopeOut,
+    MediaSessionOut,
     NarrationAlignmentEnsureOut,
     NarrationBlockAlignmentOut,
     NarrationTimelineAudioOut,
@@ -65,6 +77,7 @@ from app.schemas.workflow import (
     ProductionTimelineEnsureOut,
     ProductionTimelineOut,
     ProductionTimelineTracksOut,
+    RevisionPreparationOut,
     RoteiroDisponivelOut,
     TimelineGapOut,
     TimelinePlacementOut,
@@ -77,6 +90,7 @@ from app.schemas.workflow import (
     VisualSourceSelectionOut,
     WorkflowCreateIn,
     WorkflowDetailOut,
+    WorkflowMediaBindingIn,
     WorkflowOut,
     WorkflowRenderErrorOut,
     WorkflowRenderOut,
@@ -136,6 +150,58 @@ from app.tasks.production_tasks import processar_producao_workflow
 router = APIRouter()
 VISUAL_SOURCE_ADAPTER: TypeAdapter[Any] = TypeAdapter(VisualSourceSelectionOut)
 TIMELINE_SOURCE_ADAPTER: TypeAdapter[Any] = TypeAdapter(TimelineSourceOut)
+
+
+def production_readiness_blockers(readiness: dict[str, Any]) -> list[dict[str, Any]]:
+    """Translate strict readiness codes into bounded operator actions."""
+
+    actions = {
+        "editorial_approval_missing": (
+            "Esta revisão ainda não foi aprovada.",
+            "APPROVE_REVISION",
+        ),
+        "media_scope_missing": (
+            "Configure o escopo de mídia antes de iniciar a produção.",
+            "CONFIGURE_MEDIA",
+        ),
+        "visual_readiness_not_ready": (
+            "A estrutura visual desta revisão ainda não está pronta.",
+            "REVIEW_VISUAL_ISSUES",
+        ),
+    }
+    blockers = []
+    for issue in readiness.get("issues", []):
+        code = str(issue.get("code") or "unknown")
+        message, action = actions.get(
+            code,
+            ("Esta revisão possui um requisito técnico pendente.", "REVIEW_ISSUE"),
+        )
+        blocker: dict[str, Any] = {"code": code, "message": message, "action": action}
+        if code == "visual_readiness_not_ready":
+            blocker["details"] = readiness.get("visual", {}).get("issues", [])
+        blockers.append(blocker)
+    return blockers
+
+
+def _available_script(
+    script: dict[str, Any], latest_versions: dict[str, int]
+) -> RoteiroDisponivelOut:
+    structure = script["estrutura"]
+    idea_id = str(script["ideia_id"])
+    return RoteiroDisponivelOut(
+        id=script["id"],
+        ideia_id=script["ideia_id"],
+        versao=script["versao"],
+        titulo=structure["titulo"],
+        duracao_total_segundos=structure["duracao_total_segundos"],
+        num_blocos=len(structure["blocos"]),
+        parent_roteiro_id=script.get("parent_roteiro_id"),
+        revision_kind=script.get("revision_kind") or "legacy",
+        status=script["status"],
+        created_at=script.get("criado_em"),
+        is_latest=script["versao"] == latest_versions[idea_id],
+        media_bound=structure.get("media_context") is not None,
+    )
 
 
 @router.get("/calibration/speaking-rate")
@@ -498,19 +564,167 @@ def _production_timeline_response(timeline: ProductionTimeline) -> ProductionTim
 
 @router.get("/roteiros-disponiveis", response_model=list[RoteiroDisponivelOut])
 async def listar_roteiros_disponiveis():
-    """Proxy read-only para os roteiros aprovados no ideas-hub."""
-    roteiros = await ideas_hub_client.listar_roteiros_aprovados()
-    return [
-        RoteiroDisponivelOut(
-            id=r["id"],
-            ideia_id=r["ideia_id"],
-            versao=r["versao"],
-            titulo=r["estrutura"]["titulo"],
-            duracao_total_segundos=r["estrutura"]["duracao_total_segundos"],
-            num_blocos=len(r["estrutura"]["blocos"]),
+    """List every immutable revision so the operator can choose its exact ID."""
+    roteiros = await ideas_hub_client.listar_roteiros()
+    latest_versions: dict[str, int] = {}
+    for script in roteiros:
+        idea_id = str(script["ideia_id"])
+        latest_versions[idea_id] = max(
+            latest_versions.get(idea_id, 0), int(script["versao"])
         )
-        for r in roteiros
+    return [
+        _available_script(script, latest_versions)
+        for script in roteiros
     ]
+
+
+@router.get("/roteiros/{roteiro_id}/production-readiness")
+async def obter_readiness_da_revisao(roteiro_id: uuid.UUID):
+    """Return the strict report for the exact revision selected by the operator."""
+
+    readiness = await ideas_hub_client.obter_production_readiness(roteiro_id)
+    return {
+        "production_readiness": readiness,
+        "blockers": production_readiness_blockers(readiness),
+    }
+
+
+@router.patch(
+    "/roteiros/{roteiro_id}/aprovar",
+    response_model=RevisionPreparationOut,
+)
+async def aprovar_revisao_para_producao(roteiro_id: uuid.UUID):
+    """Approve the exact selected revision without resolving a latest pointer."""
+
+    try:
+        script = await ideas_hub_client.aprovar_roteiro(roteiro_id)
+        readiness = await ideas_hub_client.obter_production_readiness(roteiro_id)
+    except IdeasHubNotFoundError as exc:
+        raise HTTPException(404, "Revisão não encontrada no Ideas Hub") from exc
+    except IdeasHubTransientError as exc:
+        raise HTTPException(503, "Ideas Hub indisponível para aprovação") from exc
+    except IdeasHubClientError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RevisionPreparationOut(
+        roteiro_id=script["id"],
+        parent_roteiro_id=script.get("parent_roteiro_id"),
+        versao=script["versao"],
+        status=script["status"],
+        production_readiness=readiness,
+    )
+
+
+@router.get("/media-projects", response_model=list[MediaProjectOut])
+async def listar_projetos_de_midia():
+    try:
+        projects = await MediaIndexerSearchProvider(settings).list_projects()
+    except MediaIndexerUnavailableError as exc:
+        raise HTTPException(503, "Media Indexer indisponível") from exc
+    except MediaIndexerError as exc:
+        raise HTTPException(502, "Media Indexer retornou projeto inválido") from exc
+    return [
+        MediaProjectOut(id=item.id, name=item.name, description=item.description)
+        for item in projects
+    ]
+
+
+@router.get(
+    "/media-projects/{project_id}/sessions",
+    response_model=list[MediaSessionOut],
+)
+async def listar_sessoes_de_midia(project_id: uuid.UUID):
+    try:
+        sessions = await MediaIndexerSearchProvider(settings).list_project_sessions(
+            project_id
+        )
+    except MediaIndexerUnavailableError as exc:
+        raise HTTPException(503, "Media Indexer indisponível") from exc
+    except MediaIndexerError as exc:
+        raise HTTPException(404, "Projeto de mídia não encontrado") from exc
+    return [
+        MediaSessionOut(
+            id=item.id,
+            project_id=item.project_id,
+            label=item.label,
+            status=item.status,
+        )
+        for item in sessions
+    ]
+
+
+@router.post(
+    "/roteiros/{roteiro_id}/media-binding",
+    response_model=RevisionPreparationOut,
+    status_code=201,
+)
+async def vincular_midia_para_producao(
+    roteiro_id: uuid.UUID,
+    payload: WorkflowMediaBindingIn,
+):
+    """Validate public Media Indexer identities, then bind the selected revision."""
+
+    script = await ideas_hub_client.obter_roteiro(roteiro_id)
+    if script["status"] != "aprovado":
+        raise HTTPException(
+            409,
+            detail={
+                "category": "editorial_approval_missing",
+                "message": "Esta revisão ainda não foi aprovada.",
+                "action": "APPROVE_REVISION",
+            },
+        )
+    provider = MediaIndexerSearchProvider(settings)
+    try:
+        projects = await provider.list_projects()
+        if payload.media_project_id not in {item.id for item in projects}:
+            raise HTTPException(422, "Projeto de mídia inválido")
+        sessions = await provider.list_project_sessions(payload.media_project_id)
+    except HTTPException:
+        raise
+    except MediaIndexerUnavailableError as exc:
+        raise HTTPException(503, "Media Indexer indisponível") from exc
+    except MediaIndexerError as exc:
+        raise HTTPException(422, "Escopo de mídia inválido") from exc
+
+    session_by_id = {item.id: item for item in sessions}
+    invalid_ids = [
+        item
+        for item in payload.media_session_ids
+        if item not in session_by_id or session_by_id[item].status != "ready"
+    ]
+    if invalid_ids:
+        raise HTTPException(
+            422,
+            detail={
+                "category": "invalid_media_sessions",
+                "message": "Uma ou mais sessões não pertencem ao projeto ou não estão prontas.",
+                "session_ids": [str(item) for item in invalid_ids],
+            },
+        )
+
+    try:
+        bound = await ideas_hub_client.vincular_midia(
+            roteiro_id,
+            {
+                "media_project_id": str(payload.media_project_id),
+                "media_session_ids": [str(item) for item in payload.media_session_ids],
+            },
+        )
+        bound_id = uuid.UUID(str(bound["id"]))
+        readiness = await ideas_hub_client.obter_production_readiness(bound_id)
+    except IdeasHubNotFoundError as exc:
+        raise HTTPException(404, "Revisão não encontrada no Ideas Hub") from exc
+    except IdeasHubTransientError as exc:
+        raise HTTPException(503, "Ideas Hub indisponível para media binding") from exc
+    except IdeasHubClientError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return RevisionPreparationOut(
+        roteiro_id=bound_id,
+        parent_roteiro_id=bound.get("parent_roteiro_id"),
+        versao=bound["versao"],
+        status=bound["status"],
+        production_readiness=readiness,
+    )
 
 
 @router.post("", response_model=WorkflowOut, status_code=201)
@@ -525,7 +739,12 @@ async def criar_workflow(
     roteiro = await ideas_hub_client.obter_roteiro(payload.roteiro_id)
     if roteiro["status"] != "aprovado":
         raise HTTPException(
-            400, "Roteiro precisa estar aprovado no ideas-hub para entrar na fila de produção"
+            409,
+            detail={
+                "category": "editorial_approval_missing",
+                "message": "Esta revisão ainda não foi aprovada.",
+                "action": "APPROVE_REVISION",
+            },
         )
 
     readiness = await ideas_hub_client.obter_production_readiness(payload.roteiro_id)
@@ -534,10 +753,8 @@ async def criar_workflow(
             409,
             detail={
                 "category": "production_script_not_ready",
-                "message": (
-                    "Roteiro aprovado não satisfaz os requisitos do ProductionProfile. "
-                    "Corrija os issues e aprove a revisão antes da produção."
-                ),
+                "message": "A revisão possui requisitos técnicos pendentes.",
+                "blockers": production_readiness_blockers(readiness),
                 "production_readiness": readiness,
             },
         )

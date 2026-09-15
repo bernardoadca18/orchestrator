@@ -142,3 +142,43 @@ async def test_transient_failure_is_categorized_after_retry_budget() -> None:
     transport = httpx.MockTransport(lambda request: httpx.Response(503))
     with pytest.raises(IdeasHubTransientError):
         await IdeasHubClient(settings(), transport=transport).obter_roteiro(uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_historical_approval_uses_exact_revision_id() -> None:
+    script_id = uuid.uuid4()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "PATCH"
+        assert request.url.path == f"/roteiros/{script_id}/aprovar"
+        return httpx.Response(200, json=script_payload())
+
+    result = await IdeasHubClient(
+        settings(), transport=httpx.MockTransport(handler)
+    ).aprovar_roteiro(script_id)
+    assert result["status"] == "aprovado"
+
+
+@pytest.mark.asyncio
+async def test_media_binding_mutation_is_single_attempt_and_preserves_scope() -> None:
+    script_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    session_id = uuid.uuid4()
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.method == "POST"
+        assert request.url.path == f"/roteiros/{script_id}/revisoes/vincular-midia"
+        assert request.read()
+        return httpx.Response(200, json=script_payload())
+
+    scope = {
+        "media_project_id": str(project_id),
+        "media_session_ids": [str(session_id)],
+    }
+    await IdeasHubClient(
+        settings(retries=3), transport=httpx.MockTransport(handler)
+    ).vincular_midia(script_id, scope)
+    assert calls == 1

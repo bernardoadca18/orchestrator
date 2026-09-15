@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import uuid
 from typing import Any
 
@@ -51,6 +52,9 @@ class IdeasHubScript(BaseModel):
     versao: int = Field(ge=1)
     estrutura: IdeasHubScriptStructure
     status: str
+    parent_roteiro_id: uuid.UUID | None = None
+    revision_kind: str = "legacy"
+    criado_em: dt.datetime | None = None
 
 
 class IdeasHubIdea(BaseModel):
@@ -92,7 +96,7 @@ class IdeasHubProductionReadiness(BaseModel):
 
 
 class IdeasHubClient:
-    """GETs may retry transiently; no mutating request is exposed by this client."""
+    """Typed Ideas Hub boundary; only safe GETs are retried."""
 
     def __init__(
         self,
@@ -137,6 +141,45 @@ class IdeasHubClient:
         assert last_error is not None
         raise last_error
 
+    async def _mutate(
+        self, method: str, path: str, *, json: dict[str, Any] | None = None
+    ) -> httpx.Response:
+        """Execute one mutation attempt; immutable revision creation is never retried."""
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=self._base_url,
+                timeout=self._timeout,
+                transport=self._transport,
+            ) as client:
+                response = await client.request(method, path, json=json)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            raise IdeasHubTransientError("Ideas Hub network request failed") from exc
+        if response.status_code == 404:
+            raise IdeasHubNotFoundError("Ideas Hub resource was not found")
+        if response.status_code == 429 or response.status_code >= 500:
+            raise IdeasHubTransientError(
+                f"Ideas Hub temporarily returned HTTP {response.status_code}"
+            )
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail")
+            except (ValueError, AttributeError):
+                detail = None
+            suffix = f": {detail}" if isinstance(detail, str) else ""
+            raise IdeasHubClientError(
+                f"Ideas Hub rejected the mutation with HTTP {response.status_code}{suffix}"
+            )
+        return response
+
+    async def listar_roteiros(self) -> list[dict[str, Any]]:
+        response = await self._get("/roteiros/")
+        try:
+            items = TypeAdapter(list[IdeasHubScript]).validate_python(response.json())
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise IdeasHubContractError("Ideas Hub script list response is malformed") from exc
+        return [item.model_dump(mode="json") for item in items]
+
     async def listar_roteiros_aprovados(self) -> list[dict[str, Any]]:
         response = await self._get("/roteiros/", params={"status": "aprovado"})
         try:
@@ -144,6 +187,26 @@ class IdeasHubClient:
         except (ValidationError, ValueError, TypeError) as exc:
             raise IdeasHubContractError("Ideas Hub script list response is malformed") from exc
         return [item.model_dump(mode="json") for item in items]
+
+    async def aprovar_roteiro(self, roteiro_id: uuid.UUID) -> dict[str, Any]:
+        response = await self._mutate("PATCH", f"/roteiros/{roteiro_id}/aprovar")
+        try:
+            return IdeasHubScript.model_validate(response.json()).model_dump(mode="json")
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise IdeasHubContractError("Ideas Hub approval response is malformed") from exc
+
+    async def vincular_midia(
+        self, roteiro_id: uuid.UUID, media_context: dict[str, Any]
+    ) -> dict[str, Any]:
+        response = await self._mutate(
+            "POST",
+            f"/roteiros/{roteiro_id}/revisoes/vincular-midia",
+            json={"media_context": media_context},
+        )
+        try:
+            return IdeasHubScript.model_validate(response.json()).model_dump(mode="json")
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise IdeasHubContractError("Ideas Hub media binding response is malformed") from exc
 
     async def obter_roteiro(self, roteiro_id: uuid.UUID) -> dict[str, Any]:
         response = await self._get(f"/roteiros/{roteiro_id}")

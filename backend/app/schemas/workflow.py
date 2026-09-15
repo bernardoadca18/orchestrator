@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validat
 
 
 class RoteiroDisponivelOut(BaseModel):
-    """Roteiro aprovado no ideas-hub, ainda sem workflow (ou reexibido)."""
+    """Exact immutable Ideas Hub revision available for operator selection."""
 
     id: uuid.UUID
     ideia_id: uuid.UUID
@@ -18,6 +18,44 @@ class RoteiroDisponivelOut(BaseModel):
     titulo: str
     duracao_total_segundos: int
     num_blocos: int
+    parent_roteiro_id: uuid.UUID | None = None
+    revision_kind: str
+    status: str
+    created_at: dt.datetime | None = None
+    is_latest: bool
+    media_bound: bool
+
+
+class MediaProjectOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    description: str | None = None
+
+
+class MediaSessionOut(BaseModel):
+    id: uuid.UUID
+    project_id: uuid.UUID
+    label: str
+    status: str
+
+
+class WorkflowMediaBindingIn(BaseModel):
+    media_project_id: uuid.UUID
+    media_session_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_sessions(self) -> WorkflowMediaBindingIn:
+        if len(set(self.media_session_ids)) != len(self.media_session_ids):
+            raise ValueError("media_session_ids must be unique")
+        return self
+
+
+class RevisionPreparationOut(BaseModel):
+    roteiro_id: uuid.UUID
+    parent_roteiro_id: uuid.UUID | None = None
+    versao: int
+    status: str
+    production_readiness: dict[str, Any]
 
 
 class WorkflowCreateIn(BaseModel):

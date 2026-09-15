@@ -60,6 +60,63 @@ export interface RoteiroDisponivel {
   titulo: string;
   duracao_total_segundos: number;
   num_blocos: number;
+  parent_roteiro_id: string | null;
+  revision_kind: string;
+  status: string;
+  created_at: string | null;
+  is_latest: boolean;
+  media_bound: boolean;
+}
+
+export interface ProductionReadiness {
+  status: "ready" | "not_ready";
+  profile: string;
+  editorial_status: string;
+  visual: {
+    status: string;
+    issues?: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+  media_scope: {
+    required: boolean;
+    status: string;
+    media_project_id?: string | null;
+    media_session_ids?: string[];
+  };
+  issues: Array<{ code: string }>;
+}
+
+export interface ReadinessBlocker {
+  code: string;
+  message: string;
+  action: "APPROVE_REVISION" | "CONFIGURE_MEDIA" | "REVIEW_VISUAL_ISSUES" | "REVIEW_ISSUE";
+  details?: Array<Record<string, unknown>>;
+}
+
+export interface RevisionReadiness {
+  production_readiness: ProductionReadiness;
+  blockers: ReadinessBlocker[];
+}
+
+export interface MediaProject {
+  id: string;
+  name: string;
+  description: string | null;
+}
+
+export interface MediaSession {
+  id: string;
+  project_id: string;
+  label: string;
+  status: string;
+}
+
+export interface RevisionPreparation {
+  roteiro_id: string;
+  parent_roteiro_id: string | null;
+  versao: number;
+  status: string;
+  production_readiness: ProductionReadiness;
 }
 
 export interface AudioBloco {
@@ -455,6 +512,19 @@ export interface DependencyHealth {
 
 export const api = {
   listarRoteirosDisponiveis: (signal?: AbortSignal) => request<RoteiroDisponivel[]>("/workflow/roteiros-disponiveis", { signal }),
+  obterReadinessRevisao: (id: string, signal?: AbortSignal) =>
+    request<RevisionReadiness>(`/workflow/roteiros/${id}/production-readiness`, { signal }),
+  aprovarRevisao: (id: string) =>
+    request<RevisionPreparation>(`/workflow/roteiros/${id}/aprovar`, { method: "PATCH" }),
+  listarProjetosMidia: (signal?: AbortSignal) =>
+    request<MediaProject[]>("/workflow/media-projects", { signal }),
+  listarSessoesMidia: (projectId: string, signal?: AbortSignal) =>
+    request<MediaSession[]>(`/workflow/media-projects/${projectId}/sessions`, { signal }),
+  vincularMidia: (scriptId: string, projectId: string, sessionIds: string[]) =>
+    request<RevisionPreparation>(`/workflow/roteiros/${scriptId}/media-binding`, {
+      method: "POST",
+      body: JSON.stringify({ media_project_id: projectId, media_session_ids: sessionIds }),
+    }),
   listarWorkflows: (status?: string, signal?: AbortSignal) => {
     const params = status ? `?status=${status}` : "";
     return request<Workflow[]>(`/workflow${params}`, { signal });

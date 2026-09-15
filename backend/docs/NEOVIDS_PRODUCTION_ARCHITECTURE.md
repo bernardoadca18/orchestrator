@@ -1,5 +1,19 @@
 # NeoVids production architecture — Stages 1–18
 
+## Revision and production handoff authority
+
+- **HUMAN APPROVAL IS SOVEREIGN.** Editorial audit and critic output remain visible diagnostics;
+  they do not veto an explicit operator approval.
+- **HISTORICAL REVISIONS REMAIN USABLE. LATEST REVISION IS A DEFAULT, NOT AN AUTHORITY.** The
+  operator selects an immutable Ideas Hub `roteiro_id`; revision age is a warning only.
+- **MEDIA BINDING IS OPERATIONAL CONFIGURATION.** A metadata-only binding derived from an approved
+  revision preserves that approval and does not rerun writer, critic, audit, or visual enrichment.
+- **PRODUCTION WORKFLOWS PIN AN EXACT IMMUTABLE REVISION.** `WorkflowExecucao.roteiro_id` and
+  `roteiro_snapshot` record the selected artifact. There is no implicit latest-revision lookup.
+- Production Readiness remains a strict technical gate. `editorial_approval_missing`,
+  `media_scope_missing`, and `visual_readiness_not_ready` expose distinct operator actions;
+  project/session identities are validated against Media Indexer before binding.
+
 ## Ownership map
 
 - **Media Indexer** owns media identity, immutable notes, audiovisual indexing, Semantic Timeline
