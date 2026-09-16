@@ -159,6 +159,14 @@ def _normalize_token(value: Any) -> str:
     return token
 
 
+_GTA_DISPLAY = re.compile(r"(?<!\w)GT\s*A\s*[,.:;_-]?\s*([456])(?!\w|[.,]\d)", re.IGNORECASE)
+_GTA_NUMERALS = {"4": "IV", "5": "V", "6": "VI"}
+
+
+def _normalize_caption_display(text: str) -> str:
+    return _GTA_DISPLAY.sub(lambda match: "GTA " + _GTA_NUMERALS[match[1]], text)
+
+
 def _render_tokens(tokens: list[str]) -> str:
     result = ""
     previous_opening = False
@@ -170,7 +178,7 @@ def _render_tokens(tokens: list[str]) -> str:
         else:
             result += " " + token
         previous_opening = bool(_OPENING_PUNCTUATION.fullmatch(token))
-    return result
+    return _normalize_caption_display(result)
 
 
 def _wrap_two_lines(text: str, policy: CaptionPolicy) -> str | None:

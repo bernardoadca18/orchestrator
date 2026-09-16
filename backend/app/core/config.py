@@ -76,7 +76,7 @@ class Settings(BaseSettings):
     # Silêncio inserido entre blocos narrativos na concatenação final.
     silencio_entre_blocos_ms: int = 500
     audio_final_sample_rate: int = 48_000
-    audio_target_lufs: float = -16.0
+    audio_target_lufs: float = -17.0
     audio_max_true_peak_db: float = -1.0
     audio_true_peak_tolerance_db: float = 0.02
     audio_true_peak_safety_margin_db: float = 0.05
