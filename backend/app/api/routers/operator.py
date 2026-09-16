@@ -1,17 +1,21 @@
-"""Read-only Operator Console projections and safe music catalog preview."""
+"""Operator Console projections and direct voice/music previews."""
 
 import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.routers.workflow import _production_timeline_response
+from app.clients.voice_client import VoiceClient, VoiceClientError, VoiceClientTransientError
 from app.core.config import settings
 from app.core.database import get_db
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.operator import (
+    VoiceProfileOut,
+    VoiceProfilesOut,
+    VoicePreviewRequest,
     MusicAssetCatalogOut,
     MusicCatalogOut,
     OperatorComposerInspectionOut,
@@ -173,3 +177,42 @@ async def preview_music_asset(asset_id: str, sha256: str):
             "X-Audio-SHA256": asset.sha256,
         },
     )
+
+
+@router.get("/voice-profiles", response_model=VoiceProfilesOut)
+async def list_voice_profiles():
+    try:
+        async with VoiceClient(settings) as voice:
+            profiles = await voice.list_voices()
+    except VoiceClientTransientError as exc:
+        raise HTTPException(503, "Voice Service temporariamente indisponível") from exc
+    except VoiceClientError as exc:
+        raise HTTPException(502, "Não foi possível listar os voice profiles") from exc
+    return VoiceProfilesOut(
+        profiles=[VoiceProfileOut.model_validate(profile.model_dump()) for profile in profiles],
+        defaults={"pt-BR": settings.voice_profile, "en-US": settings.voice_profile_en_us},
+    )
+
+
+@router.post("/voice-preview", response_class=Response)
+async def create_voice_preview(payload: VoicePreviewRequest):
+    try:
+        async with VoiceClient(settings) as voice:
+            profiles = await voice.list_voices()
+            if not any(profile.name == payload.voice_profile for profile in profiles):
+                raise HTTPException(409, "Profile não carregado: referência ainda não disponível")
+            job = await voice.create_narration(
+                text=payload.text,
+                voice_profile=payload.voice_profile,
+                generation_profile="narration_v2",
+                language=payload.language,
+                seed=303,
+                idempotency_key=f"operator-preview:{uuid.uuid4()}",
+            )
+            completed = await voice.wait_for_narration(job.id)
+            audio = await voice.download_audio(completed.id)
+    except VoiceClientTransientError as exc:
+        raise HTTPException(503, "Voice Service temporariamente indisponível") from exc
+    except VoiceClientError as exc:
+        raise HTTPException(502, "Não foi possível gerar o preview no Voice Service") from exc
+    return Response(content=audio, media_type="audio/wav", headers={"Cache-Control": "no-store"})

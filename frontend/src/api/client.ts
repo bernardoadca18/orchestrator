@@ -19,7 +19,7 @@ export function isExpectedNotFound(error: unknown): error is ApiError {
   return error instanceof ApiError && error.status === 404;
 }
 
-export async function request<T>(path: string, options?: RequestInit): Promise<T> {
+export async function request<T>(path: string, options?: RequestInit, responseType: "json" | "blob" = "json"): Promise<T> {
   const { headers: optionHeaders, ...rest } = options || {};
   let resp: Response;
   try {
@@ -47,7 +47,7 @@ export async function request<T>(path: string, options?: RequestInit): Promise<T
   }
   if (resp.status === 204) return undefined as T;
   try {
-    return await resp.json() as T;
+    return (responseType === "blob" ? await resp.blob() : await resp.json()) as T;
   } catch {
     throw new ApiError("O Orchestrator retornou uma resposta inválida.", "malformed_response", resp.status);
   }

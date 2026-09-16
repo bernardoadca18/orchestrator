@@ -1179,7 +1179,7 @@ async def test_english_audio_passthrough_and_explicit_asr(tmp_path, write_tone, 
         == text
     )
     assert repo.blocks[0].pronunciation_glossary_identity is None
-    assert voice.created[0]["voice_profile"] == "bernardo_en_icl_v1"
+    assert voice.created[0]["voice_profile"] == "bernardo_en_xvec_v1"
     assert voice.created[0]["language"] == "English"
     assert voice.created[0]["seed"] == 303
     assert repo.persisted_chunks[0][1][0]["requested_language"] == "English"

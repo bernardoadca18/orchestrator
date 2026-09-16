@@ -6,7 +6,7 @@ import datetime as dt
 import uuid
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.schemas.workflow import PresentationSpecOut, ProductionTimelineOut
 
@@ -242,3 +242,31 @@ class OperatorComposerInspectionOut(BaseModel):
     production_timeline: ProductionTimelineOut
     presentation: PresentationSpecOut | None
     audio_mix_plan: dict | None
+
+
+class VoiceProfileOut(BaseModel):
+    name: str
+    clone_mode: str
+    reference_id: str | None
+    version: str
+    identity: str
+
+
+class VoiceProfilesOut(BaseModel):
+    profiles: list[VoiceProfileOut]
+    defaults: dict[str, str]
+
+
+class VoicePreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    voice_profile: str = Field(min_length=1, max_length=100)
+    language: Literal["Portuguese", "English"]
+    text: str = Field(min_length=1, max_length=800)
+
+    @field_validator("text")
+    @classmethod
+    def non_blank_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Informe um texto para o preview")
+        return value

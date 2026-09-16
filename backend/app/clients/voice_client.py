@@ -281,6 +281,15 @@ class VoiceClient:
             raise VoiceClientError("Voice Service returned an empty chunk candidate")
         return response.content
 
+    async def list_voices(self) -> list[VoiceProfileDescriptor]:
+        response = await self._request_with_retry(
+            "GET", "/v1/voices", timeout=self.settings.voice_status_timeout_seconds
+        )
+        try:
+            return [VoiceProfileDescriptor.model_validate(item) for item in response.json()]
+        except (ValidationError, ValueError, TypeError) as exc:
+            raise VoiceClientError("Voice Service profile response is malformed") from exc
+
     async def resolve_profiles(
         self, voice_profile: str, generation_profile: str
     ) -> VoiceProfileProvenance:

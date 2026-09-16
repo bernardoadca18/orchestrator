@@ -42,7 +42,7 @@ def test_workflow_locale_resolves_current_pt_and_english_voice():
         303,
     )
     assert (en.voice_profile, en.generation_profile, en.language, en.seed, en.accent_mode) == (
-        "bernardo_en_icl_v1",
+        "bernardo_en_xvec_v1",
         "narration_v2",
         "English",
         303,

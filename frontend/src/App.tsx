@@ -3,6 +3,7 @@ import { AppShell } from "./components/ui";
 import Dashboard from "./pages/Dashboard";
 import LegacyWorkflowRedirect from "./pages/LegacyWorkflowRedirect";
 import HistoryPage from "./features/history/HistoryPage";
+import VoiceProfilesPage from "./features/voice/VoiceProfilesPage";
 import MusicLibraryPage from "./features/music/MusicLibraryPage";
 import NarrationPage from "./features/narration/NarrationPage";
 import PresentationPage from "./features/presentation/PresentationPage";
@@ -33,6 +34,7 @@ export default function App() {
     </Route>
     <Route path="/review" element={<ReviewQueuePage />} />
     <Route path="/music" element={<MusicLibraryPage />} />
+    <Route path="/voice" element={<VoiceProfilesPage />} />
     <Route path="/workflow/:id" element={<LegacyWorkflowRedirect />} />
     <Route path="*" element={<Navigate replace to="/dashboard" />} />
   </Routes></AppShell></BrowserRouter>;

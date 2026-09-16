@@ -334,7 +334,23 @@ function params(values: Record<string, string | number | undefined>) {
   return encoded ? `?${encoded}` : "";
 }
 
+export type VoiceLanguage = "Portuguese" | "English";
+
+export interface VoiceProfiles {
+  profiles: Array<{ name: string; clone_mode: string; reference_id: string | null; version: string; identity: string }>;
+  defaults: Record<"pt-BR" | "en-US", string>;
+}
+
+export interface VoicePreviewInput {
+  voice_profile: string;
+  language: VoiceLanguage;
+  text: string;
+}
+
 export const operatorApi = {
+  getVoiceProfiles: (signal?: AbortSignal) => request<VoiceProfiles>("/operator/voice-profiles", { signal }),
+  previewVoice: (data: VoicePreviewInput, signal?: AbortSignal) =>
+    request<Blob>("/operator/voice-preview", { method: "POST", body: JSON.stringify(data), signal }, "blob"),
   listWorkflows: (filters: WorkflowListFilters = {}, signal?: AbortSignal) =>
     request<OperatorWorkflowSummary[]>(`/operator/workflows${params(filters)}`, { signal }),
   getWorkflow: (id: string, signal?: AbortSignal) =>
