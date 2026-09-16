@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     video_composer_http_backoff_seconds: float = 0.5
     video_composer_poll_interval_seconds: float = 2.0
     video_composer_render_timeout_seconds: float = 3600.0
+    video_composer_timeout_grace_seconds: float = 120.0
     video_composer_render_profile: str = "youtube_1080p30_v1"
     video_composer_program_audio_render_profile: str = "youtube_1080p30_program_audio_v1"
 
@@ -266,6 +267,7 @@ class Settings(BaseSettings):
         "video_composer_http_backoff_seconds",
         "video_composer_poll_interval_seconds",
         "video_composer_render_timeout_seconds",
+        "video_composer_timeout_grace_seconds",
         "production_qa_task_retry_seconds",
         "audio_block_max_duration_seconds",
         "audio_block_max_seconds_per_char",

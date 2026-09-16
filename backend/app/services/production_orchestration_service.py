@@ -276,15 +276,19 @@ class ProductionOrchestrationService:
             return OrchestrationResult(terminal=True)
         if workflow.production_status != "running" or workflow.production_phase != "render":
             return OrchestrationResult(terminal=True)
-        if self._timed_out(render):
-            await self.renders.mark_failed(
-                render, "composer_timeout", "Video Composer render timed out"
-            )
-            await self._fail(workflow, "composer_timeout", "Video Composer render timed out")
-            return OrchestrationResult(terminal=True)
+        timeout_candidate = self._timed_out(render)
         try:
             remote = await self._reconcile_or_submit(render, retry_failed=False)
-            return await self._apply_remote(workflow, render, remote)
+            result = await self._apply_remote(workflow, render, remote)
+            if timeout_candidate and not result.terminal:
+                await self.renders.mark_failed(
+                    render, "composer_timeout", "Video Composer render timed out"
+                )
+                await self._fail(
+                    workflow, "composer_timeout", "Video Composer render timed out"
+                )
+                return OrchestrationResult(terminal=True)
+            return result
         except VideoComposerTransientError as exc:
             logger.warning(
                 "transient Video Composer polling failure; scheduling bounded reconciliation",
@@ -294,6 +298,18 @@ class ProductionOrchestrationService:
                     "error_category": type(exc).__name__,
                 },
             )
+            if timeout_candidate and self._timeout_grace_exhausted(render):
+                await self.renders.mark_failed(
+                    render,
+                    "composer_timeout",
+                    "Video Composer render timed out after reconciliation grace",
+                )
+                await self._fail(
+                    workflow,
+                    "composer_timeout",
+                    "Video Composer render timed out after reconciliation grace",
+                )
+                return OrchestrationResult(terminal=True)
             return OrchestrationResult(terminal=False, poll_render_id=render.id)
         except VideoComposerError as exc:
             await self._fail(workflow, "composer_request", self._safe_message(exc))
@@ -763,6 +779,15 @@ class ProductionOrchestrationService:
         return (
             dt.datetime.now(dt.UTC) - anchor
         ).total_seconds() > self.config.video_composer_render_timeout_seconds
+
+    def _timeout_grace_exhausted(self, render: WorkflowRender) -> bool:
+        anchor = render.started_at or render.created_at
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=dt.UTC)
+        return (dt.datetime.now(dt.UTC) - anchor).total_seconds() > (
+            self.config.video_composer_render_timeout_seconds
+            + self.config.video_composer_timeout_grace_seconds
+        )
 
     @staticmethod
     def _audio_is_reusable(workflow: WorkflowExecucao) -> bool:

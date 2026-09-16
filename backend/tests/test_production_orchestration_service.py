@@ -788,20 +788,81 @@ async def test_transient_poll_is_rescheduled_without_marking_render_failed() -> 
 
 
 @pytest.mark.asyncio
-async def test_render_timeout_is_terminal_and_does_not_contact_composer() -> None:
+async def test_render_timeout_reconciles_active_remote_before_terminal_policy() -> None:
     workflow = _workflow(phase="render", status="running")
     timeline = _timeline(workflow.id)
     composer = FakeComposer(_remote(workflow.id, timeline))
     renders = FakeRenderRepo()
     service = _service(workflow, timeline, composer, renders)
     render = await service._ensure_local_render(workflow, timeline)
+    render.composer_render_id = composer.remote.id
     render.created_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=3601)
     result = await service.poll(workflow.id, render.id)
     assert result.terminal
-    assert composer.get_calls == 0
+    assert composer.get_calls == 1
     assert render.status == "failed"
     assert render.error_category == "composer_timeout"
     assert workflow.production_status == "failed"
+    assert workflow.production_error_category == "composer_timeout"
+
+
+@pytest.mark.asyncio
+async def test_render_timeout_reconciles_remote_completion() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline, "completed"))
+    renders = FakeRenderRepo()
+    service = _service(workflow, timeline, composer, renders)
+    render = await service._ensure_local_render(workflow, timeline)
+    render.composer_render_id = composer.remote.id
+    render.created_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=3601)
+
+    result = await service.poll(workflow.id, render.id)
+
+    assert result.terminal
+    assert composer.get_calls == 1
+    assert workflow.production_status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_render_timeout_mirrors_remote_failure() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline, "failed"))
+    renders = FakeRenderRepo()
+    service = _service(workflow, timeline, composer, renders)
+    render = await service._ensure_local_render(workflow, timeline)
+    render.composer_render_id = composer.remote.id
+    render.created_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=3601)
+
+    result = await service.poll(workflow.id, render.id)
+
+    assert result.terminal
+    assert composer.get_calls == 1
+    assert workflow.production_error_category == "composer:render_failure"
+
+
+@pytest.mark.asyncio
+async def test_render_timeout_transient_outage_uses_bounded_grace() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(
+        _remote(workflow.id, timeline),
+        failure=VideoComposerTransientError("temporary outage"),
+    )
+    renders = FakeRenderRepo()
+    service = _service(workflow, timeline, composer, renders)
+    render = await service._ensure_local_render(workflow, timeline)
+    render.composer_render_id = composer.remote.id
+    render.created_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=3601)
+
+    grace = await service.poll(workflow.id, render.id)
+    assert not grace.terminal
+    assert workflow.production_status == "running"
+
+    render.created_at = dt.datetime.now(dt.UTC) - dt.timedelta(seconds=3721)
+    exhausted = await service.poll(workflow.id, render.id)
+    assert exhausted.terminal
     assert workflow.production_error_category == "composer_timeout"
 
 
