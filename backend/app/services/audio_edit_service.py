@@ -22,6 +22,7 @@ from app.models.workflow import (
     WorkflowExecucao,
 )
 from app.repositories.workflow_repository import WorkflowRepository
+from app.services.content_locale import workflow_content_locale
 from app.services.audio_service import _mastering_config, ensure_transcription
 from app.services.audio_serving import AudioArtifactExpectation, verify_audio_artifact
 from app.services.mastering import MasteringError, master_narration
@@ -140,6 +141,7 @@ class AudioEditMaterializationService:
                 final_path,
                 final_sha,
                 provider=self.transcription_provider,
+                content_locale=workflow_content_locale(workflow),
             )
             await self.repo.atualizar_status(
                 update.workflow_execucao_id,

@@ -34,6 +34,11 @@ from app.services.block_materialization import (
     active_block_is_current,
     active_block_manifest,
 )
+from app.services.content_locale import (
+    NarrationVoice,
+    resolve_narration_voice,
+    workflow_content_locale,
+)
 from app.services.content_chunk_diagnostics import analyze_chunk_content
 from app.services.content_coverage import (
     ContentCoverageThresholds,
@@ -55,6 +60,7 @@ from app.services.production_audio import (
 from app.services.pronunciation import PronunciationPreprocessor
 from app.services.text_normalization import PortugueseTextNormalizer
 from app.services.transcription_service import (
+    FasterWhisperNarrationProvider,
     NarrationTranscriptionProvider,
     get_transcription_provider,
 )
@@ -211,6 +217,8 @@ class AudioWorkflowService:
             return
         if workflow.status == "cancelada":
             return
+        content_locale = workflow_content_locale(workflow)
+        voice_config = resolve_narration_voice(content_locale, self.config)
         blocks = workflow.roteiro_snapshot.get("blocos", [])
         if not isinstance(blocks, list) or not blocks:
             await self.repo.atualizar_status(
@@ -232,8 +240,8 @@ class AudioWorkflowService:
         try:
             async with self.voice_client_factory() as voice:
                 provenance = await voice.resolve_profiles(
-                    self.config.voice_profile,
-                    self.config.voice_generation_profile,
+                    voice_config.voice_profile,
+                    voice_config.generation_profile,
                 )
                 source_paths: list[Path] = []
                 block_pause_timelines: dict[int, list[dict[str, object]]] = {}
@@ -246,13 +254,25 @@ class AudioWorkflowService:
                     if not isinstance(canonical_text, str) or not canonical_text.strip():
                         raise VoiceClientError(f"empty script block at order {order}")
                     block_type = str(raw_block.get("tipo", f"bloco_{order}"))
-                    normalization = self.text_normalizer.normalize(canonical_text)
-                    pronunciation = self.preprocessor.preprocess(
-                        normalization.normalized_text,
-                        project=str(workflow.ideia_id),
-                        locale=self.config.pronunciation_locale,
-                        canonical_text=canonical_text,
-                    )
+                    if content_locale == "en-US":
+                        normalization = SimpleNamespace(
+                            normalized_text=canonical_text,
+                            version="en_us_passthrough_v1",
+                            identity="en_us_passthrough_v1",
+                        )
+                        pronunciation = SimpleNamespace(
+                            synthesis_text=canonical_text,
+                            glossary_identity=None,
+                            applied_replacements=(),
+                        )
+                    else:
+                        normalization = self.text_normalizer.normalize(canonical_text)
+                        pronunciation = self.preprocessor.preprocess(
+                            normalization.normalized_text,
+                            project=str(workflow.ideia_id),
+                            locale=self.config.pronunciation_locale,
+                            canonical_text=canonical_text,
+                        )
                     source_hash = _sha256_text(canonical_text)
                     synthesis_hash = _sha256_text(pronunciation.synthesis_text)
                     identity = _canonical_hash(
@@ -271,8 +291,8 @@ class AudioWorkflowService:
                             "generation_profile": provenance.generation.name,
                             "generation_profile_identity": provenance.generation.identity,
                             "voice_chunking_identity": provenance.chunking_identity,
-                            "language": self.config.voice_language,
-                            "requested_seed": self.config.voice_seed,
+                            "language": voice_config.language,
+                            "requested_seed": voice_config.seed,
                         }
                     )
                     idempotency_key = f"qwen-narration:{workflow.id}:{order}:{identity}"
@@ -350,7 +370,7 @@ class AudioWorkflowService:
                         remote_job_started = time.monotonic()
                         try:
                             job = await self._obtain_remote_job(
-                                voice, block, pronunciation.synthesis_text
+                                voice, block, pronunciation.synthesis_text, voice_config
                             )
                             await self._persist_remote_job(block, job, take)
                             completed = await voice.wait_for_narration(
@@ -411,6 +431,7 @@ class AudioWorkflowService:
                             source_dir=source_dir,
                             remote_source_path=source_path,
                             remote_metadata=remote_metadata,
+                            voice_config=voice_config,
                         )
                         performance = materialized_provider_metadata.setdefault(
                             "orchestrator_performance", {}
@@ -437,6 +458,7 @@ class AudioWorkflowService:
                             source_path,
                             pronunciation.synthesis_text,
                             project_id=str(workflow.ideia_id),
+                            content_locale=content_locale,
                             provider_metadata=completed.metadata,
                         )
                         self._log_content_quality_decision(
@@ -861,7 +883,9 @@ class AudioWorkflowService:
 
             transcription_available = True
             try:
-                await self._ensure_transcription(workflow.id, final_path, mastered.metadata.sha256)
+                await self._ensure_transcription(
+                    workflow.id, final_path, mastered.metadata.sha256, content_locale=content_locale
+                )
                 current_transcription = await self.repo.obter_transcricao(workflow.id)
                 diagnostics_manifest["asr"] = (
                     {
@@ -1009,6 +1033,7 @@ class AudioWorkflowService:
         source_dir: Path,
         remote_source_path: Path,
         remote_metadata: AudioFileMetadata,
+        voice_config: NarrationVoice | None = None,
     ) -> tuple[
         Path,
         AudioFileMetadata,
@@ -1022,6 +1047,12 @@ class AudioWorkflowService:
         The remote full-job WAV is retained for forensics only. It never becomes
         the published AudioBloco once durable physical chunks are available.
         """
+        voice_config = voice_config or resolve_narration_voice("pt-BR", self.config)
+        detector = (
+            self.accent_detector
+            if voice_config.accent_mode != "off"
+            else AccentDetector(self.config.audio_accent_qa_model_path, "off")
+        )
         chunks_metadata = completed.metadata.get("chunks")
         if not isinstance(chunks_metadata, list) or not chunks_metadata:
             raise ProductionAudioError("Voice Service returned no physical chunk provenance")
@@ -1051,7 +1082,7 @@ class AudioWorkflowService:
                 expected_subtype=artifact.get("subtype"),
                 expected_frame_count=artifact.get("frame_count"),
             )
-            accent_diagnostic = self.accent_detector.analyze(chunk_path)
+            accent_diagnostic = detector.analyze(chunk_path)
             accent_items.append(accent_diagnostic)
             chunks_data.append(
                 {
@@ -1078,10 +1109,8 @@ class AudioWorkflowService:
                     "audio_channels": chunk_metadata.channels,
                     "audio_subtype": chunk_metadata.subtype,
                     "artifact_integrity": asdict(chunk_metadata),
-                    "requested_language": self.config.voice_language,
-                    "resolved_language": completed.metadata.get(
-                        "language", self.config.voice_language
-                    ),
+                    "requested_language": voice_config.language,
+                    "resolved_language": completed.metadata.get("language", voice_config.language),
                     "speaker_similarity": artifact.get("speaker_similarity"),
                     "speaker_similarity_reference_identity": artifact.get(
                         "speaker_similarity_reference_identity"
@@ -1138,8 +1167,8 @@ class AudioWorkflowService:
             raise ProductionAudioError("block assembly returned no integrity proof")
         provider_metadata: dict[str, object] = {
             **completed.metadata,
-            "requested_language": self.config.voice_language,
-            "resolved_language": completed.metadata.get("language", self.config.voice_language),
+            "requested_language": voice_config.language,
+            "resolved_language": completed.metadata.get("language", voice_config.language),
             "remote_full_artifact": {
                 "path": str(remote_source_path),
                 **asdict(remote_metadata),
@@ -1147,9 +1176,7 @@ class AudioWorkflowService:
             "block_assembly": assembly.integrity,
             "assembly_manifest": manifest.identity_payload(),
             "assembly_manifest_identity": manifest.identity,
-            "accent_quality": aggregate_accent_diagnostics(
-                accent_items, self.config.audio_accent_qa_mode
-            ),
+            "accent_quality": aggregate_accent_diagnostics(accent_items, voice_config.accent_mode),
             "orchestrator_performance": {
                 "physical_chunk_download_seconds": physical_chunk_download_seconds,
                 "chunk_persistence_seconds": chunk_persistence_seconds,
@@ -1214,7 +1241,9 @@ class AudioWorkflowService:
         voice: VoiceClient,
         block: AudioBloco,
         synthesis_text: str,
+        voice_config: NarrationVoice | None = None,
     ) -> VoiceNarrationJob:
+        voice_config = voice_config or resolve_narration_voice("pt-BR", self.config)
         if block.job_id_voz:
             try:
                 existing = await voice.get_narration(block.job_id_voz)
@@ -1231,11 +1260,11 @@ class AudioWorkflowService:
                 )
         return await voice.create_narration(
             text=synthesis_text,
-            voice_profile=block.voice_profile or self.config.voice_profile,
-            generation_profile=block.generation_profile or self.config.voice_generation_profile,
+            voice_profile=block.voice_profile or voice_config.voice_profile,
+            generation_profile=block.generation_profile or voice_config.generation_profile,
             idempotency_key=block.idempotency_key or "",
-            language=self.config.voice_language,
-            seed=block.resolved_seed if block.resolved_seed is not None else self.config.voice_seed,
+            language=voice_config.language,
+            seed=block.resolved_seed if block.resolved_seed is not None else voice_config.seed,
         )
 
     async def _prepare_quality_retry(
@@ -1453,9 +1482,14 @@ class AudioWorkflowService:
         synthesis_text: str,
         *,
         project_id: str | None = None,
+        content_locale: str = "pt-BR",
         provider_metadata: dict[str, object] | None = None,
     ) -> dict[str, object]:
         thresholds = _content_thresholds(self.config)
+        if content_locale == "en-US":
+            return unavailable_content_report(
+                thresholds, reason="content_locale_not_applicable"
+            ).to_dict()
         if not self.config.audio_take_content_validation_enabled:
             return unavailable_content_report(
                 thresholds, reason="take_asr_validation_disabled"
@@ -1609,7 +1643,12 @@ class AudioWorkflowService:
         )
 
     async def _ensure_transcription(
-        self, workflow_id: uuid.UUID, final_path: Path, audio_sha256: str
+        self,
+        workflow_id: uuid.UUID,
+        final_path: Path,
+        audio_sha256: str,
+        *,
+        content_locale: str = "pt-BR",
     ) -> None:
         await ensure_transcription(
             self.session,
@@ -1618,6 +1657,7 @@ class AudioWorkflowService:
             audio_sha256,
             provider=self.transcription_provider,
             repository=self.repo,
+            content_locale=content_locale,
         )
 
 
@@ -1629,13 +1669,18 @@ async def ensure_transcription(
     *,
     provider: NarrationTranscriptionProvider | None = None,
     repository: WorkflowRepository | None = None,
+    content_locale: str = "pt-BR",
 ) -> None:
     """Reuse a compatible ASR artifact or replace it for the current audio SHA."""
     repo = repository or WorkflowRepository(session)
     existing = await repo.obter_transcricao(workflow_id)
     if existing is not None and existing.audio_sha256 == audio_sha256:
         return
-    resolved_provider = provider or get_transcription_provider()
+    resolved_provider = provider or (
+        FasterWhisperNarrationProvider(asr_language="en")
+        if content_locale == "en-US"
+        else get_transcription_provider()
+    )
     result = resolved_provider.transcribe(final_path)
     await repo.upsert_transcricao(
         workflow_id,

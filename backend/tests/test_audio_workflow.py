@@ -1127,3 +1127,71 @@ async def test_alignment_failure_preserves_audio_but_marks_quality_unvalidated(
     assert workflow.audio_phase == "quality_unvalidated"
     assert Path(workflow.audio_final_path).is_file()
     assert repo.transcription is not None
+
+
+@pytest.mark.asyncio
+async def test_english_audio_passthrough_and_explicit_asr(tmp_path, write_tone, monkeypatch):
+    from unittest.mock import Mock
+    from app.services.audio_service import ensure_transcription
+
+    text = "On 12/25, GTA IV cost $20.00."
+    glossary = tmp_path / "glossary.json"
+    glossary.write_text('{"version":"v1","rules":[]}')
+    tone = write_tone(tmp_path / "tone.wav", duration=1.0)
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="pendente",
+        roteiro_snapshot={
+            "content_locale": "en-US",
+            "blocos": [{"tipo": "intro", "conteudo": text}],
+        },
+    )
+    repo = ChunkPersistingRepository(workflow)
+    voice = FakeVoiceClient(tone.read_bytes())
+    config = _config(tmp_path, glossary)
+    config.audio_take_content_validation_enabled = True
+    config.audio_accent_qa_mode = "enforce"
+    pt_normalizer = Mock()
+    pt_normalizer.normalize.side_effect = AssertionError("PT normalizer called")
+    pt_pronunciation = Mock()
+    pt_pronunciation.preprocess.side_effect = AssertionError("PT glossary called")
+    pt_detector = Mock()
+    pt_detector.analyze.side_effect = AssertionError("PT accent called")
+    provider = FakeTranscriptionProvider()
+    provider_factory = Mock(return_value=provider)
+    monkeypatch.setattr(audio_service_module, "FasterWhisperNarrationProvider", provider_factory)
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        text_normalizer=pt_normalizer,
+        preprocessor=pt_pronunciation,
+        accent_detector=pt_detector,
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    assert workflow.status == "audio_concluido"
+    assert (
+        repo.blocks[0].texto
+        == repo.blocks[0].normalized_text
+        == repo.blocks[0].synthesis_text
+        == text
+    )
+    assert repo.blocks[0].pronunciation_glossary_identity is None
+    assert voice.created[0]["voice_profile"] == "bernardo_en_icl_v1"
+    assert voice.created[0]["language"] == "English"
+    assert voice.created[0]["seed"] == 303
+    assert repo.persisted_chunks[0][1][0]["requested_language"] == "English"
+    assert provider.calls == 1  # final ASR only; no take content ASR
+    provider_factory.assert_called_once_with(asr_language="en")
+    report = service._validate_take_content(tone, text, content_locale="en-US")
+    assert report["status"] == "unavailable"
+    # Same transcription boundary used by audio edits/rematerialization.
+    await ensure_transcription(
+        object(), workflow.id, tone, "new-audio-sha", repository=repo, content_locale="en-US"
+    )
+    assert provider_factory.call_count == 2
+    pt_normalizer.normalize.assert_not_called()
+    pt_pronunciation.preprocess.assert_not_called()
+    pt_detector.analyze.assert_not_called()

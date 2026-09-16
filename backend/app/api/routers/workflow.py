@@ -1660,6 +1660,7 @@ async def regenerar_chunk(
     from app.core.config import settings
     from app.services.accent_qa import AccentDetector
     from app.services.audio_service import derive_manual_chunk_seed
+    from app.services.content_locale import resolve_narration_voice, workflow_content_locale
     from app.services.production_audio import (
         ProductionAudioError,
         publish_immutable_source_audio,
@@ -1676,6 +1677,10 @@ async def regenerar_chunk(
     if bloco.status != "concluido":
         raise HTTPException(400, "Bloco ainda não foi gerado")
 
+    workflow = await repo.obter_por_id(workflow_id)
+    if workflow is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    voice_config = resolve_narration_voice(workflow_content_locale(workflow), settings)
     chunk = await repo.obter_chunk_por_indice(bloco_id, chunk_index)
     if chunk is None:
         raise HTTPException(404, "Chunk não encontrado")
@@ -1782,7 +1787,7 @@ async def regenerar_chunk(
                     "audio_accent_qa_model_path",
                     Path("config/accent_detector_model.json"),
                 ),
-                getattr(settings, "audio_accent_qa_mode", "shadow"),
+                voice_config.accent_mode,
             ).analyze(chunk_path)
             rejected_by_accent = accent_quality.get("blocks_promotion") is True
 
@@ -1802,8 +1807,8 @@ async def regenerar_chunk(
                 provider_metadata={
                     "source_job_id": chunk.source_job_id,
                     "provider_candidate_id": candidate_id,
-                    "requested_language": settings.voice_language,
-                    "resolved_language": result.get("language", settings.voice_language),
+                    "requested_language": voice_config.language,
+                    "resolved_language": result.get("language", voice_config.language),
                     "speaker_embedding_seconds": result.get("speaker_embedding_seconds"),
                 },
                 speaker_similarity=result.get("speaker_similarity"),

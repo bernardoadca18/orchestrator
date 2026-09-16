@@ -626,3 +626,24 @@ async def test_inconclusive_content_does_not_claim_audio_quality_validation() ->
     assert alignment.status == "completed"
     assert coverage["classification"] == "content_inconclusive"
     assert workflow.audio_phase == "quality_unvalidated"
+
+
+def test_english_alignment_keeps_timing_without_pt_content_segments():
+    from unittest.mock import Mock
+
+    workflow = _workflow()
+    workflow.roteiro_snapshot["content_locale"] = "en-US"
+    text = "The city feels alive because its systems interact with each other."
+    workflow.roteiro_snapshot["blocos"][0]["conteudo"] = text
+    workflow.blocos[0].texto = workflow.blocos[0].synthesis_text = text
+    workflow.transcricao.palavras_timestamps = [
+        {"palavra": word, "inicio": i * 0.5, "fim": i * 0.5 + 0.4}
+        for i, word in enumerate(text.split())
+    ]
+    service = NarrationAlignmentService(object())
+    evaluate = Mock(wraps=service.quality_policy.evaluate)
+    service.quality_policy.evaluate = evaluate
+    blocks, _, metrics = service._build_outputs(workflow, workflow.transcricao)
+    assert blocks[0].overall_coverage == 1.0
+    assert metrics["word_count"] == len(text.split())
+    assert evaluate.call_args.kwargs["content_segments"] is None

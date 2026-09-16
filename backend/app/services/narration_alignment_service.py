@@ -25,6 +25,7 @@ from app.models.workflow import (
 )
 from app.repositories.narration_alignment_repository import NarrationAlignmentRepository
 from app.repositories.workflow_repository import WorkflowRepository
+from app.services.content_locale import workflow_content_locale
 from app.services.content_coverage import (
     ContentCoverageLimitError,
     ContentCoverageSegment,
@@ -504,13 +505,19 @@ class NarrationAlignmentService:
                 "max_window_target_tokens) peak matrix"
             ),
         }
-        content_segments = tuple(
-            ContentCoverageSegment(
-                key=f"block:{block.ordem}",
-                reference_text=block.synthesis_text or block.texto,
-                hypothesis_text=" ".join(word.word for word in words_by_block.get(block.ordem, ())),
+        content_segments = (
+            tuple(
+                ContentCoverageSegment(
+                    key=f"block:{block.ordem}",
+                    reference_text=block.synthesis_text or block.texto,
+                    hypothesis_text=" ".join(
+                        word.word for word in words_by_block.get(block.ordem, ())
+                    ),
+                )
+                for block in audio_blocks
             )
-            for block in audio_blocks
+            if workflow_content_locale(workflow) == "pt-BR"
+            else None
         )
         quality = self.quality_policy.evaluate(
             persisted_blocks,
