@@ -26,6 +26,7 @@ from app.services.content_locale import workflow_content_locale
 from app.services.audio_service import _mastering_config, ensure_transcription
 from app.services.audio_serving import AudioArtifactExpectation, verify_audio_artifact
 from app.services.mastering import MasteringError, master_narration
+from app.services.narration_postprocessing import process_narration_tempo_candidate, resolve_narration_tempo
 from app.services.production_audio import (
     AssemblyResult,
     BlockAssemblyChunk,
@@ -245,14 +246,19 @@ class AudioEditMaterializationService:
             sample_rate=self.config.audio_final_sample_rate,
             silence_ms=self.config.silencio_entre_blocos_ms,
         )
+        paced_path = edit_root / "narration_paced.wav"
+        tempo = process_narration_tempo_candidate(
+            raw_path, paced_path,
+            tempo_factor=resolve_narration_tempo(workflow_content_locale(workflow), self.config),
+        )
         final_assembly_seconds = time.monotonic() - final_assembly_started
         final_path = edit_root / "narration_final.wav"
         mastering_config = _mastering_config(self.config)
         mastering_started = time.monotonic()
-        mastered = master_narration(raw_path, final_path, mastering_config)
+        mastered = master_narration(paced_path, final_path, mastering_config)
         mastering_seconds = time.monotonic() - mastering_started
         if (
-            abs(mastered.metadata.duration_seconds - narration.metadata.duration_seconds)
+            abs(mastered.metadata.duration_seconds - float(tempo["mastered_narration_duration_seconds"]))
             > self.config.audio_duration_tolerance_seconds
         ):
             raise MasteringError("final narration duration changed after mastering")

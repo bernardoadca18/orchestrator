@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass
@@ -23,6 +24,23 @@ from app.services.narration_alignment_algorithm import (
     token_similarity,
     tokenize,
 )
+
+KNOWN_RETRYABLE_PRONUNCIATION_DEFECTS = {
+    ("veiculos", "vaiculos"),
+    ("veiculo", "vaiculo"),
+}
+
+
+def normalize_pronunciation_defect_token(value: str) -> str:
+    value = unicodedata.normalize("NFKD", value.casefold())
+    return "".join(char for char in value if not unicodedata.combining(char))
+
+
+def is_known_pronunciation_defect(expected: str, observed: str) -> bool:
+    return (
+        normalize_pronunciation_defect_token(expected),
+        normalize_pronunciation_defect_token(observed),
+    ) in KNOWN_RETRYABLE_PRONUNCIATION_DEFECTS
 from app.services.text_normalization import PortugueseTextNormalizer
 
 CONTENT_COVERAGE_VERSION = "narration_content_coverage_v3"

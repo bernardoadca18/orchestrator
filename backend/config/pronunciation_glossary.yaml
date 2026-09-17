@@ -121,6 +121,17 @@ entries:
     source: pronunciation_corpus:pronunciation_reference_v2
     approval: {status: approved, approved_by: production-validation-2026-09-04}
     notes: Promoted from candidate after production validation; matches PT-BR letter naming convention.
+  - id: title.gta-iii
+    canonical_term: GTA III
+    synthesis_representation: Gê Tê Á três
+    category: title_numeral
+    locale: pt-BR
+    match: {mode: title_numeral, case_sensitive: false}
+    enabled: true
+    priority: 300
+    revision: 1
+    source: pronunciation_corpus:pronunciation_reference_v2
+    approval: {status: approved, approved_by: production-validation-2026-09-17}
   - id: title.gta-v
     canonical_term: GTA V
     synthesis_representation: Gê Tê Á cinco
@@ -167,7 +178,7 @@ entries:
     priority: 100
     revision: 1
     source: pronunciation-expansion-2026-09-04
-    approval: {status: undecided, approved_by: null}
+    approval: {status: approved, approved_by: production-validation-2026-09-17}
     notes: Candidate pronunciation for video game trailer context; follows PT-BR phonetic adaptation of English term.
   - id: term.motor
     canonical_term: motor

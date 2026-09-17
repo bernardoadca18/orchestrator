@@ -159,8 +159,8 @@ def _normalize_token(value: Any) -> str:
     return token
 
 
-_GTA_DISPLAY = re.compile(r"(?<!\w)GT\s*A\s*[,.:;_-]?\s*([456])(?!\w|[.,]\d)", re.IGNORECASE)
-_GTA_NUMERALS = {"4": "IV", "5": "V", "6": "VI"}
+_GTA_DISPLAY = re.compile(r"(?<!\w)GT\s*A\s*[,.:;_-]?\s*([3456])(?!\w|[.,]\d)", re.IGNORECASE)
+_GTA_NUMERALS = {"3": "III", "4": "IV", "5": "V", "6": "VI"}
 
 
 def _normalize_caption_display(text: str) -> str:

@@ -8,6 +8,7 @@ import json
 import logging
 import time
 import uuid
+from statistics import median
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
@@ -44,8 +45,10 @@ from app.services.content_coverage import (
     ContentCoverageThresholds,
     analyze_content_coverage,
     unavailable_content_report,
+    is_known_pronunciation_defect,
 )
 from app.services.mastering import MasteringConfig, MasteringError, master_narration
+from app.services.narration_postprocessing import process_narration_tempo_candidate, resolve_narration_tempo
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.production_audio import (
     AudioFileMetadata,
@@ -77,6 +80,29 @@ QUALITY_RETRY_CATEGORIES = frozenset(
 QUALITY_RETRY_SEED_STRATEGY = "qwen-orchestrator-quality-retry-v1"
 MANUAL_TAKE_SEED_STRATEGY = "qwen-orchestrator-manual-take-v1"
 MANUAL_CHUNK_SEED_STRATEGY = "qwen-orchestrator-manual-chunk-v1"
+
+SPEAKER_OUTLIER_POLICY = {
+    "version": "speaker_outlier_v1",
+    "minimum_chunk_count": 3,
+    "absolute_floor": 0.965,
+    "median_delta": 0.020,
+    "maximum_automatic_retries": 1,
+}
+
+
+def detect_strong_speaker_outliers(scores: list[float]) -> dict[str, object] | None:
+    """Return conservative relative outlier diagnostics, or None."""
+    values = [float(score) for score in scores if score is not None]
+    if len(values) < SPEAKER_OUTLIER_POLICY["minimum_chunk_count"]:
+        return None
+    center = float(median(values))
+    offending = [index for index, score in enumerate(values)
+                 if score < SPEAKER_OUTLIER_POLICY["absolute_floor"]
+                 and center - score >= SPEAKER_OUTLIER_POLICY["median_delta"]]
+    if not offending:
+        return None
+    return {"median": center, "offending_chunk_indexes": offending,
+            "scores": values, "policy_version": SPEAKER_OUTLIER_POLICY["version"]}
 
 
 def _sha256_text(value: str) -> str:
@@ -731,14 +757,34 @@ class AudioWorkflowService:
                 minimum_silence_seconds=self.config.audio_diagnostics_minimum_silence_seconds,
             )
 
+            tempo_factor = resolve_narration_tempo(content_locale, self.config)
+            paced_path = root / "narration_paced.wav"
+            tempo = process_narration_tempo_candidate(
+                assembled_path, paced_path, tempo_factor=tempo_factor
+            )
+            time_scale = float(tempo["mastered_narration_duration_seconds"]) / assembly.metadata.duration_seconds
+            for offset in assembly.offsets:
+                offset_block = await self.repo.obter_bloco_por_ordem(workflow.id, offset.order)
+                if offset_block is not None:
+                    await self.repo.atualizar_bloco(
+                        offset_block.id,
+                        narration_start_seconds=offset.start_seconds * time_scale,
+                        narration_end_seconds=offset.end_seconds * time_scale,
+                    )
+            inserted_final_pauses = [
+                {**item, "start_seconds": float(item["start_seconds"]) * time_scale,
+                 "end_seconds": float(item["end_seconds"]) * time_scale}
+                for item in inserted_final_pauses
+            ]
+
             await self.repo.atualizar_status(workflow.id, "gerando_audio", audio_phase="mastering")
             final_path = root / "narration_final.wav"
             mastering_config = _mastering_config(self.config)
             mastering_started = time.monotonic()
-            mastered = master_narration(assembled_path, final_path, mastering_config)
+            mastered = master_narration(paced_path, final_path, mastering_config)
             mastering_seconds = time.monotonic() - mastering_started
             if (
-                abs(mastered.metadata.duration_seconds - assembly.metadata.duration_seconds)
+                abs(mastered.metadata.duration_seconds - float(tempo["mastered_narration_duration_seconds"]))
                 > self.config.audio_duration_tolerance_seconds
             ):
                 raise MasteringError("final narration duration changed after mastering")
@@ -784,8 +830,8 @@ class AudioWorkflowService:
                         ),
                         "resolved_seed": getattr(manifest_block, "resolved_seed", None),
                         "qwen_job_id": getattr(manifest_block, "job_id_voz", None),
-                        "start_seconds": offset.start_seconds,
-                        "end_seconds": offset.end_seconds,
+                        "start_seconds": offset.start_seconds * time_scale,
+                        "end_seconds": offset.end_seconds * time_scale,
                         "artifact": getattr(manifest_block, "artifact_integrity", None),
                         "provider_metadata": getattr(current_take, "provider_metadata", None),
                         "content_quality": getattr(current_take, "content_quality", None),
@@ -814,6 +860,7 @@ class AudioWorkflowService:
                     "expected_frame_count": assembly.expected_frame_count,
                     "diagnostics": assembled_diagnostics,
                 },
+                "tempo": tempo,
                 "mastering": mastered.to_dict(),
                 "final": {
                     "artifact": asdict(final_metadata),
@@ -1517,6 +1564,18 @@ class AudioWorkflowService:
                 comparison_hypothesis,
                 thresholds=thresholds,
             ).to_dict()
+            mismatches = report.get("metrics", {}).get("pronunciation_or_asr_mismatches", [])
+            if any(
+                isinstance(item, dict)
+                and is_known_pronunciation_defect(str(item.get("expected", "")), str(item.get("observed", "")))
+                for item in mismatches
+            ):
+                report.update(
+                    status="rejected",
+                    retry_required=True,
+                    retry_reason="known_pronunciation_defect",
+                    classification="pronunciation_or_asr_disagreement",
+                )
         except ValueError:
             logger.warning(
                 "take content alignment exceeded its deterministic bounds",

@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     voice_http_max_retries: int = 2
     voice_http_backoff_seconds: float = 1.0
     voice_quality_max_retries: int = 2
+    audio_narration_tempo_pt_br: float = 1.15
+    audio_narration_tempo_en_us: float = 1.00
 
     media_indexer_api_url: str = "http://localhost:8012"
     media_indexer_api_timeout_seconds: float = 30.0

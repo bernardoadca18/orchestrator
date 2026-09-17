@@ -20,7 +20,7 @@ from app.services.mastering import MasteringError, measure_loudness_and_true_pea
 from app.services.production_audio import inspect_wav
 
 POSTPROCESS_IMPLEMENTATION_VERSION = "ffmpeg_narration_stem_post_v1"
-TEMPO_IMPLEMENTATION_VERSION = "ffmpeg_atempo_candidate_v1"
+TEMPO_IMPLEMENTATION_VERSION = "ffmpeg_narration_tempo_v1"
 _LOUDNORM_JSON = re.compile(r'\{\s*"input_i".*?\}', re.DOTALL)
 
 
@@ -289,7 +289,7 @@ def process_narration_tempo_candidate(
     *,
     tempo_factor: float,
 ) -> dict[str, object]:
-    """Create a pitch-preserving pacing candidate; never changes the raw source."""
+    """Create a pitch-preserving production pacing artifact atomically."""
 
     if not 1.0 <= tempo_factor <= 1.5:
         raise ValueError("tempo_factor must be between 1.0 and 1.5 for this conservative harness")
@@ -368,7 +368,12 @@ def process_narration_tempo_candidate(
             "after": after,
             "processing_seconds": round(time.monotonic() - started, 3),
             "status": "passed",
-            "experimental_not_promoted": True,
         }
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def resolve_narration_tempo(content_locale: str | None, config: Any) -> float:
+    """Resolve the explicitly evidenced production tempo per locale."""
+    locale = (content_locale or "pt-BR").replace("_", "-").lower()
+    return float(config.audio_narration_tempo_en_us if locale == "en-us" else config.audio_narration_tempo_pt_br)
