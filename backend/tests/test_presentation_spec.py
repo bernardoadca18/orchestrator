@@ -215,6 +215,37 @@ def test_cue_may_end_exactly_at_audio_duration() -> None:
     assert cues[0].end_seconds == 1.0
 
 
+def test_captions_flush_at_block_boundary_without_rewriting_words() -> None:
+    words = _words(("primeiro", 0.0, 0.4), ("segundo", 0.5, 0.9))
+    original = json.dumps(words)
+    cues = segment_captions(words, duration_seconds=1, block_ranges=[(0, 0, 0.5), (1, 0.5, 1)])
+    assert [(cue.text, cue.start_seconds, cue.end_seconds) for cue in cues] == [
+        ("primeiro", 0, 0.4), ("segundo", 0.5, 0.9),
+    ]
+    assert json.dumps(words) == original
+
+
+@pytest.mark.parametrize(
+    "canonical,expected",
+    [
+        ("GTA III e GTA III", "GTA III"),
+        ("GTA IV e GTA V", "GTA VI"),
+        ("cidade", "GTA VI"),
+    ],
+)
+def test_gta_reconciliation_is_unique_canonical_block_display_only(canonical, expected) -> None:
+    words = _words(("GTA", 2.0, 2.2), ("6", 2.2, 2.4))
+    workflow = _workflow(words)
+    original = json.dumps(words)
+    baseline = build_presentation_spec(workflow, duration_seconds=8)
+    workflow.roteiro_snapshot["blocos"][0]["conteudo"] = canonical
+    spec = build_presentation_spec(workflow, duration_seconds=8)
+    assert spec.captions.cues[0].text == expected
+    assert json.dumps(workflow.transcricao.palavras_timestamps) == original
+    if expected == "GTA III":
+        assert spec.fingerprint != baseline.fingerprint
+
+
 def test_presentation_uses_authoritative_audio_and_never_derives_title_from_tipo() -> None:
     workflow = _workflow(_words(("teste", 0.0, 0.5)))
     spec = build_presentation_spec(workflow, duration_seconds=8.0)
@@ -280,16 +311,26 @@ def test_python_contract_forbids_unknown_fields_assets_and_presets() -> None:
 
 @pytest.mark.parametrize(
     ("source", "expected"),
-    [(source, "GTA " + roman)
-     for digit, roman in [("4", "IV"), ("5", "V"), ("6", "VI")]
-     for source in [f"GTA {digit}", f"GT A{digit}", f"GTA,{digit}",
-                    f"gta{digit}", f"gt A , {digit}", f"GTA. {digit}"]]
-    + [("Olá, GTA,5!", "Olá, GTA V!"),
-       ("GTA IV e GTA VI", "GTA IV e GTA VI"),
-       ("GT 4 e A6", "GT 4 e A6"),
-       ("GTA 7 e GTA 40", "GTA 7 e GTA 40"),
-       ("AGTA4 GTA5x GTA 5.1 GTA 6,5", "AGTA4 GTA5x GTA 5.1 GTA 6,5"),
-       ("Forza 5 custa 4,50.", "Forza 5 custa 4,50.")],
+    [
+        (source, "GTA " + roman)
+        for digit, roman in [("4", "IV"), ("5", "V"), ("6", "VI")]
+        for source in [
+            f"GTA {digit}",
+            f"GT A{digit}",
+            f"GTA,{digit}",
+            f"gta{digit}",
+            f"gt A , {digit}",
+            f"GTA. {digit}",
+        ]
+    ]
+    + [
+        ("Olá, GTA,5!", "Olá, GTA V!"),
+        ("GTA IV e GTA VI", "GTA IV e GTA VI"),
+        ("GT 4 e A6", "GT 4 e A6"),
+        ("GTA 7 e GTA 40", "GTA 7 e GTA 40"),
+        ("AGTA4 GTA5x GTA 5.1 GTA 6,5", "AGTA4 GTA5x GTA 5.1 GTA 6,5"),
+        ("Forza 5 custa 4,50.", "Forza 5 custa 4,50."),
+    ],
 )
 def test_gta_caption_display_only(source: str, expected: str) -> None:
     words = _words((source, 0.2, 0.7))
@@ -304,7 +345,9 @@ def test_gta_caption_display_only(source: str, expected: str) -> None:
 def test_gta_caption_display_joins_asr_tokens_without_changing_timing() -> None:
     words = _words(("GT", 0.0, 0.2), ("A", 0.2, 0.3), (",", 0.3, 0.4), ("6", 0.4, 0.7))
     cues = segment_captions(words, duration_seconds=1.0)
-    assert [(cue.text, cue.start_seconds, cue.end_seconds) for cue in cues] == [("GTA VI", 0.0, 0.7)]
+    assert [(cue.text, cue.start_seconds, cue.end_seconds) for cue in cues] == [
+        ("GTA VI", 0.0, 0.7)
+    ]
 
 
 def test_gta_caption_display_wraps_normalized_text_within_line_limit() -> None:

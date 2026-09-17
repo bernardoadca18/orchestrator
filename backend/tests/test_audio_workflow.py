@@ -310,6 +310,81 @@ class FakeTranscriptionProvider:
         )
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("second_outlier", [False, True])
+async def test_physical_speaker_outlier_uses_one_existing_quality_retry(
+    tmp_path, write_tone, second_outlier
+):
+    from unittest.mock import AsyncMock
+
+    class SpeakerVoice(FakeVoiceClient):
+        async def create_narration(self, **payload):
+            queued = await super().create_narration(**payload)
+            self.jobs[queued.id].metadata["chunks"] = [{"index": i} for i in range(4)]
+            return queued
+
+        async def list_chunks(self, job_id):
+            base = (await super().list_chunks(job_id))[0]
+            bad = len(self.created) == 1 or second_outlier
+            scores = [0.992, None, 0.941 if bad else 0.990, 0.993]
+            return [
+                {**base, "chunk_index": i, "chunk_id": f"{job_id}_{i}", "speaker_similarity": score}
+                for i, score in enumerate(scores)
+            ]
+
+        async def download_chunk_audio(self, job_id, chunk_index):
+            return self.audio
+
+    voice = SpeakerVoice(
+        write_tone(tmp_path / "voice.wav", duration=0.3, amplitude=0.08).read_bytes()
+    )
+    workflow = SimpleNamespace(
+        id=uuid.uuid4(),
+        ideia_id=uuid.uuid4(),
+        status="agendada",
+        roteiro_snapshot={"blocos": [{"tipo": "intro", "conteudo": "Texto."}]},
+    )
+    repo = FakeRepository(workflow)
+    repo.atualizar_take = AsyncMock()
+    config = _config(tmp_path, Path("config/pronunciation_glossary.yaml"))
+    config.voice_quality_max_retries = 2
+    service = AudioWorkflowService(
+        object(),
+        config=config,
+        voice_client_factory=lambda: voice,
+        transcription_provider=FakeTranscriptionProvider(),
+        alignment_service_factory=lambda _: FakeAlignmentService(),
+    )
+    service.repo = repo
+    await service.process(workflow.id)
+    assert len(voice.created) == 2
+    assert repo.blocks[0].generation_attempt == 1
+    assert workflow.status == ("erro" if second_outlier else "audio_concluido")
+    if not second_outlier:
+        assert workflow.audio_integrity["expected_frame_count"] == workflow.audio_final_frame_count
+        assert workflow.audio_integrity["duration_delta_seconds"] == 0
+        assert repo.blocks[0].narration_end_seconds == pytest.approx(
+            workflow.duracao_audio_segundos
+        )
+        assert (
+            workflow.narration_diagnostics["assembly"]["artifact"]["duration_seconds"]
+            > workflow.duracao_audio_segundos
+        )
+    failures = [
+        call.kwargs
+        for call in repo.atualizar_take.call_args_list
+        if call.kwargs.get("error_category") == "speaker_similarity_guard"
+    ]
+    assert failures[0]["error_diagnostics"]["offending_chunk_indexes"] == [2]
+    assert failures[0]["error_diagnostics"]["evaluated_chunk_count"] == 3
+    if second_outlier:
+        assert any(
+            call.kwargs.get("error_category") == "quality_retry_exhausted"
+            and call.kwargs.get("quality_status") == "rejected"
+            for call in repo.atualizar_take.call_args_list
+        )
+
+
 class FailingTranscriptionProvider:
     def transcribe(self, audio_path: Path) -> NarrationTranscription:
         raise RuntimeError("transcription unavailable")
@@ -1132,6 +1207,7 @@ async def test_alignment_failure_preserves_audio_but_marks_quality_unvalidated(
 @pytest.mark.asyncio
 async def test_english_audio_passthrough_and_explicit_asr(tmp_path, write_tone, monkeypatch):
     from unittest.mock import Mock
+
     from app.services.audio_service import ensure_transcription
 
     text = "On 12/25, GTA IV cost $20.00."

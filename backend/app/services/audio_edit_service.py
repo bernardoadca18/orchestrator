@@ -22,11 +22,14 @@ from app.models.workflow import (
     WorkflowExecucao,
 )
 from app.repositories.workflow_repository import WorkflowRepository
-from app.services.content_locale import workflow_content_locale
 from app.services.audio_service import _mastering_config, ensure_transcription
 from app.services.audio_serving import AudioArtifactExpectation, verify_audio_artifact
+from app.services.content_locale import workflow_content_locale
 from app.services.mastering import MasteringError, master_narration
-from app.services.narration_postprocessing import process_narration_tempo_candidate, resolve_narration_tempo
+from app.services.narration_postprocessing import (
+    process_narration_tempo_candidate,
+    resolve_narration_tempo,
+)
 from app.services.production_audio import (
     AssemblyResult,
     BlockAssemblyChunk,
@@ -248,8 +251,13 @@ class AudioEditMaterializationService:
         )
         paced_path = edit_root / "narration_paced.wav"
         tempo = process_narration_tempo_candidate(
-            raw_path, paced_path,
+            raw_path,
+            paced_path,
             tempo_factor=resolve_narration_tempo(workflow_content_locale(workflow), self.config),
+        )
+        time_scale = (
+            float(tempo["mastered_narration_duration_seconds"])
+            / narration.metadata.duration_seconds
         )
         final_assembly_seconds = time.monotonic() - final_assembly_started
         final_path = edit_root / "narration_final.wav"
@@ -258,7 +266,10 @@ class AudioEditMaterializationService:
         mastered = master_narration(paced_path, final_path, mastering_config)
         mastering_seconds = time.monotonic() - mastering_started
         if (
-            abs(mastered.metadata.duration_seconds - float(tempo["mastered_narration_duration_seconds"]))
+            abs(
+                mastered.metadata.duration_seconds
+                - float(tempo["mastered_narration_duration_seconds"])
+            )
             > self.config.audio_duration_tolerance_seconds
         ):
             raise MasteringError("final narration duration changed after mastering")
@@ -273,6 +284,8 @@ class AudioEditMaterializationService:
             narration,
             final_path,
             final_metadata,
+            tempo=tempo,
+            time_scale=time_scale,
             mastering_config=asdict(mastering_config),
             mastering_metrics=mastered.to_dict(),
             performance_metrics={
@@ -424,6 +437,8 @@ class AudioEditMaterializationService:
         final_path: Path,
         final_metadata: Any,
         *,
+        tempo: dict[str, object],
+        time_scale: float,
         mastering_config: dict[str, object],
         mastering_metrics: dict[str, object],
         performance_metrics: dict[str, float],
@@ -463,8 +478,8 @@ class AudioEditMaterializationService:
             ).scalars()
         )
         for block, offset in zip(locked_blocks, narration.offsets, strict=True):
-            block.narration_start_seconds = offset.start_seconds
-            block.narration_end_seconds = offset.end_seconds
+            block.narration_start_seconds = offset.start_seconds * time_scale
+            block.narration_end_seconds = offset.end_seconds * time_scale
             replacement = rebuilt.get(block.id)
             if replacement is None:
                 continue
@@ -564,7 +579,8 @@ class AudioEditMaterializationService:
         locked_workflow.audio_integrity = {
             "status": "passed",
             "artifact": asdict(final_metadata),
-            "expected_frame_count": narration.expected_frame_count,
+            "expected_frame_count": final_metadata.frame_count,
+            "decoded_frame_count": final_metadata.frame_count,
         }
         locked_workflow.narration_diagnostics = {
             "version": "narration_diagnostic_manifest_v1",
@@ -577,6 +593,8 @@ class AudioEditMaterializationService:
                 "expected_frame_count": narration.expected_frame_count,
             },
             "mastering": mastering_metrics,
+            "tempo": tempo,
+            "final": {"artifact": asdict(final_metadata)},
             "orchestrator_performance": performance_metrics,
             "blocks": [
                 {

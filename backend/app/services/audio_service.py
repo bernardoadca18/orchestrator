@@ -6,12 +6,13 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import math
 import time
 import uuid
-from statistics import median
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
+from statistics import median
 from types import SimpleNamespace
 from typing import cast
 
@@ -35,21 +36,24 @@ from app.services.block_materialization import (
     active_block_is_current,
     active_block_manifest,
 )
+from app.services.content_chunk_diagnostics import analyze_chunk_content
+from app.services.content_coverage import (
+    ContentCoverageThresholds,
+    analyze_content_coverage,
+    is_known_pronunciation_defect,
+    unavailable_content_report,
+)
 from app.services.content_locale import (
     NarrationVoice,
     resolve_narration_voice,
     workflow_content_locale,
 )
-from app.services.content_chunk_diagnostics import analyze_chunk_content
-from app.services.content_coverage import (
-    ContentCoverageThresholds,
-    analyze_content_coverage,
-    unavailable_content_report,
-    is_known_pronunciation_defect,
-)
 from app.services.mastering import MasteringConfig, MasteringError, master_narration
-from app.services.narration_postprocessing import process_narration_tempo_candidate, resolve_narration_tempo
 from app.services.narration_alignment_service import NarrationAlignmentService
+from app.services.narration_postprocessing import (
+    process_narration_tempo_candidate,
+    resolve_narration_tempo,
+)
 from app.services.production_audio import (
     AudioFileMetadata,
     BlockAssemblyChunk,
@@ -90,19 +94,31 @@ SPEAKER_OUTLIER_POLICY = {
 }
 
 
-def detect_strong_speaker_outliers(scores: list[float]) -> dict[str, object] | None:
+def detect_strong_speaker_outliers(
+    scores: list[tuple[int, float | None]],
+) -> dict[str, object] | None:
     """Return conservative relative outlier diagnostics, or None."""
-    values = [float(score) for score in scores if score is not None]
+    values = {
+        index: float(score) for index, score in scores if score is not None and math.isfinite(score)
+    }
     if len(values) < SPEAKER_OUTLIER_POLICY["minimum_chunk_count"]:
         return None
-    center = float(median(values))
-    offending = [index for index, score in enumerate(values)
-                 if score < SPEAKER_OUTLIER_POLICY["absolute_floor"]
-                 and center - score >= SPEAKER_OUTLIER_POLICY["median_delta"]]
+    center = float(median(values.values()))
+    offending = [
+        index
+        for index, score in values.items()
+        if score < SPEAKER_OUTLIER_POLICY["absolute_floor"]
+        and center - score >= SPEAKER_OUTLIER_POLICY["median_delta"]
+    ]
     if not offending:
         return None
-    return {"median": center, "offending_chunk_indexes": offending,
-            "scores": values, "policy_version": SPEAKER_OUTLIER_POLICY["version"]}
+    return {
+        "median": center,
+        "offending_chunk_indexes": offending,
+        "evaluated_chunk_count": len(values),
+        "scores_by_chunk_index": values,
+        "policy_version": SPEAKER_OUTLIER_POLICY["version"],
+    }
 
 
 def _sha256_text(value: str) -> str:
@@ -462,6 +478,18 @@ class AudioWorkflowService:
                         performance = materialized_provider_metadata.setdefault(
                             "orchestrator_performance", {}
                         )
+                        speaker_outlier = materialized_provider_metadata.get("speaker_outlier")
+                        if speaker_outlier is not None:
+                            failure = VoiceJobFailedError(
+                                "speaker_similarity_guard",
+                                "strong speaker outlier in physical chunks",
+                            )
+                            failure.diagnostics = speaker_outlier
+                            take = await self._prepare_quality_retry(block, take, failure)
+                            active_take = take
+                            if hasattr(self.repo, "atualizar_take"):
+                                await self.repo.atualizar_take(take.id, status="running")
+                            continue
                         if isinstance(performance, dict):
                             performance.update(
                                 {
@@ -762,7 +790,10 @@ class AudioWorkflowService:
             tempo = process_narration_tempo_candidate(
                 assembled_path, paced_path, tempo_factor=tempo_factor
             )
-            time_scale = float(tempo["mastered_narration_duration_seconds"]) / assembly.metadata.duration_seconds
+            time_scale = (
+                float(tempo["mastered_narration_duration_seconds"])
+                / assembly.metadata.duration_seconds
+            )
             for offset in assembly.offsets:
                 offset_block = await self.repo.obter_bloco_por_ordem(workflow.id, offset.order)
                 if offset_block is not None:
@@ -772,8 +803,11 @@ class AudioWorkflowService:
                         narration_end_seconds=offset.end_seconds * time_scale,
                     )
             inserted_final_pauses = [
-                {**item, "start_seconds": float(item["start_seconds"]) * time_scale,
-                 "end_seconds": float(item["end_seconds"]) * time_scale}
+                {
+                    **item,
+                    "start_seconds": float(item["start_seconds"]) * time_scale,
+                    "end_seconds": float(item["end_seconds"]) * time_scale,
+                }
                 for item in inserted_final_pauses
             ]
 
@@ -784,7 +818,10 @@ class AudioWorkflowService:
             mastered = master_narration(paced_path, final_path, mastering_config)
             mastering_seconds = time.monotonic() - mastering_started
             if (
-                abs(mastered.metadata.duration_seconds - float(tempo["mastered_narration_duration_seconds"]))
+                abs(
+                    mastered.metadata.duration_seconds
+                    - float(tempo["mastered_narration_duration_seconds"])
+                )
                 > self.config.audio_duration_tolerance_seconds
             ):
                 raise MasteringError("final narration duration changed after mastering")
@@ -841,13 +878,11 @@ class AudioWorkflowService:
             integrity = {
                 "status": "passed",
                 "artifact": asdict(final_metadata),
-                "expected_assembly_duration_seconds": assembly.metadata.duration_seconds,
+                "expected_duration_seconds": final_metadata.duration_seconds,
                 "decoded_physical_duration_seconds": final_metadata.duration_seconds,
                 "persisted_duration_seconds": final_metadata.duration_seconds,
-                "duration_delta_seconds": round(
-                    final_metadata.duration_seconds - assembly.metadata.duration_seconds, 9
-                ),
-                "expected_frame_count": assembly.expected_frame_count,
+                "duration_delta_seconds": 0.0,
+                "expected_frame_count": final_metadata.frame_count,
                 "decoded_frame_count": final_metadata.frame_count,
                 "physical_size_matches_persisted_size": True,
             }
@@ -1214,6 +1249,12 @@ class AudioWorkflowService:
             raise ProductionAudioError("block assembly returned no integrity proof")
         provider_metadata: dict[str, object] = {
             **completed.metadata,
+            "speaker_outlier": detect_strong_speaker_outliers(
+                [
+                    (int(item["chunk_index"]), item.get("speaker_similarity"))
+                    for item in ordered_artifacts
+                ]
+            ),
             "requested_language": voice_config.language,
             "resolved_language": completed.metadata.get("language", voice_config.language),
             "remote_full_artifact": {
@@ -1355,7 +1396,19 @@ class AudioWorkflowService:
             if isinstance(item, dict)
         ):
             history.append(entry)
-        if block.generation_attempt >= self.config.voice_quality_max_retries:
+        speaker_retry_exhausted = (
+            failure.category == "speaker_similarity_guard"
+            and sum(
+                item.get("error_category") == "speaker_similarity_guard"
+                for item in history
+                if isinstance(item, dict)
+            )
+            > SPEAKER_OUTLIER_POLICY["maximum_automatic_retries"]
+        )
+        if (
+            block.generation_attempt >= self.config.voice_quality_max_retries
+            or speaker_retry_exhausted
+        ):
             exhausted_status = (
                 "needs_human_review" if failure.category == "accent_quality_guard" else "rejected"
             )
@@ -1567,7 +1620,9 @@ class AudioWorkflowService:
             mismatches = report.get("metrics", {}).get("pronunciation_or_asr_mismatches", [])
             if any(
                 isinstance(item, dict)
-                and is_known_pronunciation_defect(str(item.get("expected", "")), str(item.get("observed", "")))
+                and is_known_pronunciation_defect(
+                    str(item.get("expected", "")), str(item.get("observed", ""))
+                )
                 for item in mismatches
             ):
                 report.update(

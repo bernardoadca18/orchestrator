@@ -15,8 +15,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco, AudioBlocoTake, WorkflowExecucao
 from app.services.content_locale import resolve_narration_voice
+from app.services.narration_postprocessing import (
+    TEMPO_IMPLEMENTATION_VERSION,
+    resolve_narration_tempo,
+)
 
-CALIBRATION_VERSION = "accepted_take_speaking_rate_v2"
+CALIBRATION_VERSION = "accepted_take_speaking_rate_v3"
 _WORD_RE = re.compile(r"\b[\wÀ-ÿ]+(?:[-'][\wÀ-ÿ]+)*\b", re.UNICODE)
 
 
@@ -43,6 +47,7 @@ class SpeakingRateCalibrationService:
         content_locale: Literal["pt-BR", "en-US"] = "pt-BR",
     ) -> dict[str, Any]:
         voice = resolve_narration_voice(content_locale, self.config)
+        tempo_factor = resolve_narration_tempo(content_locale, self.config)
         snapshot_locale = WorkflowExecucao.roteiro_snapshot["content_locale"].astext
         locale_filter = snapshot_locale == content_locale
         if content_locale == "pt-BR":
@@ -84,8 +89,8 @@ class SpeakingRateCalibrationService:
                 {
                     "id": str(take.id),
                     "completed_at": take.completed_at.isoformat() if take.completed_at else None,
-                    "words_per_minute": words * 60 / duration,
-                    "chars_per_second": len(text) / duration,
+                    "words_per_minute": words * 60 / duration * tempo_factor,
+                    "chars_per_second": len(text) / duration * tempo_factor,
                     "voice_profile": take.voice_profile,
                     "generation_profile": take.generation_profile,
                     "production_profile": profile,
@@ -94,8 +99,8 @@ class SpeakingRateCalibrationService:
 
         fallback = len(samples) < 3
         if fallback:
-            words_per_minute = self.config.speaking_rate_fallback_words_per_minute
-            chars_per_second = self.config.speaking_rate_fallback_chars_per_second
+            words_per_minute = self.config.speaking_rate_fallback_words_per_minute * tempo_factor
+            chars_per_second = self.config.speaking_rate_fallback_chars_per_second * tempo_factor
             voice_profile = voice.voice_profile
             generation_profile = voice.generation_profile
             source_window = "configured_fallback"
@@ -110,6 +115,8 @@ class SpeakingRateCalibrationService:
 
         identity_payload = {
             "version": CALIBRATION_VERSION,
+            "tempo_version": TEMPO_IMPLEMENTATION_VERSION,
+            "tempo_factor": tempo_factor,
             "content_locale": content_locale,
             "sample_ids": [item["id"] for item in samples],
             "words_per_minute": round(words_per_minute, 6),
@@ -121,6 +128,8 @@ class SpeakingRateCalibrationService:
         }
         return {
             "version": CALIBRATION_VERSION,
+            "tempo_version": TEMPO_IMPLEMENTATION_VERSION,
+            "tempo_factor": tempo_factor,
             "identity": _identity(identity_payload),
             "words_per_minute": round(words_per_minute, 3),
             "chars_per_second": round(chars_per_second, 3),

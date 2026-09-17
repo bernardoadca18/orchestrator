@@ -592,6 +592,7 @@ class VisualDirectorService:
             "media_scope_fingerprint": scope_fingerprint,
             "strategy_version": self._strategy_version(scope),
             "policy": {
+                "video_window_quality": "black_window_quality_v1",
                 "search_top_k": self.config.visual_director_search_top_k,
                 "max_alternatives": self.config.visual_director_max_alternatives,
                 "min_semantic_score": self.config.visual_director_min_semantic_score,
@@ -631,6 +632,40 @@ class VisualDirectorService:
             },
         }
         return _sha256(request), script_fingerprint, scope_fingerprint
+
+    async def _quality_checked_candidate(
+        self,
+        candidate: HybridVisualCandidate,
+        query: QueryContext,
+    ) -> HybridVisualCandidate | None:
+        if isinstance(candidate, StaticImageCandidate):
+            return candidate
+        try:
+            quality = await self.provider.video_window_quality(
+                candidate.media_id,
+                start_seconds=candidate.start_seconds,
+                end_seconds=candidate.end_seconds,
+            )
+        except MediaIndexerError:
+            return None
+        if quality.status == "clean":
+            return candidate
+        if quality.status != "edge_black":
+            return None
+        start, end = quality.recommended_start_seconds, quality.recommended_end_seconds
+        if start is None or end is None:
+            return None
+        required_duration = min(
+            candidate.duration_seconds,
+            query.target_duration_seconds
+            or query.desired_duration_seconds
+            or candidate.duration_seconds,
+        )
+        if not candidate.start_seconds <= start < end <= candidate.end_seconds or end - start < max(
+            self.config.production_timeline_min_visual_seconds, required_duration
+        ):
+            return None
+        return replace(candidate, start_seconds=start, end_seconds=end)
 
     def _strategy_version(self, scope: MediaScope | None) -> str:
         return (
@@ -860,6 +895,18 @@ class VisualDirectorService:
                 else:
                     source_status = "unresolved"
                 reason = reason or "Media Search returned no relevant results"
+
+            if selected is not None:
+                valid = []
+                for candidate in [selected, *alternatives[:2]]:
+                    checked = await self._quality_checked_candidate(candidate, item)
+                    if checked is not None:
+                        valid.append(checked)
+                selected = valid[0] if valid else None
+                alternatives = valid[1:]
+                if selected is None:
+                    source_status = "unresolved"
+                    reason = "No bounded candidate passed video window quality"
 
             if selected is not None:
                 if any(self._candidate_reused(selected, previous) for previous in already_selected):

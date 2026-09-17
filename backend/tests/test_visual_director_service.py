@@ -15,6 +15,7 @@ from app.clients.media_indexer_search import (
     MediaSearchCandidate,
     MediaSearchResultSet,
     MediaSessionMetadata,
+    VideoWindowQuality,
 )
 from app.core.config import Settings
 from app.models.workflow import (
@@ -170,6 +171,21 @@ class FakeProvider:
         self.image_search_calls: list[tuple[uuid.UUID, str, ImageSearchFilters]] = []
         self.search_error: Exception | None = None
         self.image_error: Exception | None = None
+        self.quality_calls = []
+        self.quality_overrides = {}
+
+    async def video_window_quality(self, media_id, *, start_seconds, end_seconds):
+        self.quality_calls.append((media_id, start_seconds, end_seconds))
+        return VideoWindowQuality(
+            version="black_window_quality_v1",
+            window_start_seconds=start_seconds,
+            window_end_seconds=end_seconds,
+            black_total_seconds=0,
+            black_ratio=0,
+            longest_black_seconds=0,
+            black_intervals=[],
+            **self.quality_overrides.get(start_seconds, {"status": "clean"}),
+        )
 
     async def get_session(self, session_id: uuid.UUID):
         self.session_calls.append(session_id)
@@ -365,6 +381,62 @@ async def test_nonempty_final_faceless_narration_with_zero_queries_is_blocked() 
     assert repeated_created is False
     assert repeated.status == "blocked"
     assert repeated.diagnostics["error_category"] == VISUAL_QUERIES_MISSING_CATEGORY
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hybrid", [False, True])
+async def test_video_quality_rejects_black_and_uses_only_bounded_alternatives(hybrid):
+    workflow, alignment = _entities([_query(preferred_session_id=None, start=None, end=None)])
+    if hybrid:
+        workflow.roteiro_snapshot["media_context"]["static_images"] = {"enabled": True}
+    provider = FakeProvider()
+    provider.results = [
+        _candidate(start=i * 100, end=i * 100 + 15, score=0.9 - i * 0.1) for i in range(4)
+    ]
+    provider.quality_overrides = {
+        0: {"status": "mostly_black"},
+        100: {"status": "internal_black"},
+        200: {
+            "status": "edge_black",
+            "recommended_start_seconds": 201.1,
+            "recommended_end_seconds": 215,
+        },
+    }
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.decisions[0].selected_source["source_start_seconds"] == 201.1
+    assert [item[1] for item in provider.quality_calls] == [0, 100, 200]
+    assert plan.decisions[0].alternatives == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "quality",
+    [
+        {"status": "mostly_black"},
+        {
+            "status": "edge_black",
+            "recommended_start_seconds": 1199,
+            "recommended_end_seconds": 1240,
+        },
+        {
+            "status": "edge_black",
+            "recommended_start_seconds": 1239,
+            "recommended_end_seconds": 1240,
+        },
+    ],
+)
+async def test_trusted_video_quality_is_required_and_trim_must_be_authorized_and_sufficient(
+    quality,
+):
+    workflow, alignment = _entities([_query()])
+    provider = FakeProvider()
+    provider.quality_overrides[1200] = quality
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.decisions[0].source_resolution_status == "unresolved"
+    assert plan.decisions[0].selected_source is None
+    assert len(provider.quality_calls) == 1
 
 
 def _candidate(
@@ -588,7 +660,7 @@ async def test_hybrid_image_only_result_is_selected_without_temporal_fields() ->
     service, _ = _service(workflow, alignment, provider)
     plan, _ = await service.ensure(workflow.id)
     source = plan.decisions[0].selected_source
-    assert plan.strategy_version == "visual_director_v2_hybrid_sources"
+    assert plan.strategy_version == "visual_director_v3_hybrid_video_quality_guard"
     assert source["source_type"] == "static_image"
     assert "source_start_seconds" not in source
     assert len(provider.project_search_calls) == 1

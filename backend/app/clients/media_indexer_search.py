@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from uuid import UUID
 
 import httpx
@@ -163,6 +163,10 @@ class MediaSearchResultSet:
 
 
 class MediaSearchProvider(Protocol):
+    async def video_window_quality(
+        self, media_id: UUID, *, start_seconds: float, end_seconds: float,
+    ) -> VideoWindowQuality: ...
+
     async def get_asset(self, media_id: UUID) -> MediaAssetMetadata: ...
 
     async def get_session(self, session_id: UUID) -> MediaSessionMetadata: ...
@@ -197,6 +201,20 @@ class MediaSearchProvider(Protocol):
         min_score: float,
         filters: ImageSearchFilters,
     ) -> ImageSearchResultSet: ...
+
+
+class VideoWindowQuality(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+    version: Literal["black_window_quality_v1"]
+    status: Literal["clean", "edge_black", "internal_black", "mostly_black"]
+    window_start_seconds: float = Field(ge=0)
+    window_end_seconds: float = Field(gt=0)
+    black_total_seconds: float = Field(ge=0)
+    black_ratio: float = Field(ge=0, le=1)
+    longest_black_seconds: float = Field(ge=0)
+    black_intervals: list[dict[str, float]]
+    recommended_start_seconds: float | None = None
+    recommended_end_seconds: float | None = None
 
 
 class _MediaOut(BaseModel):
@@ -393,6 +411,26 @@ class MediaIndexerSearchProvider:
             except ValueError as exc:
                 raise MediaIndexerContractError("Media Indexer returned invalid JSON") from exc
         raise AssertionError("unreachable")
+
+    async def video_window_quality(
+        self,
+        media_id: UUID,
+        *,
+        start_seconds: float,
+        end_seconds: float,
+    ) -> VideoWindowQuality:
+        raw = await self._request(
+            "POST",
+            f"/media-assets/{media_id}/video-window-quality",
+            json={"start_seconds": start_seconds, "end_seconds": end_seconds},
+        )
+        try:
+            parsed = VideoWindowQuality.model_validate(raw)
+        except ValidationError as exc:
+            raise MediaIndexerContractError("Invalid video window quality response") from exc
+        if parsed.window_start_seconds != start_seconds or parsed.window_end_seconds != end_seconds:
+            raise MediaIndexerContractError("Video window quality belongs to another range")
+        return parsed
 
     async def get_session(self, session_id: UUID) -> MediaSessionMetadata:
         raw = await self._request("GET", f"/sessions/{session_id}")

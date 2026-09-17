@@ -31,6 +31,34 @@ def _settings(**values) -> Settings:
     )
 
 
+@pytest.mark.asyncio
+async def test_video_window_quality_typed_request_and_range_identity():
+    def handler(request):
+        assert request.method == "POST"
+        assert request.url.path == f"/media-assets/{MEDIA_ID}/video-window-quality"
+        assert json.loads(request.content) == {"start_seconds": 100, "end_seconds": 115}
+        return httpx.Response(
+            200,
+            json={
+                "version": "black_window_quality_v1",
+                "status": "edge_black",
+                "window_start_seconds": 100,
+                "window_end_seconds": 115,
+                "black_total_seconds": 0.6,
+                "black_ratio": 0.04,
+                "longest_black_seconds": 0.6,
+                "black_intervals": [{"start_seconds": 100, "end_seconds": 100.6}],
+                "recommended_start_seconds": 100.7,
+                "recommended_end_seconds": 115,
+            },
+        )
+
+    provider = MediaIndexerSearchProvider(_settings(), transport=httpx.MockTransport(handler))
+    result = await provider.video_window_quality(MEDIA_ID, start_seconds=100, end_seconds=115)
+    assert result.status == "edge_black"
+    assert result.recommended_start_seconds == 100.7
+
+
 def _session_payload() -> dict:
     return {
         "id": str(SESSION_ID),

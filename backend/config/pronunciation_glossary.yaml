@@ -130,7 +130,7 @@ entries:
     enabled: true
     priority: 300
     revision: 1
-    source: pronunciation_corpus:pronunciation_reference_v2
+    source: production-validation-2026-09-17
     approval: {status: approved, approved_by: production-validation-2026-09-17}
   - id: title.gta-v
     canonical_term: GTA V

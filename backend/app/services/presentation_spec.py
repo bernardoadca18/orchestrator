@@ -129,7 +129,7 @@ def _block_order_for_word(
         return None
     midpoint = start + max(0.0, end - start) / 2
     for order, block_start, block_end in block_ranges:
-        if block_start <= midpoint <= block_end:
+        if block_start <= midpoint < block_end:
             return order
     return None
 
@@ -161,6 +161,16 @@ def _normalize_token(value: Any) -> str:
 
 _GTA_DISPLAY = re.compile(r"(?<!\w)GT\s*A\s*[,.:;_-]?\s*([3456])(?!\w|[.,]\d)", re.IGNORECASE)
 _GTA_NUMERALS = {"3": "III", "4": "IV", "5": "V", "6": "VI"}
+_GTA_TITLE = re.compile(r"(?<!\w)GTA\s+(III|IV|VI|V)(?!\w)", re.IGNORECASE)
+
+
+def _canonical_gta_titles(raw_blocks: list[dict[str, Any]]) -> dict[int, str]:
+    result = {}
+    for index, block in enumerate(raw_blocks):
+        titles = {match[1].upper() for match in _GTA_TITLE.finditer(str(block.get("conteudo", "")))}
+        if len(titles) == 1:
+            result[int(block.get("ordem", index))] = "GTA " + titles.pop()
+    return result
 
 
 def _normalize_caption_display(text: str) -> str:
@@ -203,6 +213,7 @@ def segment_captions(
     duration_seconds: float,
     policy: CaptionPolicy = CAPTION_POLICY_V1,
     block_ranges: list[tuple[int, float, float]] | None = None,
+    canonical_gta_titles: dict[int, str] | None = None,
 ) -> list[CaptionCueOut]:
     """Segment words with bounded, local timing normalization for caption cues."""
 
@@ -210,7 +221,7 @@ def segment_captions(
         raise PresentationInputError("narration duration must be finite and positive")
     if len(raw_words) > policy.max_words:
         raise PresentationInputError("caption word limit exceeded")
-    parsed: list[tuple[str, float, float]] = []
+    parsed: list[tuple[str, float, float, int | None]] = []
     previous_start: float | None = None
     previous_end: float | None = None
     previous_normalized_end: float | None = None
@@ -287,18 +298,23 @@ def segment_captions(
                 duration_seconds=duration_seconds,
                 block_order=block_order,
             )
-        parsed.append((token, normalized_start, normalized_end))
+        parsed.append((token, normalized_start, normalized_end, block_order))
         previous_start = start
         previous_end = end
         previous_normalized_end = normalized_end
 
     cues: list[CaptionCueOut] = []
-    current: list[tuple[str, float, float]] = []
+    current: list[tuple[str, float, float, int | None]] = []
+
+    def display(words: list[tuple[str, float, float, int | None]]) -> str:
+        text = _render_tokens([item[0] for item in words])
+        title = (canonical_gta_titles or {}).get(words[0][3])
+        return _GTA_TITLE.sub(lambda _: title, text) if title else text
 
     def flush() -> None:
         if not current:
             return
-        text = _wrap_two_lines(_render_tokens([item[0] for item in current]), policy)
+        text = _wrap_two_lines(display(current), policy)
         if text is None:
             raise PresentationInputError("caption cue cannot fit the versioned line policy")
         cues.append(
@@ -312,10 +328,12 @@ def segment_captions(
         current.clear()
 
     for word in parsed:
+        if current and word[3] != current[-1][3]:
+            flush()
         if current:
             gap = word[1] - current[-1][2]
             candidate = [*current, word]
-            candidate_text = _render_tokens([item[0] for item in candidate])
+            candidate_text = display(candidate)
             if (
                 gap > policy.pause_break_seconds
                 or word[2] - current[0][1] > policy.max_cue_seconds
@@ -323,7 +341,7 @@ def segment_captions(
             ):
                 flush()
         current.append(word)
-        current_text = _render_tokens([item[0] for item in current])
+        current_text = display(current)
         if (
             _SENTENCE_END.search(current_text)
             and current[-1][2] - current[0][1] >= policy.preferred_min_seconds
@@ -396,6 +414,7 @@ def build_presentation_spec(
     cues = segment_captions(
         transcription.palavras_timestamps,
         duration_seconds=duration_seconds,
+        canonical_gta_titles=_canonical_gta_titles(workflow.roteiro_snapshot.get("blocos", [])),
         block_ranges=[
             (
                 block.ordem,
