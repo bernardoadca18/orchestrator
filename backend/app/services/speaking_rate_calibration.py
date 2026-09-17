@@ -7,15 +7,16 @@ import hashlib
 import json
 import re
 import statistics
-from typing import Any
+from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, settings
 from app.models.workflow import AudioBloco, AudioBlocoTake, WorkflowExecucao
+from app.services.content_locale import resolve_narration_voice
 
-CALIBRATION_VERSION = "accepted_take_speaking_rate_v1"
+CALIBRATION_VERSION = "accepted_take_speaking_rate_v2"
 _WORD_RE = re.compile(r"\b[\wÀ-ÿ]+(?:[-'][\wÀ-ÿ]+)*\b", re.UNICODE)
 
 
@@ -36,18 +37,31 @@ class SpeakingRateCalibrationService:
         self.session = session
         self.config = config
 
-    async def snapshot(self, production_profile: str | None = None) -> dict[str, Any]:
+    async def snapshot(
+        self,
+        production_profile: str | None = None,
+        content_locale: Literal["pt-BR", "en-US"] = "pt-BR",
+    ) -> dict[str, Any]:
+        voice = resolve_narration_voice(content_locale, self.config)
+        snapshot_locale = WorkflowExecucao.roteiro_snapshot["content_locale"].astext
+        locale_filter = snapshot_locale == content_locale
+        if content_locale == "pt-BR":
+            locale_filter = or_(
+                locale_filter,
+                ~WorkflowExecucao.roteiro_snapshot.has_key("content_locale"),
+            )
         stmt = (
             select(AudioBlocoTake, WorkflowExecucao.perfil_producao)
             .join(AudioBloco, AudioBloco.id == AudioBlocoTake.audio_bloco_id)
             .join(WorkflowExecucao, WorkflowExecucao.id == AudioBloco.workflow_execucao_id)
             .where(
+                locale_filter,
                 AudioBlocoTake.status == "completed",
                 AudioBlocoTake.is_current.is_(True),
                 AudioBlocoTake.audio_duration_seconds.is_not(None),
                 AudioBlocoTake.synthesis_text.is_not(None),
-                AudioBlocoTake.voice_profile == self.config.voice_profile,
-                AudioBlocoTake.generation_profile == self.config.voice_generation_profile,
+                AudioBlocoTake.voice_profile == voice.voice_profile,
+                AudioBlocoTake.generation_profile == voice.generation_profile,
             )
             .order_by(AudioBlocoTake.completed_at.desc())
             .limit(200)
@@ -82,8 +96,8 @@ class SpeakingRateCalibrationService:
         if fallback:
             words_per_minute = self.config.speaking_rate_fallback_words_per_minute
             chars_per_second = self.config.speaking_rate_fallback_chars_per_second
-            voice_profile = self.config.voice_profile
-            generation_profile = self.config.voice_generation_profile
+            voice_profile = voice.voice_profile
+            generation_profile = voice.generation_profile
             source_window = "configured_fallback"
         else:
             word_rates = [item["words_per_minute"] for item in samples]
@@ -96,6 +110,7 @@ class SpeakingRateCalibrationService:
 
         identity_payload = {
             "version": CALIBRATION_VERSION,
+            "content_locale": content_locale,
             "sample_ids": [item["id"] for item in samples],
             "words_per_minute": round(words_per_minute, 6),
             "chars_per_second": round(chars_per_second, 6),
@@ -123,7 +138,7 @@ class SpeakingRateCalibrationService:
             "source_window": source_window,
             "generated_at": dt.datetime.now(dt.UTC).isoformat(),
             "fallback": fallback,
-            "language": "pt-BR",
+            "language": content_locale,
             "voice_profile": voice_profile,
             "generation_profile": generation_profile,
             "production_profile": production_profile,

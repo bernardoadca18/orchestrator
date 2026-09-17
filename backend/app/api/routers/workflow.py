@@ -209,10 +209,13 @@ def _available_script(
 async def get_speaking_rate_calibration(
     db: Annotated[AsyncSession, Depends(get_db)],
     production_profile: str | None = None,
+    content_locale: Literal["pt-BR", "en-US"] = "pt-BR",
 ):
     """Expose a reproducible accepted-take calibration; never invokes TTS."""
 
-    return await SpeakingRateCalibrationService(db).snapshot(production_profile)
+    return await SpeakingRateCalibrationService(db).snapshot(
+        production_profile, content_locale=content_locale
+    )
 
 
 @router.get("/pronunciation/candidates")
