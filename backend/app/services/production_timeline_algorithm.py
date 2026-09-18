@@ -700,8 +700,7 @@ def build_production_timeline(
     }
     cut_count = max(0, len(placements) - 1)
     average = round(us_to_seconds(covered) / len(placements), 6) if placements else None
-    has_query_gap = any(item.status not in {"fully_placed", "not_applicable"} for item in outcomes)
-    status = "completed" if not gaps and not has_query_gap else "completed_with_gaps"
+    status = "completed" if not gaps else "completed_with_gaps"
     result = TimelinePlanResult(
         duration_us=duration_us,
         placements=tuple(placements),

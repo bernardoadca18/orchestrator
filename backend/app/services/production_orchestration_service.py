@@ -28,6 +28,12 @@ from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_timeline_coverage import (
+    can_repair_production_timeline,
+    temporal_gap_details,
+    timeline_has_temporal_gaps,
+    timeline_is_gap_free,
+)
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
 from app.services.visual_director_service import VisualDirectorService
@@ -141,11 +147,13 @@ class ProductionOrchestrationService:
                     return OrchestrationResult(terminal=True)
 
                 if phase == "production_timeline":
-                    timeline, _ = await self.timelines.ensure(workflow.id, force=False)
-                    if timeline.status == "completed" and timeline.gap_count == 0:
+                    timeline = await self.timelines.current(workflow.id)
+                    if timeline is None:
+                        timeline, _ = await self.timelines.ensure(workflow.id, force=False)
+                    if timeline_is_gap_free(timeline):
                         await self._advance(workflow, "render")
                         continue
-                    if timeline.status == "completed_with_gaps" or timeline.gap_count > 0:
+                    if timeline_has_temporal_gaps(timeline):
                         await self._block(
                             workflow,
                             "production_timeline",
@@ -163,7 +171,15 @@ class ProductionOrchestrationService:
 
                 if phase == "render":
                     timeline = await self.timelines.current(workflow.id)
-                    if timeline is None or timeline.status != "completed" or timeline.gap_count:
+                    if timeline_has_temporal_gaps(timeline):
+                        await self._block(
+                            workflow,
+                            "production_timeline",
+                            "production_timeline_has_gaps",
+                            GAP_MESSAGE,
+                        )
+                        return OrchestrationResult(terminal=True)
+                    if not timeline_is_gap_free(timeline):
                         await self._block(
                             workflow,
                             "render",
@@ -352,6 +368,53 @@ class ProductionOrchestrationService:
         await self.workflows.atualizar_producao(
             workflow.id, status="queued", phase=phase or "audio"
         )
+
+    async def repair_timeline(self, workflow: WorkflowExecucao) -> None:
+        timeline = await self.timelines.current(workflow.id)
+        if not can_repair_production_timeline(workflow, timeline):
+            raise ValueError("O reparo exige uma produção bloqueada por gaps temporais reais.")
+        # The endpoint locks the workflow before claiming this explicit operation.
+        await self.workflows.atualizar_producao(
+            workflow.id, status="running", phase="production_timeline"
+        )
+        try:
+            timeline, _ = await self.timelines.ensure(workflow.id, force=True)
+            if timeline_has_temporal_gaps(timeline) and any(
+                gap.reason in {"source_unresolved", "source_too_short"} for gap in timeline.gaps
+            ):
+                # Quality-guard rejections are recorded as unresolved sources by the planner.
+                await self.visual.ensure(workflow.id, force=True)
+                timeline, _ = await self.timelines.ensure(workflow.id, force=True)
+        except Exception:
+            await self.session.rollback()
+            latest = await self.workflows.obter_por_id(workflow.id)
+            if latest is not None and not self._cancelled(latest):
+                await self._block(
+                    latest,
+                    "production_timeline",
+                    "production_timeline_has_gaps",
+                    "O reparo da timeline falhou; os artefatos de narração foram preservados.",
+                )
+            return
+        latest = await self.workflows.obter_por_id(workflow.id)
+        if latest is None or self._cancelled(latest):
+            return
+        if timeline_is_gap_free(timeline):
+            await self.resume(latest)
+        elif timeline_has_temporal_gaps(timeline):
+            await self._block(
+                latest,
+                "production_timeline",
+                "production_timeline_has_gaps",
+                GAP_MESSAGE + ": " + json.dumps(temporal_gap_details(timeline)),
+            )
+        else:
+            await self._block(
+                latest,
+                "production_timeline",
+                "production_timeline_repair_failed",
+                "Não foi possível concluir o replanejamento da timeline.",
+            )
 
     async def current_render(self, workflow_id: uuid.UUID) -> WorkflowRender | None:
         workflow = await self.workflows.obter_por_id(workflow_id)
@@ -736,7 +799,7 @@ class ProductionOrchestrationService:
         if plan is None or plan.status not in {"completed", "completed_with_gaps"}:
             return "visual_plan"
         timeline = await self.timelines.current(workflow.id)
-        if timeline is None or timeline.status not in {"completed", "completed_with_gaps"}:
+        if not timeline_is_gap_free(timeline):
             return "production_timeline"
         return "render"
 

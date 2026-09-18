@@ -325,3 +325,50 @@ async def test_retry_preserves_narration_alignment_phase() -> None:
     repository.incrementar_tentativa.assert_not_awaited()
     service.explicit_retry.assert_awaited_once_with(workflow)
     enqueue.assert_called_once_with(str(workflow.id))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("repaired_status", ["queued", "blocked"])
+async def test_repair_endpoint_enqueues_only_gap_free_result(repaired_status):
+    from app.api.routers.workflow import reparar_timeline_producao
+
+    wf = _workflow()
+    repo = MagicMock()
+    repo.obter_por_id_para_atualizacao = AsyncMock(return_value=wf)
+    repo.obter_por_id = AsyncMock(return_value=wf)
+    service = MagicMock()
+
+    async def repair(current):
+        current.production_status = repaired_status
+
+    service.repair_timeline = AsyncMock(side_effect=repair)
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repo),
+        patch("app.api.routers.workflow.ProductionOrchestrationService", return_value=service),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+    ):
+        result = await reparar_timeline_producao(wf.id, AsyncMock())
+    assert result is wf
+    repo.obter_por_id_para_atualizacao.assert_awaited_once_with(wf.id)
+    service.repair_timeline.assert_awaited_once_with(wf)
+    assert enqueue.call_count == (1 if repaired_status == "queued" else 0)
+
+
+@pytest.mark.asyncio
+async def test_repair_endpoint_rejects_query_warning_only():
+    from app.api.routers.workflow import reparar_timeline_producao
+
+    wf = _workflow()
+    repo = MagicMock()
+    repo.obter_por_id_para_atualizacao = AsyncMock(return_value=wf)
+    service = MagicMock()
+    service.repair_timeline = AsyncMock(side_effect=ValueError("gaps temporais reais"))
+    with (
+        patch("app.api.routers.workflow.WorkflowRepository", return_value=repo),
+        patch("app.api.routers.workflow.ProductionOrchestrationService", return_value=service),
+        patch("app.api.routers.workflow.processar_producao_workflow.delay") as enqueue,
+        pytest.raises(HTTPException) as error,
+    ):
+        await reparar_timeline_producao(wf.id, AsyncMock())
+    assert error.value.status_code == 409
+    enqueue.assert_not_called()

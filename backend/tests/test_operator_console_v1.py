@@ -337,3 +337,30 @@ def test_composer_inspection_strips_source_reference() -> None:
     }
     payload = _safe_audio_mix_payload(plan)
     assert payload == {"music": {"enabled": True, "asset": {"asset_id": "track"}}}
+
+
+@pytest.mark.parametrize(
+    "gaps,status,phase,allowed",
+    [
+        (1, "blocked", "production_timeline", True),
+        (0, "blocked", "production_timeline", False),
+        (1, "failed", "production_timeline", False),
+        (1, "running", "production_timeline", False),
+        (1, "blocked", "render", False),
+    ],
+)
+def test_timeline_repair_capability_requires_actual_gaps(gaps, status, phase, allowed):
+    from tests.test_production_orchestration_service import _timeline
+
+    wf = workflow(
+        production_status=status,
+        production_phase=phase,
+        production_error_category="production_timeline_has_gaps",
+    )
+    timeline = _timeline(wf.id, gaps=gaps)
+    timeline.status = "completed_with_gaps"
+    timeline.unplaced_query_count = 1
+    capabilities = derive_capabilities(
+        wf, render=None, qa=None, music_available=False, timeline=timeline
+    )
+    assert capabilities["can_repair_production_timeline"].allowed is allowed

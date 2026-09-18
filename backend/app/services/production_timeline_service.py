@@ -155,6 +155,7 @@ class ProductionTimelineService:
         policy: TimelinePolicy,
         *,
         hybrid: bool,
+        validator_override: str | None = None,
     ) -> tuple[str, str]:
         script_fingerprint = (
             visual_plan.script_fingerprint
@@ -178,7 +179,7 @@ class ProductionTimelineService:
             "script_fingerprint": script_fingerprint,
             "strategy_version": strategy_version,
             "schema_version": schema_version,
-            "validator_version": validator_version,
+            "validator_version": validator_override or validator_version,
             "policy": policy.to_dict(),
         }
         return _canonical_hash(payload), script_fingerprint
@@ -200,7 +201,26 @@ class ProductionTimelineService:
         request_fingerprint, _ = self._identity(
             workflow, alignment, visual_plan, policy, hybrid=hybrid
         )
-        return await self.repository.get_by_request_fingerprint(request_fingerprint)
+        timeline = await self.repository.get_by_request_fingerprint(request_fingerprint)
+        if timeline is not None:
+            return timeline
+        # Preserve the exact upstream/policy identity when reading pre-fix artifacts.
+        # New ensure() calls still use the current validator and a new identity.
+        previous = {
+            (False, "production_timeline_validator_v2"): "production_timeline_validator_v1",
+            (True, "production_timeline_validator_v3"): "production_timeline_validator_v2",
+        }.get((hybrid, self._versions(hybrid)[2]))
+        if previous is None:
+            return None
+        legacy_fingerprint, _ = self._identity(
+            workflow,
+            alignment,
+            visual_plan,
+            policy,
+            hybrid=hybrid,
+            validator_override=previous,
+        )
+        return await self.repository.get_by_request_fingerprint(legacy_fingerprint)
 
     def _prerequisite_error(
         self,
@@ -376,9 +396,7 @@ class ProductionTimelineService:
             if item.source_start_us is not None
             else None
         )
-        source_end = (
-            us_to_seconds(item.source_end_us) if item.source_end_us is not None else None
-        )
+        source_end = us_to_seconds(item.source_end_us) if item.source_end_us is not None else None
         identity_tail = (
             f"image:{item.source.image_semantic_index_id}"
             if static

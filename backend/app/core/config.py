@@ -156,10 +156,10 @@ class Settings(BaseSettings):
 
     production_timeline_strategy_version: str = "production_timeline_v1"
     production_timeline_schema_version: str = "production_timeline_schema_v1"
-    production_timeline_validator_version: str = "production_timeline_validator_v1"
+    production_timeline_validator_version: str = "production_timeline_validator_v2"
     production_timeline_hybrid_strategy_version: str = "production_timeline_v2"
     production_timeline_hybrid_schema_version: str = "production_timeline_schema_v2"
-    production_timeline_hybrid_validator_version: str = "production_timeline_validator_v2"
+    production_timeline_hybrid_validator_version: str = "production_timeline_validator_v3"
     production_timeline_min_visual_seconds: float = 0.5
     production_timeline_max_sources_per_query: int = 2
     production_timeline_hybrid_max_sources_per_query: int = 4

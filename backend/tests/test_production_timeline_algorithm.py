@@ -444,3 +444,35 @@ def test_query_count_guard_rejects_unbounded_planning() -> None:
             decisions,
             _policy(maximum_visual_queries=2),
         )
+
+
+def test_unfulfilled_preferred_query_is_not_a_temporal_gap():
+    missing = _decision(20, 25, None, source_status="unresolved", order=1)
+    result = build_production_timeline(
+        30,
+        [
+            _decision(0, 20, _source(0, 20)),
+            missing,
+            _decision(20, 30, _source(20, 30), order=2),
+        ],
+        _policy(),
+    )
+    assert result.status == "completed"
+    assert not result.gaps
+    assert result.coverage_ratio == 1.0
+    assert result.visual_gap_us == 0
+    unplaced = [item for item in result.outcomes if item.status == "unplaced"]
+    assert len(unplaced) == 1
+    assert unplaced[0].visual_query_id == missing.visual_query_id
+    assert unplaced[0].reason == "source_unresolved"
+
+
+def test_true_temporal_gap_remains_incomplete():
+    result = build_production_timeline(
+        30,
+        [_decision(0, 10, _source(0, 10)), _decision(12, 30, _source(12, 30))],
+        _policy(),
+    )
+    assert result.status == "completed_with_gaps"
+    assert len(result.gaps) == 1
+    assert result.visual_gap_us == 2_000_000

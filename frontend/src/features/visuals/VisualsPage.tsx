@@ -1,6 +1,9 @@
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { operatorApi, ProductionTimelineDetail, VisualPlanDetail, VisualSource } from "../../api/operator";
-import { Alert, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, ScoreBar, StatusBadge, TableWrap } from "../../components/ui";
+import { Alert, ActionButton, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, ScoreBar, StatusBadge, TableWrap } from "../../components/ui";
+import { coldArtifactCache } from "../../data/coldArtifactCache";
+import { useOperatorAction } from "../../hooks/useOperatorAction";
+import { presentTimeline } from "./timelinePresentation";
 import { useColdArtifact } from "../../hooks/useColdArtifact";
 import { useWorkflowContext } from "../workflow/WorkflowWorkspace";
 
@@ -23,7 +26,10 @@ function Source({ source, selected = false }: { source: VisualSource; selected?:
 
 function Timeline({ timeline }: { timeline: ProductionTimelineDetail }) {
   const duration = Math.max(timeline.duration_seconds, 0.001);
+  const presentation = presentTimeline(timeline);
   return <Card title="Production Timeline">
+    <p><strong>{presentation.title}</strong></p>
+    {presentation.detail && <Alert tone="warning">{presentation.detail}</Alert>}
     <DefinitionList items={[
       ["Status", <StatusBadge value={timeline.status} />],
       ["Cobertura", `${(timeline.visual_coverage_ratio * 100).toFixed(1)}%`],
@@ -48,14 +54,28 @@ function Timeline({ timeline }: { timeline: ProductionTimelineDetail }) {
 }
 
 export default function VisualsPage() {
-  const { snapshot } = useWorkflowContext();
+  const { snapshot, refresh } = useWorkflowContext();
+  const [revision, setRevision] = useState(0);
+  const action = useOperatorAction(refresh);
   const id = snapshot.workflow.id;
-  const planLoader = useCallback((signal?: AbortSignal) => operatorApi.getVisualPlan(id, signal), [id]);
-  const timelineLoader = useCallback((signal?: AbortSignal) => operatorApi.getTimeline(id, signal), [id]);
+  const planLoader = useCallback((signal?: AbortSignal) => operatorApi.getVisualPlan(id, signal), [id, revision]);
+  const timelineLoader = useCallback((signal?: AbortSignal) => operatorApi.getTimeline(id, signal), [id, revision]);
   const plan = useColdArtifact<VisualPlanDetail>(id, "visual-plan", snapshot.artifacts.visual_plan?.fingerprint, planLoader);
   const timeline = useColdArtifact<ProductionTimelineDetail>(id, "timeline", snapshot.artifacts.production_timeline?.fingerprint, timelineLoader);
+  async function repair() {
+    await action.run(async () => {
+      const result = await operatorApi.repairTimeline(id);
+      coldArtifactCache.invalidateWorkflow(id, ["visual-plan", "timeline"]);
+      setRevision((value) => value + 1);
+      return result;
+    }, "Replanejamento concluído. Consulte o estado da timeline.");
+  }
   if (plan.loading || timeline.loading) return <LoadingState label="Carregando decisões visuais…" />;
   return <div className="workspace-stack">
+    {action.error && <Alert tone="danger">{action.error}</Alert>}
+    {action.notice && <Alert>{action.notice}</Alert>}
+    {snapshot.workflow.capabilities.can_repair_production_timeline?.allowed &&
+      <ActionButton capability={snapshot.workflow.capabilities.can_repair_production_timeline} disabled={action.submitting} onClick={repair}>Resolver gaps visuais</ActionButton>}
     {(plan.error || timeline.error) && <Alert tone="danger">{plan.error || timeline.error}</Alert>}
     {!plan.data ? <EmptyState title="VisualPlan ainda não disponível" detail="A ausência esperada não dispara Media Search." /> : <Card title="VisualPlan">
       <DefinitionList items={[["Status", <StatusBadge value={plan.data.status} />], ["Queries resolvidas", `${plan.data.resolved_queries}/${plan.data.total_queries}`], ["Gaps required / optional", `${plan.data.required_gaps} / ${plan.data.optional_gaps}`], ["Estratégia", plan.data.strategy_version], ["Fingerprint", <code>{plan.data.fingerprint}</code>]]} />

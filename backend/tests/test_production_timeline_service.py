@@ -316,3 +316,96 @@ async def test_alignment_audio_and_strategy_changes_create_new_timeline_identity
     )
     strategy_changed, _ = await strategy_service.ensure(workflow.id)
     assert len({first.id, alignment_changed.id, audio_changed.id, strategy_changed.id}) == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("hybrid", [False, True])
+async def test_current_reads_previous_validator_only_for_matching_upstream(hybrid):
+    workflow, alignment, plan = _entities(source=_source())
+    previous = Settings(
+        production_timeline_validator_version="production_timeline_validator_v1",
+        production_timeline_hybrid_validator_version="production_timeline_validator_v2",
+    )
+    if hybrid:
+        plan.strategy_version = previous.visual_director_hybrid_strategy_version
+        plan.decisions[0].selected_source = {
+            **plan.decisions[0].selected_source,
+            "source_type": "video_segment",
+        }
+    old, repository, _, _ = _service(workflow, alignment, plan, config=previous)
+    legacy, _ = await old.ensure(workflow.id)
+    current, _, alignment_reader, visual_reader = _service(workflow, alignment, plan, repository)
+    assert await current.current(workflow.id) is legacy
+    assert repository.output_writes == 1
+    new, created = await current.ensure(workflow.id)
+    assert created
+    assert new.request_fingerprint != legacy.request_fingerprint
+    assert new.strategy_version == legacy.strategy_version
+    assert new.validator_version == f"production_timeline_validator_v{3 if hybrid else 2}"
+    assert await current.current(workflow.id) is new
+    plan.fingerprint = "9" * 64
+    assert await current.current(workflow.id) is None
+    assert alignment_reader.ensure_calls == visual_reader.ensure_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_service_retains_unplaced_query_diagnostic_on_complete_timeline():
+    workflow, alignment, plan = _entities(duration=30, source=_source())
+    first = plan.decisions[0]
+    first.narration_start_seconds = 0
+    first.narration_end_seconds = 20
+    first.selected_source = {
+        **first.selected_source,
+        "source_start_seconds": 0,
+        "source_end_seconds": 20,
+    }
+    missing = VisualDecision(
+        id=uuid.uuid4(),
+        visual_plan_id=plan.id,
+        visual_query_id=uuid.uuid4(),
+        block_order=0,
+        query_order=1,
+        query="missing shot",
+        intent="evidence",
+        importance="preferred",
+        narration_binding_status="resolved",
+        narration_start_seconds=20,
+        narration_end_seconds=25,
+        source_resolution_status="unresolved",
+        selected_source=None,
+        alternatives=[],
+    )
+    covering = VisualDecision(
+        id=uuid.uuid4(),
+        visual_plan_id=plan.id,
+        visual_query_id=uuid.uuid4(),
+        block_order=0,
+        query_order=2,
+        query="adjacent coverage",
+        intent="evidence",
+        importance="preferred",
+        narration_binding_status="resolved",
+        narration_start_seconds=20,
+        narration_end_seconds=30,
+        source_resolution_status="resolved",
+        selection_strategy="media_search",
+        selected_source={
+            **first.selected_source,
+            "source_start_seconds": 20,
+            "source_end_seconds": 30,
+        },
+        alternatives=[],
+    )
+    plan.decisions.extend([missing, covering])
+    service, _, _, _ = _service(workflow, alignment, plan)
+    timeline, _ = await service.ensure(workflow.id)
+    assert timeline.status == "completed"
+    assert timeline.gap_count == 0
+    assert timeline.visual_coverage_ratio == 1
+    assert timeline.unplaced_query_count == 1
+    outcomes = timeline.diagnostics["query_placement_outcomes"]
+    warning = next(
+        item for item in outcomes if item["visual_query_id"] == str(missing.visual_query_id)
+    )
+    assert warning["status"] == "unplaced"
+    assert warning["reason"] == "source_unresolved"

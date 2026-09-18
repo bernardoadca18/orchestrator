@@ -9,7 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import Settings, settings
-from app.models.workflow import ProductionQAReport, WorkflowExecucao, WorkflowRender
+from app.models.workflow import (
+    ProductionQAReport,
+    ProductionTimeline,
+    WorkflowExecucao,
+    WorkflowRender,
+)
 from app.repositories.human_review_repository import HumanReviewRepository
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.operator import (
@@ -31,6 +36,7 @@ from app.schemas.operator import (
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
 from app.services.production_orchestration_service import ProductionOrchestrationService
+from app.services.production_timeline_coverage import can_repair_production_timeline
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
 from app.services.visual_director_service import VisualDirectorService
@@ -52,6 +58,7 @@ def derive_capabilities(
     render: WorkflowRender | None,
     qa: ProductionQAReport | None,
     music_available: bool,
+    timeline: ProductionTimeline | None = None,
 ) -> dict[str, ActionCapabilityOut]:
     production = workflow.production_status
     cancelled = production == "cancelled" or workflow.status == "cancelada"
@@ -72,6 +79,19 @@ def derive_capabilities(
         "can_resume": capability(
             production in {None, "blocked", "cancelled"},
             "Somente produções bloqueadas, canceladas ou legadas podem ser retomadas.",
+        ),
+        "can_repair_production_timeline": capability(
+            can_repair_production_timeline(workflow, timeline),
+            "O reparo exige uma produção bloqueada por gaps temporais reais.",
+            (
+                "visual_plan",
+                "timeline",
+                "presentation",
+                "audio_mix_plan",
+                "render",
+                "qa",
+                "human_review",
+            ),
         ),
         "can_retry": capability(failed, "Não há uma falha retryable no estado atual."),
         "can_regenerate_narration": capability(
@@ -323,6 +343,12 @@ class OperatorConsoleService:
         music_available = (
             self._music_requested(workflow) and workflow.audio_final_sha256 is not None
         )
+        timeline = None
+        if (
+            workflow.production_status == "blocked"
+            and workflow.production_phase == "production_timeline"
+        ):
+            timeline = await self.production.timelines.current(workflow.id)
         snapshot = workflow.roteiro_snapshot or {}
         title = snapshot.get("titulo")
         if not isinstance(title, str) or not title.strip():
@@ -346,7 +372,7 @@ class OperatorConsoleService:
                 workflow, qa=qa, review=review, projection_error=projection_error
             ),
             capabilities=derive_capabilities(
-                workflow, render=render, qa=qa, music_available=music_available
+                workflow, render=render, qa=qa, music_available=music_available, timeline=timeline
             ),
             render=self._render_identity(render),
             qa=(

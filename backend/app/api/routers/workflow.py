@@ -1056,6 +1056,30 @@ async def retomar_producao(
     return resumed
 
 
+@router.post("/{workflow_id}/repair-production-timeline", response_model=WorkflowOut)
+async def reparar_timeline_producao(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    from sqlalchemy.exc import IntegrityError
+
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id_para_atualizacao(workflow_id)
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    try:
+        await ProductionOrchestrationService(session).repair_timeline(wf)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(409, "O reparo conflitou com outra transição de produção") from exc
+    repaired = await repo.obter_por_id(workflow_id)
+    assert repaired is not None
+    if repaired.production_status == "queued":
+        processar_producao_workflow.delay(str(workflow_id))
+    return repaired
+
+
 @router.patch("/{workflow_id}/cancelar", response_model=WorkflowOut)
 async def cancelar_workflow(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]

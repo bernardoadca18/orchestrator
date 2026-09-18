@@ -49,6 +49,19 @@ def _timeline(workflow_id: uuid.UUID, *, gaps: int = 0) -> SimpleNamespace:
         workflow_execucao_id=workflow_id,
         status="completed" if gaps == 0 else "completed_with_gaps",
         gap_count=gaps,
+        visual_gap_seconds=2.0 if gaps else 0.0,
+        visual_coverage_ratio=0.6 if gaps else 1.0,
+        gaps=[
+            SimpleNamespace(
+                timeline_start_seconds=1.0,
+                timeline_end_seconds=3.0,
+                severity="preferred",
+                reason="source_unresolved",
+                related_visual_query_ids=[uuid.uuid4()],
+            )
+        ]
+        if gaps
+        else [],
         fingerprint="b" * 64,
         duration_seconds=5.0,
         error_message=None,
@@ -494,7 +507,7 @@ async def test_full_state_machine_reuses_upstream_and_polls_to_completion() -> N
     service.audio_processor.assert_not_awaited()
     service.alignments.ensure.assert_awaited_once_with(workflow.id, force=False)
     service.visual.ensure.assert_awaited_once_with(workflow.id, force=False)
-    service.timelines.ensure.assert_awaited_once_with(workflow.id, force=False)
+    service.timelines.ensure.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1082,7 +1095,7 @@ async def test_explicit_cancelled_resume_still_blocks_stale_gap_timeline() -> No
 
     assert result.terminal
     assert workflow.production_status == "blocked"
-    assert workflow.production_error_category == "stale_render_input"
+    assert workflow.production_error_category == "production_timeline_has_gaps"
     assert composer.get_calls == 0
     assert composer.create_calls == []
 
@@ -1140,3 +1153,84 @@ async def test_legacy_resume_with_all_current_artifacts_starts_at_render() -> No
     await service.resume(workflow)
     assert workflow.production_status == "queued"
     assert workflow.production_phase == "render"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["completed", "completed_with_gaps"])
+@pytest.mark.parametrize("phase", ["production_timeline", "render"])
+async def test_query_warning_and_legacy_status_pass_both_temporal_gates(status, phase):
+    workflow = _workflow(phase=phase, status="blocked")
+    timeline = _timeline(workflow.id)
+    timeline.status = status
+    timeline.unplaced_query_count = 1
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    await service.resume(workflow)
+    result = await service.process(workflow.id)
+    assert result.poll_render_id is not None
+    assert workflow.production_phase == "render"
+    assert workflow.production_error_category is None
+    service.timelines.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()
+    service.alignments.ensure.assert_not_awaited()
+    service.audio_processor.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcomes,expected_status,visual_calls",
+    [
+        ([0], "queued", 0),
+        ([1, 0], "queued", 1),
+        ([1, 1], "blocked", 1),
+    ],
+)
+async def test_explicit_repair_is_bounded_and_preserves_upstream(
+    outcomes, expected_status, visual_calls
+):
+    from unittest.mock import call
+
+    workflow = _workflow(phase="production_timeline", status="blocked")
+    workflow.production_error_category = "production_timeline_has_gaps"
+    original = _timeline(workflow.id, gaps=1)
+    composer = FakeComposer(_remote(workflow.id, original))
+    service = _service(workflow, original, composer)
+    service.timelines.ensure.side_effect = [
+        (_timeline(workflow.id, gaps=count), True) for count in outcomes
+    ]
+    await service.repair_timeline(workflow)
+    assert workflow.production_status == expected_status
+    assert workflow.production_phase == "production_timeline"
+    assert service.timelines.ensure.await_args_list == [call(workflow.id, force=True)] * len(
+        outcomes
+    )
+    assert service.visual.ensure.await_args_list == [call(workflow.id, force=True)] * visual_calls
+    service.alignments.ensure.assert_not_awaited()
+    service.audio_processor.assert_not_awaited()
+    assert not composer.create_calls
+    if expected_status == "blocked":
+        assert workflow.production_error_category == "production_timeline_has_gaps"
+        for key in (
+            "gap_count",
+            "total_gap_seconds",
+            "start_seconds",
+            "end_seconds",
+            "severity",
+            "reason",
+            "related_visual_query_ids",
+        ):
+            assert key in workflow.production_error_message
+
+
+@pytest.mark.asyncio
+async def test_query_warning_only_cannot_trigger_repair():
+    workflow = _workflow(phase="production_timeline", status="blocked")
+    workflow.production_error_category = "production_timeline_has_gaps"
+    timeline = _timeline(workflow.id)
+    timeline.status = "completed_with_gaps"
+    timeline.unplaced_query_count = 1
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    with pytest.raises(ValueError, match="gaps temporais reais"):
+        await service.repair_timeline(workflow)
+    service.timelines.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()

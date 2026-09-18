@@ -193,6 +193,7 @@ export interface ProductionTimelineDetail {
   status: string;
   duration_seconds: number;
   visual_coverage_ratio: number;
+  visual_gap_seconds: number;
   gap_count: number;
   required_gap_seconds: number;
   preferred_gap_seconds: number;
@@ -363,6 +364,8 @@ export const operatorApi = {
     request<{ schema_version: string; assets: MusicAsset[] }>("/operator/music-assets", { signal }),
   getVisualPlan: (id: string, signal?: AbortSignal) =>
     request<VisualPlanDetail>(`/workflow/${id}/visual-plan`, { signal }),
+  repairTimeline: (id: string) =>
+    request(`/workflow/${id}/repair-production-timeline`, { method: "POST" }),
   getTimeline: (id: string, signal?: AbortSignal) =>
     request<ProductionTimelineDetail>(`/workflow/${id}/production-timeline`, { signal }),
   getComposerInput: (id: string, signal?: AbortSignal) =>
