@@ -20,11 +20,13 @@ celery_app = Celery(
         "app.tasks.audio_tasks",
         "app.tasks.production_tasks",
         "app.tasks.qa_tasks",
+        "app.tasks.thumbnail_tasks",
     ],
 )
 
 celery_app.conf.update(
     task_routes={
+        "app.tasks.thumbnail_tasks.*": {"queue": "audio_producao"},
         "app.tasks.audio_tasks.*": {"queue": "audio_producao"},
         "app.tasks.audio_edit_tasks.*": {"queue": "audio_producao"},
         "app.tasks.production_tasks.*": {"queue": "audio_producao"},

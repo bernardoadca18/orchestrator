@@ -1287,3 +1287,41 @@ class TimelineGap(Base):
     )
 
     timeline: Mapped["ProductionTimeline"] = relationship(back_populates="gaps")
+
+
+class WorkflowThumbnailPackage(Base):
+    __tablename__ = "workflow_thumbnail_packages"
+    __table_args__ = (
+        UniqueConstraint(
+            "workflow_execucao_id", "creative_revision", name="uq_thumbnail_revision"
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'completed', 'failed')",
+            name="ck_thumbnail_status",
+        ),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    workflow_execucao_id: Mapped[uuid.UUID] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("workflow_execucoes.id", ondelete="CASCADE"),
+        index=True,
+    )
+    request_fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    creative_revision: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    request_snapshot: Mapped[dict] = mapped_column(JSONB)
+    result: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    selected_candidate_id: Mapped[str | None] = mapped_column(String(1), nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    selected_at: Mapped[dt.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )

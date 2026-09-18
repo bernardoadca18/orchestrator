@@ -16,6 +16,8 @@ import VisualsPage from "./features/visuals/VisualsPage";
 import OverviewPage from "./features/workflow/OverviewPage";
 import WorkflowWorkspace from "./features/workflow/WorkflowWorkspace";
 
+import ThumbnailsPage from "./features/thumbnails/ThumbnailsPage";
+
 export default function App() {
   return <BrowserRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}><AppShell><Routes>
     <Route path="/" element={<Navigate replace to="/dashboard" />} />
@@ -30,6 +32,7 @@ export default function App() {
       <Route path="presentation" element={<PresentationPage />} />
       <Route path="program-audio" element={<ProgramAudioPage />} />
       <Route path="render" element={<RenderPage />} />
+      <Route path="thumbnails" element={<ThumbnailsPage />} />
       <Route path="history" element={<HistoryPage />} />
     </Route>
     <Route path="/review" element={<ReviewQueuePage />} />

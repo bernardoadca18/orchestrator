@@ -5,6 +5,7 @@ export const workflowSections = [
   ["presentation", "Apresentação"],
   ["program-audio", "Program Audio"],
   ["render", "Render e QA"],
+  ["thumbnails", "Thumbnails"],
   ["history", "Histórico"],
 ] as const;
 

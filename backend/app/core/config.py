@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://orchestrator:orchestrator@localhost:5434/orchestrator"
     redis_url: str = "redis://localhost:6380/0"
 
+    thumbnail_director_base_url: str = "http://thumbnail-director:8000"
+    thumbnail_director_timeout_seconds: float = 330
+
     # --- Serviços integrados -------------------------------------------------
     ideas_hub_api_url: str = "http://localhost:8000"
     ideas_hub_api_timeout: int = 30

@@ -1727,3 +1727,13 @@ dialog ul {
   font-size: 0.65rem;
   font-weight: 500;
 }
+
+.thumbnail-toolbar { display:flex; justify-content:space-between; align-items:center; gap:24px; margin-bottom:24px; }
+.thumbnail-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr)); gap:20px; margin:24px 0; }
+.thumbnail-card { border:2px solid var(--border, #555); border-radius:12px; overflow:hidden; }
+.thumbnail-card.is-selected { border-color:#b79516; box-shadow:0 0 0 2px #ffcf3340; }
+.thumbnail-card img { display:block; width:100%; aspect-ratio:16/9; object-fit:contain; }
+.thumbnail-card-body { padding:18px; }
+.thumbnail-card-body ul { padding-left:18px; font-size:.8rem; overflow-wrap:anywhere; opacity:.8; }
+.thumbnail-unavailable { aspect-ratio:16/9; display:grid; place-items:center; background:#20242b; color:#d0d5dd; padding:20px; }
+@media(max-width:680px) { .thumbnail-toolbar { align-items:stretch; flex-direction:column; } }
