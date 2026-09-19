@@ -131,14 +131,14 @@ class Settings(BaseSettings):
     narration_quality_policy_version: str = "narration_speech_quality_v2"
     narration_quality_max_repeated_ngram_occurrences: int = 4
 
-    visual_director_strategy_version: str = "visual_director_v5_video_quality_guard"
+    visual_director_strategy_version: str = "visual_director_v6_game_entity_guard"
     visual_director_max_queries: int = 100
     visual_director_search_top_k: int = 5
     visual_director_max_alternatives: int = 2
     visual_director_search_concurrency: int = 4
     visual_director_min_semantic_score: float = 0.25
     visual_director_media_search_strategy_version: str = "media_search_v4_hybrid_evidence"
-    visual_director_hybrid_strategy_version: str = "visual_director_v3_hybrid_video_quality_guard"
+    visual_director_hybrid_strategy_version: str = "visual_director_v4_hybrid_game_entity_guard"
     hybrid_visual_fusion_version: str = "hybrid_visual_fusion_v1"
     visual_director_image_search_top_k: int = 5
     visual_director_image_min_semantic_score: float = 0.25

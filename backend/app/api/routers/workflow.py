@@ -948,6 +948,10 @@ async def regenerate_full_audio(
         raise HTTPException(409, "Workflow cancelado não aceita novas narrações")
     if not wf.blocos:
         raise HTTPException(409, "Workflow não possui blocos narrativos")
+    # Clear reuse_only_assembly to allow synthesis
+    if getattr(wf, "reuse_only_assembly", False):
+        wf.reuse_only_assembly = False
+        await session.commit()
     requested: dict[int, int | None] = {
         block.ordem: derive_manual_take_seed(
             block.id, block.synthesis_identity or "", len(block.takes), "manual_regeneration"
@@ -1101,7 +1105,7 @@ async def reconstruir_narracao_dos_takes(
         raise HTTPException(400, "Confirmação explícita é obrigatória para reconstruir a narração.")
 
     repo = WorkflowRepository(session)
-    wf = await repo.obter_por_id_para_atualizacao(workflow_id)
+    wf = await repo.obter_por_id_para_atualizacao(workflow_id, com_blocos=True)
 
     if wf is None:
         raise HTTPException(404, "Workflow não encontrado")
@@ -1139,9 +1143,21 @@ async def reconstruir_narracao_dos_takes(
     current_edit_revision = wf.audio_edit_revision or 0
     current_materialized_revision = wf.audio_materialized_revision or 0
 
+    # INVARIANT (Item 3): If edit_revision == materialized_revision before rebuild,
+    # the workflow is already fully materialized. The rebuild from the SAME takes
+    # should preserve this state - the new final narration from the same chunks
+    # represents the same edit revision.
+    preserve_materialization = current_edit_revision == current_materialized_revision and current_edit_revision > 0
+
     # Reset audio materialization flags to force reassembly with current tempo
-    # Preserve audio_edit_revision relationship for workflows that had Audio Edit
-    wf.audio_materialized_revision = 0
+    # BUT preserve the edit/materialization relationship if they were already in sync
+    if preserve_materialization:
+        # The chunks already represent revision N, so the rebuilt narration
+        # will also be revision N materialized
+        pass  # Don't reset materialized_revision
+    else:
+        wf.audio_materialized_revision = 0
+
     wf.audio_final_path = None
     wf.audio_final_sha256 = None
     wf.audio_final_sample_rate = None
@@ -1190,7 +1206,7 @@ async def regenerar_visuais(
 
     key = _operator_action_key(idempotency_key)
     repo = WorkflowRepository(session)
-    wf = await repo.obter_por_id_para_atualizacao(workflow_id)
+    wf = await repo.obter_por_id_para_atualizacao(workflow_id, com_blocos=True)
 
     if wf is None:
         raise HTTPException(404, "Workflow não encontrado")

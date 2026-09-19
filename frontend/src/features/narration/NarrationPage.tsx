@@ -33,7 +33,7 @@ export default function NarrationPage() {
   const workflowId = snapshot.workflow.id;
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [confirm, setConfirm] = useState<{ kind: "block"; order: number } | { kind: "narration" } | null>(null);
+  const [confirm, setConfirm] = useState<{ kind: "block"; order: number } | { kind: "narration" } | { kind: "rebuild" } | null>(null);
   const [busy, setBusy] = useState(false);
   const [chunkRefreshRevision, setChunkRefreshRevision] = useState(0);
 
@@ -69,6 +69,7 @@ export default function NarrationPage() {
     try {
       if (confirm?.kind === "block") await api.regenerateAudioBlock(workflowId, confirm.order, createActionKey("regenerate-block", workflowId));
       if (confirm?.kind === "narration") await api.regenerateNarration(workflowId, createActionKey("regenerate-narration", workflowId));
+      if (confirm?.kind === "rebuild") await api.rebuildNarrationFromTakes(workflowId, createActionKey("rebuild-narration", workflowId));
       setConfirm(null);
       await refreshAll();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Falha ao regenerar"); }
@@ -89,6 +90,8 @@ export default function NarrationPage() {
       <Diagnostics label="Mastering metrics" value={workflow.mastering_metrics} />
       <button disabled={busy || snapshot.workflow.capabilities.can_regenerate_narration?.allowed === false} onClick={() => setConfirm({ kind: "narration" })}>Regenerar narração completa</button>
       {snapshot.workflow.capabilities.can_regenerate_narration?.reason && <small className="block-meta">{snapshot.workflow.capabilities.can_regenerate_narration.reason}</small>}
+      <button disabled={busy || snapshot.workflow.capabilities.can_rebuild_narration_from_takes?.allowed === false} onClick={() => setConfirm({ kind: "rebuild" })}>Reprocessar narração</button>
+      {snapshot.workflow.capabilities.can_rebuild_narration_from_takes?.reason && <small className="block-meta">{snapshot.workflow.capabilities.can_rebuild_narration_from_takes.reason}</small>}
     </Card>
     <PendingAudioEdits workflow={workflow} update={audioEdit.update} submitting={audioEdit.submitting} error={audioEdit.error} notice={audioEdit.notice} onApply={() => void audioEdit.apply(workflow.audio_edit_revision)} />
     <Card title={`Blocos e takes (${workflow.blocos?.length || 0})`}>
@@ -104,6 +107,6 @@ export default function NarrationPage() {
         </tr>)}</tbody>
       </table></TableWrap>}
     </Card>
-    <ConfirmDialog open={confirm !== null} title={confirm?.kind === "narration" ? "Regenerar narração" : "Gerar novo take do bloco"} consequence={confirm?.kind === "narration" ? "Preserva takes históricos e invalida somente os artefatos downstream dependentes da nova narração." : "O take atual permanece histórico; o backend decide quando o candidato pode ser promovido."} invalidates={confirm?.kind === "narration" ? snapshot.workflow.capabilities.can_regenerate_narration?.invalidates : []} confirmLabel="Confirmar regeneração" dangerous onClose={() => setConfirm(null)} onConfirm={() => void regenerate()} />
+    <ConfirmDialog open={confirm !== null} title={confirm?.kind === "narration" ? "Regenerar narração" : confirm?.kind === "rebuild" ? "Reprocessar narração" : "Gerar novo take do bloco"} consequence={confirm?.kind === "narration" ? "Preserva takes históricos e invalida somente os artefatos downstream dependentes da nova narração." : confirm?.kind === "rebuild" ? "Reprocessa a narração usando os takes existentes com o tempo atual. Não gera novos takes." : "O take atual permanece histórico; o backend decide quando o candidato pode ser promovido."} invalidates={confirm?.kind === "narration" ? snapshot.workflow.capabilities.can_regenerate_narration?.invalidates : confirm?.kind === "rebuild" ? snapshot.workflow.capabilities.can_rebuild_narration_from_takes?.invalidates : []} confirmLabel={confirm?.kind === "rebuild" ? "Reprocessar" : "Confirmar regeneração"} dangerous onClose={() => setConfirm(null)} onConfirm={() => void regenerate()} />
   </div>;
 }

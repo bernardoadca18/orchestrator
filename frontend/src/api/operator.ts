@@ -366,6 +366,12 @@ export const operatorApi = {
     request<VisualPlanDetail>(`/workflow/${id}/visual-plan`, { signal }),
   repairTimeline: (id: string) =>
     request(`/workflow/${id}/repair-production-timeline`, { method: "POST" }),
+  regenerateVisuals: (id: string) =>
+    request(`/workflow/${id}/regenerate-visuals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true }),
+    }),
   getTimeline: (id: string, signal?: AbortSignal) =>
     request<ProductionTimelineDetail>(`/workflow/${id}/production-timeline`, { signal }),
   getComposerInput: (id: string, signal?: AbortSignal) =>

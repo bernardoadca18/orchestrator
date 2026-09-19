@@ -660,7 +660,7 @@ async def test_hybrid_image_only_result_is_selected_without_temporal_fields() ->
     service, _ = _service(workflow, alignment, provider)
     plan, _ = await service.ensure(workflow.id)
     source = plan.decisions[0].selected_source
-    assert plan.strategy_version == "visual_director_v3_hybrid_video_quality_guard"
+    assert plan.strategy_version == "visual_director_v4_hybrid_game_entity_guard"
     assert source["source_type"] == "static_image"
     assert "source_start_seconds" not in source
     assert len(provider.project_search_calls) == 1

@@ -161,9 +161,8 @@ def derive_capabilities(
         "can_regenerate_visuals": capability(
             not cancelled
             and not active
-            and bool(workflow.blocos)
-            and bool(alignment and alignment.status == "completed"),
-            "Narração deve estar completa e produção inativa.",
+            and bool(workflow.blocos),
+            "Aguarde a operação atual ou retome a produção cancelada.",
             (
                 "visual_plan",
                 "timeline",

@@ -867,13 +867,21 @@ class VisualDirectorService:
         reused = 0
         for resolution in resolutions:
             item = resolution.query
-            selected: HybridVisualCandidate | None = resolution.direct
+            # Apply Game Entity Guard to direct/preferred provenance candidates
+            query_games = extract_games_from_query(item.query)
+            direct_candidate = resolution.direct
+            if direct_candidate is not None and query_games:
+                # Direct candidate must match query games for game-bound queries
+                direct_game = candidate_game_identity(direct_candidate)
+                if direct_game is None or direct_game not in query_games:
+                    # Reject direct candidate with wrong/unknown game
+                    direct_candidate = None
+            selected: HybridVisualCandidate | None = direct_candidate
             alternatives: list[HybridVisualCandidate] = []
             ranked: list[HybridVisualCandidate] = []
             source_status = "resolved"
             reason = resolution.reason
             # Apply Game Entity Guard: filter candidates by game if query mentions one
-            query_games = extract_games_from_query(item.query)
             all_candidates_raw = [*resolution.candidates, *resolution.image_candidates]
             game_filtered_candidates = filter_candidates_by_game(all_candidates_raw, query_games)
             # Separate video and image candidates after game filtering for fusion

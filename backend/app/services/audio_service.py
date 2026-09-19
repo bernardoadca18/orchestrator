@@ -1002,6 +1002,7 @@ class AudioWorkflowService:
                 "audio_concluido",
                 audio_phase="completed" if transcription_available else "quality_unvalidated",
                 erro_mensagem=None,
+                reuse_only_assembly=False,  # Clear flag on successful completion
             )
             try:
                 alignment_result = await self.alignment_service_factory(self.session).ensure(
@@ -1086,6 +1087,7 @@ class AudioWorkflowService:
                 "erro",
                 audio_phase="failed",
                 erro_mensagem=str(exc),
+                reuse_only_assembly=False,  # Clear flag on failure
             )
 
     async def _reconcile_active_block(self, block: AudioBloco, source_dir: Path) -> Path:

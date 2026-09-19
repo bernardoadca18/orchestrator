@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import { operatorApi, ProductionTimelineDetail, VisualPlanDetail, VisualSource } from "../../api/operator";
-import { Alert, ActionButton, Card, DefinitionList, Diagnostics, EmptyState, LoadingState, ScoreBar, StatusBadge, TableWrap } from "../../components/ui";
+import { Alert, ActionButton, Card, ConfirmDialog, DefinitionList, Diagnostics, EmptyState, LoadingState, ScoreBar, StatusBadge, TableWrap } from "../../components/ui";
 import { coldArtifactCache } from "../../data/coldArtifactCache";
 import { useOperatorAction } from "../../hooks/useOperatorAction";
 import { presentTimeline } from "./timelinePresentation";
@@ -56,6 +56,7 @@ function Timeline({ timeline }: { timeline: ProductionTimelineDetail }) {
 export default function VisualsPage() {
   const { snapshot, refresh } = useWorkflowContext();
   const [revision, setRevision] = useState(0);
+  const [confirm, setConfirm] = useState(false);
   const action = useOperatorAction(refresh);
   const id = snapshot.workflow.id;
   const planLoader = useCallback((signal?: AbortSignal) => operatorApi.getVisualPlan(id, signal), [id, revision]);
@@ -70,12 +71,26 @@ export default function VisualsPage() {
       return result;
     }, "Replanejamento concluído. Consulte o estado da timeline.");
   }
+
+  async function regenerateVisuals() {
+    setConfirm(false);
+    await action.run(async () => {
+      const result = await operatorApi.regenerateVisuals(id);
+      coldArtifactCache.invalidateWorkflow(id, ["visual-plan", "timeline"]);
+      setRevision((value) => value + 1);
+      return result;
+    }, "Regeneração visual concluída.");
+  }
   if (plan.loading || timeline.loading) return <LoadingState label="Carregando decisões visuais…" />;
   return <div className="workspace-stack">
     {action.error && <Alert tone="danger">{action.error}</Alert>}
     {action.notice && <Alert>{action.notice}</Alert>}
     {snapshot.workflow.capabilities.can_repair_production_timeline?.allowed &&
       <ActionButton capability={snapshot.workflow.capabilities.can_repair_production_timeline} disabled={action.submitting} onClick={repair}>Resolver gaps visuais</ActionButton>}
+    {snapshot.workflow.capabilities.can_regenerate_visuals?.allowed &&
+      <ActionButton capability={snapshot.workflow.capabilities.can_regenerate_visuals} disabled={action.submitting} onClick={() => setConfirm(true)}>Regenerar visuais</ActionButton>}
+    {snapshot.workflow.capabilities.can_regenerate_visuals?.reason && <small className="block-meta">{snapshot.workflow.capabilities.can_regenerate_visuals.reason}</small>}
+    <ConfirmDialog open={confirm} title="Regenerar visuais" consequence="Gera novo plano visual e timeline, invalidando artefatos downstream. A narração é preservada." invalidates={snapshot.workflow.capabilities.can_regenerate_visuals?.invalidates} confirmLabel="Regenerar visuais" dangerous onClose={() => setConfirm(false)} onConfirm={() => void regenerateVisuals()} />
     {(plan.error || timeline.error) && <Alert tone="danger">{plan.error || timeline.error}</Alert>}
     {!plan.data ? <EmptyState title="VisualPlan ainda não disponível" detail="A ausência esperada não dispara Media Search." /> : <Card title="VisualPlan">
       <DefinitionList items={[["Status", <StatusBadge value={plan.data.status} />], ["Queries resolvidas", `${plan.data.resolved_queries}/${plan.data.total_queries}`], ["Gaps required / optional", `${plan.data.required_gaps} / ${plan.data.optional_gaps}`], ["Estratégia", plan.data.strategy_version], ["Fingerprint", <code>{plan.data.fingerprint}</code>]]} />

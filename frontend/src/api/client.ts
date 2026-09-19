@@ -548,6 +548,14 @@ export const api = {
     request<Workflow>(`/workflow/${workflowId}/audio/regenerate`, {
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify({ confirm: true }),
     }),
+  rebuildNarrationFromTakes: (workflowId: string, key: string) =>
+    request<Workflow>(`/workflow/${workflowId}/rebuild-narration-from-takes`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify({ confirm: true }),
+    }),
+  regenerateVisuals: (workflowId: string, key: string) =>
+    request<Workflow>(`/workflow/${workflowId}/regenerate-visuals`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify({ confirm: true }),
+    }),
   cancelarWorkflow: (id: string) => request<Workflow>(`/workflow/${id}/cancelar`, { method: "PATCH" }),
   retomarProducao: (id: string) => request<Workflow>(`/workflow/${id}/resume-production`, { method: "POST" }),
   obterNarrationTimeline: (id: string, signal?: AbortSignal) =>
