@@ -400,6 +400,15 @@ class AudioWorkflowService:
                                 extra={"workflow_id": str(workflow.id), "block_order": order},
                             )
                             continue
+
+                    # INVARIANT: reuse_only_assembly forbids synthesis fallback
+                    # If this flag is set, we must fail rather than call Qwen/Voice
+                    if getattr(workflow, "reuse_only_assembly", False):
+                        raise ProductionAudioError(
+                            f"Block {order} cannot be reused and reuse_only_assembly is set; "
+                            "synthesis is forbidden. Run 'Regenerar narração' instead."
+                        )
+
                     take = await self._ensure_take(block, identity, provenance.chunking_identity)
                     active_take = take
                     await self.repo.atualizar_bloco(

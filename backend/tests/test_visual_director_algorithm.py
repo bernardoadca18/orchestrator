@@ -222,33 +222,57 @@ def test_hybrid_rrf_weights_and_reuse_penalty_allow_each_modality_to_win() -> No
 class TestGameEntityGuard:
     """Tests for the Game Entity Guard filtering."""
 
-    def test_extract_game_from_query_detects_gta_vi(self) -> None:
-        from app.services.visual_director_algorithm import extract_game_from_query
+    def test_extract_games_from_query_detects_gta_vi(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
 
-        assert extract_game_from_query("Show GTA 6 gameplay") == "gta_vi"
-        assert extract_game_from_query("GTA VI car chase scene") == "gta_vi"
-        assert extract_game_from_query("Grand Theft Auto VI robbery") == "gta_vi"
+        assert extract_games_from_query("Show GTA 6 gameplay") == frozenset({"gta6"})
+        assert extract_games_from_query("GTA VI car chase scene") == frozenset({"gta6"})
+        assert extract_games_from_query("Grand Theft Auto VI robbery") == frozenset({"gta6"})
 
-    def test_extract_game_from_query_detects_gta_v(self) -> None:
-        from app.services.visual_director_algorithm import extract_game_from_query
+    def test_extract_games_from_query_detects_gta_v(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
 
-        assert extract_game_from_query("GTA 5 heist mission") == "gta_v"
-        assert extract_game_from_query("GTA V driving scene") == "gta_v"
-        assert extract_game_from_query("Grand Theft Auto V explosion") == "gta_v"
+        assert extract_games_from_query("GTA 5 heist mission") == frozenset({"gta5"})
+        assert extract_games_from_query("GTA V driving scene") == frozenset({"gta5"})
+        assert extract_games_from_query("Grand Theft Auto V explosion") == frozenset({"gta5"})
 
-    def test_extract_game_from_query_detects_gta_iv(self) -> None:
-        from app.services.visual_director_algorithm import extract_game_from_query
+    def test_extract_games_from_query_detects_gta_iv(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
 
-        assert extract_game_from_query("GTA 4 mission") == "gta_iv"
-        assert extract_game_from_query("GTA IV cutscene") == "gta_iv"
-        assert extract_game_from_query("Grand Theft Auto IV driving") == "gta_iv"
+        assert extract_games_from_query("GTA 4 mission") == frozenset({"gta4"})
+        assert extract_games_from_query("GTA IV cutscene") == frozenset({"gta4"})
+        assert extract_games_from_query("Grand Theft Auto IV driving") == frozenset({"gta4"})
 
-    def test_extract_game_from_query_returns_none_for_no_game(self) -> None:
-        from app.services.visual_director_algorithm import extract_game_from_query
+    def test_extract_games_from_query_detects_gta_iii(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
 
-        assert extract_game_from_query("Show a car explosion") is None
-        assert extract_game_from_query("Police chase scene") is None
-        assert extract_game_from_query("Random gameplay footage") is None
+        assert extract_games_from_query("GTA 3 mission") == frozenset({"gta3"})
+        assert extract_games_from_query("GTA III cutscene") == frozenset({"gta3"})
+        assert extract_games_from_query("Grand Theft Auto III driving") == frozenset({"gta3"})
+
+    def test_extract_games_from_query_detects_rdr2(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
+
+        assert extract_games_from_query("RDR2 gameplay") == frozenset({"rdr2"})
+        assert extract_games_from_query("RDR 2 mission") == frozenset({"rdr2"})
+        assert extract_games_from_query("Red Dead Redemption 2 riding") == frozenset({"rdr2"})
+
+    def test_extract_games_from_query_detects_multiple_games(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
+
+        # Multi-game queries return all detected games
+        result = extract_games_from_query("GTA IV compared with GTA V graphics")
+        assert result == frozenset({"gta4", "gta5"})
+
+        result = extract_games_from_query("GTA 3, GTA 4, and GTA 5 evolution")
+        assert result == frozenset({"gta3", "gta4", "gta5"})
+
+    def test_extract_games_from_query_returns_empty_for_no_game(self) -> None:
+        from app.services.visual_director_algorithm import extract_games_from_query
+
+        assert extract_games_from_query("Show a car explosion") == frozenset()
+        assert extract_games_from_query("Police chase scene") == frozenset()
+        assert extract_games_from_query("Random gameplay footage") == frozenset()
 
     def test_filter_candidates_by_game_preserves_all_when_no_game_detected(self) -> None:
         from app.services.visual_director_algorithm import filter_candidates_by_game
@@ -258,7 +282,7 @@ class TestGameEntityGuard:
             _candidate(5.0, 10.0, 0.7, session_id=uuid.UUID("00000000-0000-4000-8000-000000000002")),
         ]
         # No game detected in query -> all candidates pass
-        filtered = filter_candidates_by_game(candidates, query_game=None)
+        filtered = filter_candidates_by_game(candidates, query_games=frozenset())
         assert len(filtered) == 2
 
     def test_filter_candidates_by_game_filters_mismatched_game(self) -> None:
@@ -298,16 +322,21 @@ class TestGameEntityGuard:
         candidates = [gta_v_candidate, gta_vi_candidate]
 
         # Query asks for GTA V -> only GTA V candidate passes
-        filtered = filter_candidates_by_game(candidates, query_game="gta_v")
+        filtered = filter_candidates_by_game(candidates, query_games=frozenset({"gta5"}))
         assert len(filtered) == 1
         assert filtered[0].session_label == "gta_v_session_001"
 
         # Query asks for GTA VI -> only GTA VI candidate passes
-        filtered = filter_candidates_by_game(candidates, query_game="gta_vi")
+        filtered = filter_candidates_by_game(candidates, query_games=frozenset({"gta6"}))
         assert len(filtered) == 1
         assert filtered[0].session_label == "gta_vi_session_001"
 
-    def test_filter_candidates_by_game_preserves_unknown_game_candidates(self) -> None:
+        # Multi-game query -> both pass
+        filtered = filter_candidates_by_game(candidates, query_games=frozenset({"gta5", "gta6"}))
+        assert len(filtered) == 2
+
+    def test_filter_candidates_by_game_rejects_unknown_game_candidates(self) -> None:
+        """UNKNOWN game candidates are REJECTED for game-bound queries (Item 6)."""
         from app.services.visual_director_algorithm import (
             VisualCandidate,
             filter_candidates_by_game,
@@ -344,7 +373,34 @@ class TestGameEntityGuard:
         )
         candidates = [unknown_candidate, gta_v_candidate]
 
-        # Query asks for GTA V -> unknown game candidate filtered out, GTA V passes
-        filtered = filter_candidates_by_game(candidates, query_game="gta_v")
+        # Query asks for GTA V -> unknown game candidate REJECTED, GTA V passes
+        filtered = filter_candidates_by_game(candidates, query_games=frozenset({"gta5"}))
         assert len(filtered) == 1
         assert filtered[0].session_label == "gta_v_session_001"
+
+    def test_filter_candidates_by_game_accepts_unknown_when_query_has_no_game(self) -> None:
+        """When query mentions no games, all candidates pass (conservative guard)."""
+        from app.services.visual_director_algorithm import (
+            VisualCandidate,
+            filter_candidates_by_game,
+        )
+
+        # Candidate from a session with no game in label
+        unknown_candidate = VisualCandidate(
+            project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            session_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            media_id=uuid.UUID("00000000-0000-4000-8000-000000000002"),
+            start_seconds=0.0,
+            end_seconds=5.0,
+            semantic_score=0.9,
+            rank=1,
+            session_label="project_alpha_session",
+            media_filename="unknown.mp4",
+            temporal_index_id=None,
+            retrieval_candidate_id=None,
+            transcript_preview=None,
+        )
+
+        # Query mentions no game -> all candidates pass
+        filtered = filter_candidates_by_game([unknown_candidate], query_games=frozenset())
+        assert len(filtered) == 1

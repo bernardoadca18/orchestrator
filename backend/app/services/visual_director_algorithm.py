@@ -9,6 +9,9 @@ from uuid import UUID
 
 UNKNOWN_GAME = "__unknown_game__"
 
+# Canonical game identifiers
+CANONICAL_GAMES = frozenset({"gta3", "gta4", "gta5", "gta6", "rdr2"})
+
 
 def canonical_game_from_session_label(label: str) -> str:
     """Extract canonical game identifier from session label.
@@ -17,60 +20,153 @@ def canonical_game_from_session_label(label: str) -> str:
     to avoid cross-module import coupling.
     """
     normalized = label.strip().casefold().replace("-", "_").replace(" ", "_")
-    for game in ("gta_vi", "gta_iv", "gta_v"):
+    # Check for GTA VI (6) first to avoid GTA V (5) matching
+    for game in ("gta6", "gta_vi", "gta5", "gta_v", "gta4", "gta_iv", "gta3", "gta_iii", "rdr2"):
         if normalized == game or normalized.startswith(f"{game}_"):
+            # Normalize to canonical form
+            if game in ("gta_vi", "gta6"):
+                return "gta6"
+            if game in ("gta_v", "gta5"):
+                return "gta5"
+            if game in ("gta_iv", "gta4"):
+                return "gta4"
+            if game in ("gta_iii", "gta3"):
+                return "gta3"
             return game
     return UNKNOWN_GAME
 
 
-def extract_game_from_query(query: str) -> str | None:
-    """Extract canonical game identifier from visual query text.
+def extract_games_from_query(query: str) -> frozenset[str]:
+    """Extract all canonical game identifiers from visual query text.
 
-    Returns None if no game is mentioned or the query is ambiguous.
-    This is a conservative extraction - only matches explicit game references.
+    Returns an empty set if no games are mentioned.
+    A query can match multiple games (e.g., "GTA IV compared with GTA V").
+
+    Supports:
+    - GTA III / GTA 3 / Grand Theft Auto III / Grand Theft Auto 3 → gta3
+    - GTA IV / GTA 4 / Grand Theft Auto IV / Grand Theft Auto 4 → gta4
+    - GTA V / GTA 5 / Grand Theft Auto V / Grand Theft Auto 5 → gta5
+    - GTA VI / GTA 6 / Grand Theft Auto VI / Grand Theft Auto 6 → gta6
+    - RDR2 / RDR 2 / Red Dead Redemption 2 / Red Dead Redemption II → rdr2
     """
     normalized = query.casefold()
+    games: set[str] = set()
 
     # GTA VI patterns (GTA 6, GTA VI, Grand Theft Auto VI, etc.)
     if re.search(r"\bgta\s*6\b|\bgta\s*vi\b|\bgrand\s*theft\s*auto\s*6\b|\bgrand\s*theft\s*auto\s*vi\b", normalized):
-        return "gta_vi"
+        games.add("gta6")
 
     # GTA V patterns (GTA 5, GTA V, Grand Theft Auto V, etc.)
     if re.search(r"\bgta\s*5\b|\bgta\s*v\b|\bgrand\s*theft\s*auto\s*5\b|\bgrand\s*theft\s*auto\s*v\b", normalized):
-        return "gta_v"
+        games.add("gta5")
 
     # GTA IV patterns (GTA 4, GTA IV, Grand Theft Auto IV, etc.)
     if re.search(r"\bgta\s*4\b|\bgta\s*iv\b|\bgrand\s*theft\s*auto\s*4\b|\bgrand\s*theft\s*auto\s*iv\b", normalized):
-        return "gta_iv"
+        games.add("gta4")
+
+    # GTA III patterns (GTA 3, GTA III, Grand Theft Auto III, etc.)
+    if re.search(r"\bgta\s*3\b|\bgta\s*iii\b|\bgrand\s*theft\s*auto\s*3\b|\bgrand\s*theft\s*auto\s*iii\b", normalized):
+        games.add("gta3")
+
+    # RDR2 patterns (RDR2, RDR 2, Red Dead Redemption 2, etc.)
+    if re.search(r"\brdr\s*2\b|\brdr2\b|\bred\s*dead\s*redemption\s*2\b|\bred\s*dead\s*redemption\s*ii\b", normalized):
+        games.add("rdr2")
+
+    return frozenset(games)
+
+
+def game_identity_from_provenance(provenance: dict | None) -> str | None:
+    """Extract canonical game from structured provenance metadata.
+
+    Returns None if provenance is missing or doesn't contain game info.
+    This is the preferred method for StaticImageCandidate and direct provenance.
+    """
+    if not provenance or not isinstance(provenance, dict):
+        return None
+    game = provenance.get("game")
+    if not game or not isinstance(game, str):
+        return None
+    normalized = game.strip().casefold().replace("-", "_").replace(" ", "_")
+    # Map to canonical identifiers
+    if normalized in ("gta6", "gta_vi", "gta vi"):
+        return "gta6"
+    if normalized in ("gta5", "gta_v", "gta v"):
+        return "gta5"
+    if normalized in ("gta4", "gta_iv", "gta iv"):
+        return "gta4"
+    if normalized in ("gta3", "gta_iii", "gta iii"):
+        return "gta3"
+    if normalized in ("rdr2", "rdr_2", "rdr 2"):
+        return "rdr2"
+    return None
+
+
+def candidate_game_identity(candidate: "HybridVisualCandidate") -> str | None:
+    """Determine the canonical game identity for any candidate type.
+
+    Returns:
+    - Canonical game identifier (e.g., "gta5", "rdr2") if determinable
+    - UNKNOWN_GAME if game is unknown but determinable
+    - None if game identity cannot be established
+    """
+    # Try structured provenance first (preferred for images and direct sources)
+    game = game_identity_from_provenance(candidate.provenance)
+    if game is not None:
+        return game
+
+    # For VisualCandidate, try session label
+    if hasattr(candidate, "session_label") and candidate.session_label:
+        return canonical_game_from_session_label(candidate.session_label)
+
+    # For StaticImageCandidate with no provenance game, check filename as fallback
+    if hasattr(candidate, "media_filename") and candidate.media_filename:
+        # Conservative filename-based extraction as last resort
+        normalized = candidate.media_filename.casefold()
+        for pattern, canonical in [
+            (r"gta\s*6|gta\s*vi", "gta6"),
+            (r"gta\s*5|gta\s*v(?!i)", "gta5"),
+            (r"gta\s*4|gta\s*iv", "gta4"),
+            (r"gta\s*3|gta\s*iii", "gta3"),
+            (r"rdr\s*2|rdr2", "rdr2"),
+        ]:
+            if re.search(pattern, normalized):
+                return canonical
 
     return None
 
 
 def filter_candidates_by_game(
-    candidates: list["VisualCandidate"],
-    query_game: str | None,
-) -> list["VisualCandidate"]:
-    """Filter candidates to only include those matching the query game.
+    candidates: list["HybridVisualCandidate"],
+    query_games: frozenset[str],
+) -> list["HybridVisualCandidate"]:
+    """Filter candidates to only include those matching the query games.
 
-    This is a conservative guard: if query_game is None (no game detected in query),
-    all candidates pass through. Only when we have a clear game match do we filter.
+    This is a conservative guard:
+    - If query_games is empty (no games detected in query), all candidates pass through.
+    - If query_games is non-empty, only candidates with matching game identity pass.
+    - Candidates with unknown game identity are REJECTED for game-bound queries.
 
     Args:
-        candidates: List of video segment candidates
-        query_game: Canonical game identifier extracted from query, or None
+        candidates: List of video segment or static image candidates
+        query_games: Set of canonical game identifiers extracted from query
 
     Returns:
-        Filtered list of candidates matching the query game, or all candidates
-        if query_game is None.
+        Filtered list of candidates matching the query games, or all candidates
+        if query_games is empty.
     """
-    if query_game is None:
-        return candidates
+    if not query_games:
+        return list(candidates)
 
-    return [
-        candidate
-        for candidate in candidates
-        if canonical_game_from_session_label(candidate.session_label) == query_game
-    ]
+    filtered = []
+    for candidate in candidates:
+        game = candidate_game_identity(candidate)
+        # Reject candidates with unknown game when query is game-bound
+        if game is None or game == UNKNOWN_GAME:
+            continue
+        if game in query_games:
+            filtered.append(candidate)
+
+    return filtered
 
 
 @dataclass(frozen=True, slots=True)

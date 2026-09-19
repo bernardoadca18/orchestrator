@@ -1090,14 +1090,16 @@ async def reconstruir_narracao_dos_takes(
 ):
     """Rebuild final narration from existing accepted takes with current tempo.
 
-    Does NOT call Qwen or generate new audio - reassembles from existing takes.
+    INVARIANT: This operation NEVER calls Qwen/Voice synthesis. It only reassembles
+    from existing physical chunks. If any required take is missing, corrupt, or
+    invalid, the operation fails explicitly without fallback to synthesis.
+
     Used when AUDIO_NARRATION_TEMPO changes and we want to apply the new tempo
     without re-synthesizing.
     """
     if not payload.confirm:
         raise HTTPException(400, "Confirmação explícita é obrigatória para reconstruir a narração.")
 
-    key = _operator_action_key(idempotency_key)
     repo = WorkflowRepository(session)
     wf = await repo.obter_por_id_para_atualizacao(workflow_id)
 
@@ -1110,18 +1112,60 @@ async def reconstruir_narracao_dos_takes(
     if not wf.blocos:
         raise HTTPException(400, "Workflow não possui blocos para reconstruir.")
 
-    # Reset audio materialization but preserve takes - the audio processor
-    # will reassemble from existing chunks with current tempo settings.
+    # PREFLIGHT: Validate all blocks have valid current takes before proceeding.
+    # This guarantees the zero-Qwen-synthesis invariant.
+    from app.services.block_materialization import active_block_manifest
+    from app.services.production_audio import ProductionAudioError
+
+    validation_errors = []
+    for block in wf.blocos:
+        try:
+            # This validates that all current takes exist, are valid, and match SHA
+            await active_block_manifest(session, block)
+        except ProductionAudioError as e:
+            validation_errors.append(f"Bloco {block.ordem}: {str(e)}")
+        except Exception as e:
+            validation_errors.append(f"Bloco {block.ordem}: erro inesperado - {str(e)}")
+
+    if validation_errors:
+        raise HTTPException(
+            422,
+            f"Não é possível reconstruir: takes atuais inválidos ou ausentes. "
+            f"{'; '.join(validation_errors)}"
+        )
+
+    # Store the current materialization revision before reset
+    # to preserve Audio Edit state correctly
+    current_edit_revision = wf.audio_edit_revision or 0
+    current_materialized_revision = wf.audio_materialized_revision or 0
+
+    # Reset audio materialization flags to force reassembly with current tempo
+    # Preserve audio_edit_revision relationship for workflows that had Audio Edit
+    wf.audio_materialized_revision = 0
+    wf.audio_final_path = None
+    wf.audio_final_sha256 = None
+    wf.audio_final_sample_rate = None
+    wf.audio_final_channels = None
+    wf.audio_final_byte_size = None
+    wf.audio_final_frame_count = None
+    wf.audio_final_subtype = None
+    wf.audio_integrity = None
+    wf.narration_diagnostics = None
+    wf.duracao_audio_segundos = None
+    wf.mastering_config = None
+    wf.mastering_metrics = None
+
+    # Mark workflow for reuse-only assembly (no synthesis fallback)
+    wf.reuse_only_assembly = True
+
+    await session.commit()
+
+    # Queue for processing with reuse-only flag set
     await repo.atualizar_producao(
         wf.id,
         status="queued",
         phase="audio",
     )
-    # Clear audio materialization flags to force reassembly
-    wf = await repo.obter_por_id(workflow_id)
-    if wf is not None:
-        # Mark that we want to reuse existing takes
-        await repo.reset_audio_materialization(wf.id)
 
     processar_producao_workflow.delay(str(workflow_id))
     result = await repo.obter_por_id(workflow_id)

@@ -157,6 +157,11 @@ class WorkflowExecucao(Base):
     music_override_last_idempotency_key: Mapped[str | None] = mapped_column(
         String(200), nullable=True
     )
+    # Flag to enforce reuse-only assembly (no Qwen synthesis fallback)
+    # Used by rebuild-narration-from-takes to guarantee zero synthesis calls
+    reuse_only_assembly: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     audio_edit_updates: Mapped[list["AudioEditUpdate"]] = relationship(
         back_populates="workflow", cascade="all, delete-orphan"
     )

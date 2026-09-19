@@ -43,8 +43,9 @@ from app.services.visual_director_algorithm import (
     HybridVisualCandidate,
     StaticImageCandidate,
     VisualCandidate,
+    candidate_game_identity,
     direct_candidate,
-    extract_game_from_query,
+    extract_games_from_query,
     filter_candidates_by_game,
     fuse_hybrid_candidates,
     normalize_query,
@@ -872,14 +873,18 @@ class VisualDirectorService:
             source_status = "resolved"
             reason = resolution.reason
             # Apply Game Entity Guard: filter candidates by game if query mentions one
-            query_game = extract_game_from_query(item.query)
-            game_filtered_candidates = filter_candidates_by_game(resolution.candidates, query_game)
-            all_candidates = [*game_filtered_candidates, *resolution.image_candidates]
+            query_games = extract_games_from_query(item.query)
+            all_candidates_raw = [*resolution.candidates, *resolution.image_candidates]
+            game_filtered_candidates = filter_candidates_by_game(all_candidates_raw, query_games)
+            # Separate video and image candidates after game filtering for fusion
+            game_filtered_videos = [c for c in game_filtered_candidates if isinstance(c, VisualCandidate)]
+            game_filtered_images = [c for c in game_filtered_candidates if isinstance(c, StaticImageCandidate)]
+            all_candidates = game_filtered_candidates
             if selected is None and all_candidates:
                 if scope and scope.hybrid_enabled:
                     ranked = fuse_hybrid_candidates(
-                        game_filtered_candidates,
-                        resolution.image_candidates,
+                        game_filtered_videos,
+                        game_filtered_images,
                         already_selected=already_selected,
                         preferred_session_id=item.preferred_session_id,
                         source_note_id=item.source_note_id,
