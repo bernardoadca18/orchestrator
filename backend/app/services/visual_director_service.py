@@ -44,6 +44,8 @@ from app.services.visual_director_algorithm import (
     StaticImageCandidate,
     VisualCandidate,
     direct_candidate,
+    extract_game_from_query,
+    filter_candidates_by_game,
     fuse_hybrid_candidates,
     normalize_query,
     overlap_ratio,
@@ -55,21 +57,52 @@ from app.services.visual_diversity import (
     evaluate_visual_diversity,
 )
 
+__all__ = [
+    "ProductionProfileConfig",
+    "PRODUCTION_PROFILE_CONFIGS",
+    "resolve_production_profile_config",
+    "FINAL_VISUAL_PRODUCTION_PROFILES",
+    "VisualDirectorService",
+]
+
 logger = logging.getLogger(__name__)
 
 VISUAL_QUERIES_MISSING_CATEGORY = "visual_queries_missing"
 VISUAL_QUERIES_MISSING_MESSAGE = (
     "Final visual production requires structured VisualQueries for non-empty narration"
 )
-FINAL_VISUAL_PRODUCTION_PROFILES = frozenset(
-    {
-        "faceless_general",
-        "faceless_informational",
-        "faceless_pop_culture",
-        "faceless_pop_culture_lists",
-        "game_analysis",
-    }
-)
+@dataclass(frozen=True, slots=True)
+class ProductionProfileConfig:
+    """Production profile configuration flags."""
+
+    profile_id: str
+    burned_in_captions: bool = True
+
+
+PRODUCTION_PROFILE_CONFIGS: dict[str, ProductionProfileConfig] = {
+    "faceless_general": ProductionProfileConfig("faceless_general", burned_in_captions=True),
+    "faceless_informational": ProductionProfileConfig(
+        "faceless_informational", burned_in_captions=True
+    ),
+    "faceless_pop_culture": ProductionProfileConfig(
+        "faceless_pop_culture", burned_in_captions=True
+    ),
+    "faceless_pop_culture_lists": ProductionProfileConfig(
+        "faceless_pop_culture_lists", burned_in_captions=False
+    ),
+    "game_analysis": ProductionProfileConfig("game_analysis", burned_in_captions=True),
+}
+
+
+def resolve_production_profile_config(profile_id: str | None) -> ProductionProfileConfig | None:
+    """Resolve the production profile configuration by ID."""
+
+    if profile_id is None:
+        return None
+    return PRODUCTION_PROFILE_CONFIGS.get(profile_id)
+
+
+FINAL_VISUAL_PRODUCTION_PROFILES = frozenset(PRODUCTION_PROFILE_CONFIGS.keys())
 
 
 class VisualDirectorError(RuntimeError):
@@ -838,11 +871,14 @@ class VisualDirectorService:
             ranked: list[HybridVisualCandidate] = []
             source_status = "resolved"
             reason = resolution.reason
-            all_candidates = [*resolution.candidates, *resolution.image_candidates]
+            # Apply Game Entity Guard: filter candidates by game if query mentions one
+            query_game = extract_game_from_query(item.query)
+            game_filtered_candidates = filter_candidates_by_game(resolution.candidates, query_game)
+            all_candidates = [*game_filtered_candidates, *resolution.image_candidates]
             if selected is None and all_candidates:
                 if scope and scope.hybrid_enabled:
                     ranked = fuse_hybrid_candidates(
-                        resolution.candidates,
+                        game_filtered_candidates,
                         resolution.image_candidates,
                         already_selected=already_selected,
                         preferred_session_id=item.preferred_session_id,
@@ -855,7 +891,7 @@ class VisualDirectorService:
                 else:
                     ranked.extend(
                         rank_candidates(
-                            resolution.candidates,
+                            game_filtered_candidates,
                             preferred_session_id=item.preferred_session_id,
                             source_note_id=item.source_note_id,
                             target_duration_seconds=item.target_duration_seconds,

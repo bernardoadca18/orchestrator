@@ -217,3 +217,134 @@ def test_hybrid_rrf_weights_and_reuse_penalty_allow_each_modality_to_win() -> No
         strategy_version="hybrid_visual_fusion_v1",
     )
     assert isinstance(video_first[0], VisualCandidate)
+
+
+class TestGameEntityGuard:
+    """Tests for the Game Entity Guard filtering."""
+
+    def test_extract_game_from_query_detects_gta_vi(self) -> None:
+        from app.services.visual_director_algorithm import extract_game_from_query
+
+        assert extract_game_from_query("Show GTA 6 gameplay") == "gta_vi"
+        assert extract_game_from_query("GTA VI car chase scene") == "gta_vi"
+        assert extract_game_from_query("Grand Theft Auto VI robbery") == "gta_vi"
+
+    def test_extract_game_from_query_detects_gta_v(self) -> None:
+        from app.services.visual_director_algorithm import extract_game_from_query
+
+        assert extract_game_from_query("GTA 5 heist mission") == "gta_v"
+        assert extract_game_from_query("GTA V driving scene") == "gta_v"
+        assert extract_game_from_query("Grand Theft Auto V explosion") == "gta_v"
+
+    def test_extract_game_from_query_detects_gta_iv(self) -> None:
+        from app.services.visual_director_algorithm import extract_game_from_query
+
+        assert extract_game_from_query("GTA 4 mission") == "gta_iv"
+        assert extract_game_from_query("GTA IV cutscene") == "gta_iv"
+        assert extract_game_from_query("Grand Theft Auto IV driving") == "gta_iv"
+
+    def test_extract_game_from_query_returns_none_for_no_game(self) -> None:
+        from app.services.visual_director_algorithm import extract_game_from_query
+
+        assert extract_game_from_query("Show a car explosion") is None
+        assert extract_game_from_query("Police chase scene") is None
+        assert extract_game_from_query("Random gameplay footage") is None
+
+    def test_filter_candidates_by_game_preserves_all_when_no_game_detected(self) -> None:
+        from app.services.visual_director_algorithm import filter_candidates_by_game
+
+        candidates = [
+            _candidate(0.0, 5.0, 0.8, session_id=uuid.UUID("00000000-0000-4000-8000-000000000001")),
+            _candidate(5.0, 10.0, 0.7, session_id=uuid.UUID("00000000-0000-4000-8000-000000000002")),
+        ]
+        # No game detected in query -> all candidates pass
+        filtered = filter_candidates_by_game(candidates, query_game=None)
+        assert len(filtered) == 2
+
+    def test_filter_candidates_by_game_filters_mismatched_game(self) -> None:
+        from app.services.visual_director_algorithm import (
+            VisualCandidate,
+            filter_candidates_by_game,
+        )
+
+        gta_v_candidate = VisualCandidate(
+            project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            session_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            media_id=uuid.UUID("00000000-0000-4000-8000-000000000002"),
+            start_seconds=0.0,
+            end_seconds=5.0,
+            semantic_score=0.9,
+            rank=1,
+            session_label="gta_v_session_001",
+            media_filename="clip.mp4",
+            temporal_index_id=None,
+            retrieval_candidate_id=None,
+            transcript_preview=None,
+        )
+        gta_vi_candidate = VisualCandidate(
+            project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            session_id=uuid.UUID("00000000-0000-4000-8000-000000000003"),
+            media_id=uuid.UUID("00000000-0000-4000-8000-000000000004"),
+            start_seconds=5.0,
+            end_seconds=10.0,
+            semantic_score=0.85,
+            rank=2,
+            session_label="gta_vi_session_001",
+            media_filename="clip2.mp4",
+            temporal_index_id=None,
+            retrieval_candidate_id=None,
+            transcript_preview=None,
+        )
+        candidates = [gta_v_candidate, gta_vi_candidate]
+
+        # Query asks for GTA V -> only GTA V candidate passes
+        filtered = filter_candidates_by_game(candidates, query_game="gta_v")
+        assert len(filtered) == 1
+        assert filtered[0].session_label == "gta_v_session_001"
+
+        # Query asks for GTA VI -> only GTA VI candidate passes
+        filtered = filter_candidates_by_game(candidates, query_game="gta_vi")
+        assert len(filtered) == 1
+        assert filtered[0].session_label == "gta_vi_session_001"
+
+    def test_filter_candidates_by_game_preserves_unknown_game_candidates(self) -> None:
+        from app.services.visual_director_algorithm import (
+            VisualCandidate,
+            filter_candidates_by_game,
+        )
+
+        # Candidate from a session with no game in label (e.g., "project_alpha_session")
+        unknown_candidate = VisualCandidate(
+            project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            session_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            media_id=uuid.UUID("00000000-0000-4000-8000-000000000002"),
+            start_seconds=0.0,
+            end_seconds=5.0,
+            semantic_score=0.9,
+            rank=1,
+            session_label="project_alpha_session",
+            media_filename="clip.mp4",
+            temporal_index_id=None,
+            retrieval_candidate_id=None,
+            transcript_preview=None,
+        )
+        gta_v_candidate = VisualCandidate(
+            project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+            session_id=uuid.UUID("00000000-0000-4000-8000-000000000003"),
+            media_id=uuid.UUID("00000000-0000-4000-8000-000000000004"),
+            start_seconds=5.0,
+            end_seconds=10.0,
+            semantic_score=0.85,
+            rank=2,
+            session_label="gta_v_session_001",
+            media_filename="clip2.mp4",
+            temporal_index_id=None,
+            retrieval_candidate_id=None,
+            transcript_preview=None,
+        )
+        candidates = [unknown_candidate, gta_v_candidate]
+
+        # Query asks for GTA V -> unknown game candidate filtered out, GTA V passes
+        filtered = filter_candidates_by_game(candidates, query_game="gta_v")
+        assert len(filtered) == 1
+        assert filtered[0].session_label == "gta_v_session_001"

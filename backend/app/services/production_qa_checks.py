@@ -18,6 +18,7 @@ from app.models.workflow import (
     WorkflowRender,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.visual_director_service import resolve_production_profile_config
 from app.services.production_qa_policy import ProductionQAPolicy
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
@@ -192,8 +193,10 @@ def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
             "PresentationSpec evidence is unavailable in this compatibility fixture.",
         )
     try:
+        profile_config = resolve_production_profile_config(inputs.workflow.perfil_producao)
+        burned_in_captions = profile_config.burned_in_captions if profile_config else True
         presentation = build_presentation_spec(
-            inputs.workflow, duration_seconds=inputs.timeline.duration_seconds
+            inputs.workflow, duration_seconds=inputs.timeline.duration_seconds, burned_in_captions=burned_in_captions
         )
     except (PresentationInputError, ValueError) as exc:
         return ProductionQACheck(
@@ -210,6 +213,7 @@ def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
             "skipped",
             "Legacy render intentionally has no PresentationSpec.",
         )
+    caption_cue_count = len(presentation.captions.cues) if presentation.captions else 0
     return ProductionQACheck(
         "presentation_spec",
         "presentation",
@@ -217,7 +221,7 @@ def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
         "PresentationSpec timestamps, presets and canonical fingerprint are valid.",
         actual=presentation.fingerprint,
         details={
-            "caption_cues": len(presentation.captions.cues),
+            "caption_cues": caption_cue_count,
             "section_titles": len(presentation.section_titles),
             "transitions": len(presentation.transitions),
             "branding_preset": presentation.branding.preset,

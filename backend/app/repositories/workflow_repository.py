@@ -221,6 +221,33 @@ class WorkflowRepository:
         await self.session.refresh(wf)
         return wf
 
+    async def reset_audio_materialization(self, workflow_id: uuid.UUID) -> None:
+        """Reset audio materialization to force reassembly from existing takes.
+
+        Used when AUDIO_NARRATION_TEMPO changes and we want to apply the new tempo
+        without re-synthesizing audio. Preserves takes but clears materialization flags.
+        """
+        workflow = await self.obter_por_id(workflow_id)
+        if workflow is None:
+            return
+        # Reset the workflow-level materialization revision so the audio processor
+        # will reassemble from existing chunks with current tempo settings.
+        workflow.audio_materialized_revision = 0
+        # Clear final audio artifacts to force re-generation
+        workflow.audio_final_path = None
+        workflow.audio_final_sha256 = None
+        workflow.audio_final_sample_rate = None
+        workflow.audio_final_channels = None
+        workflow.audio_final_byte_size = None
+        workflow.audio_final_frame_count = None
+        workflow.audio_final_subtype = None
+        workflow.audio_integrity = None
+        workflow.narration_diagnostics = None
+        workflow.duracao_audio_segundos = None
+        workflow.mastering_config = None
+        workflow.mastering_metrics = None
+        await self.session.commit()
+
     async def invalidar_derivados_de_audio(
         self, workflow: WorkflowExecucao, blocks: Sequence[AudioBloco] | None = None
     ) -> None:

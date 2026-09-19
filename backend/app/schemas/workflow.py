@@ -869,7 +869,7 @@ class PresentationSpecOut(BaseModel):
     strategy_version: Literal["longform_presentation_v1"]
     profile_id: Literal["longform_professional_v1"]
     fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
-    captions: CaptionsPresentationOut
+    captions: CaptionsPresentationOut | None = None
     section_titles: list[SectionTitlePresentationOut] = Field(max_length=100)
     branding: BrandingPresentationOut
     transitions: list[TransitionPresentationOut] = Field(max_length=100)

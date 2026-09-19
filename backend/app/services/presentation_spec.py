@@ -403,6 +403,7 @@ def build_presentation_spec(
     workflow: WorkflowExecucao,
     *,
     duration_seconds: float,
+    burned_in_captions: bool = True,
 ) -> PresentationSpecOut | None:
     """Build V1 from current authoritative artifacts, or return legacy absence."""
 
@@ -436,15 +437,20 @@ def build_presentation_spec(
         for item in section_titles
         if item.start_seconds >= 0.15 and item.start_seconds <= duration_seconds - 0.15
     ]
+    captions_payload = (
+        CaptionsPresentationOut(
+            policy_version=CAPTION_POLICY_VERSION,
+            preset="subtle_longform_v1",
+            cues=cues,
+        ).model_dump(mode="json")
+        if burned_in_captions
+        else None
+    )
     content = {
         "schema_version": "presentation_spec_v1",
         "strategy_version": PRESENTATION_STRATEGY_VERSION,
         "profile_id": PRESENTATION_PROFILE_ID,
-        "captions": CaptionsPresentationOut(
-            policy_version=CAPTION_POLICY_VERSION,
-            preset="subtle_longform_v1",
-            cues=cues,
-        ).model_dump(mode="json"),
+        "captions": captions_payload,
         "section_titles": [item.model_dump(mode="json") for item in section_titles],
         "branding": BrandingDisabledOut(preset="branding_disabled_v1", enabled=False).model_dump(
             mode="json"

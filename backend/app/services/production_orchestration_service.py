@@ -36,7 +36,10 @@ from app.services.production_timeline_coverage import (
 )
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
-from app.services.visual_director_service import VisualDirectorService
+from app.services.visual_director_service import (
+    VisualDirectorService,
+    resolve_production_profile_config,
+)
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
     timeline_visual_diversity,
@@ -416,6 +419,63 @@ class ProductionOrchestrationService:
                 "Não foi possível concluir o replanejamento da timeline.",
             )
 
+    async def force_visual_regeneration(self, workflow: WorkflowExecucao) -> None:
+        """Force VisualPlan and Timeline regeneration while preserving narration.
+
+        Used when visual search parameters change (e.g., Game Entity Guard)
+        and we want to re-run visual selection without changing audio.
+        """
+        # Start from visual_plan phase, preserving audio and alignment
+        await self.workflows.atualizar_producao(
+            workflow.id, status="running", phase="visual_plan"
+        )
+        try:
+            # Force regeneration of visual plan
+            plan, _ = await self.visual.ensure(workflow.id, force=True)
+            if plan.status not in {"completed", "completed_with_gaps"}:
+                diagnostics = getattr(plan, "diagnostics", None) or {}
+                stable_category = diagnostics.get("error_category")
+                if plan.status == "blocked" and isinstance(stable_category, str):
+                    await self._block(
+                        workflow,
+                        "visual_plan",
+                        stable_category,
+                        plan.error_message or "visual_plan blocked",
+                    )
+                else:
+                    await self._upstream_terminal(
+                        workflow, "visual_plan", plan.status, plan.error_message
+                    )
+                return
+
+            # Force regeneration of timeline
+            timeline, _ = await self.timelines.ensure(workflow.id, force=True)
+            if timeline_is_gap_free(timeline):
+                await self.resume(workflow)
+            elif timeline_has_temporal_gaps(timeline):
+                await self._block(
+                    workflow,
+                    "production_timeline",
+                    "production_timeline_has_gaps",
+                    GAP_MESSAGE + ": " + json.dumps(temporal_gap_details(timeline)),
+                )
+            else:
+                await self._block(
+                    workflow,
+                    "production_timeline",
+                    "production_timeline_regeneration_failed",
+                    "Não foi possível concluir o replanejamento da timeline.",
+                )
+        except Exception:
+            await self.session.rollback()
+            latest = await self.workflows.obter_por_id(workflow.id)
+            if latest is not None and not self._cancelled(latest):
+                await self._fail(
+                    latest,
+                    "visual_regeneration",
+                    "Falha na regeneração de visuais; os artefatos de narração foram preservados.",
+                )
+
     async def current_render(self, workflow_id: uuid.UUID) -> WorkflowRender | None:
         workflow = await self.workflows.obter_por_id(workflow_id)
         if workflow is None or workflow.production_phase not in {"render", "completed"}:
@@ -506,7 +566,11 @@ class ProductionOrchestrationService:
         )
         if workflow is None:
             return None
-        presentation = build_presentation_spec(workflow, duration_seconds=timeline.duration_seconds)
+        profile_config = resolve_production_profile_config(workflow.perfil_producao)
+        burned_in_captions = profile_config.burned_in_captions if profile_config else True
+        presentation = build_presentation_spec(
+            workflow, duration_seconds=timeline.duration_seconds, burned_in_captions=burned_in_captions
+        )
         return presentation.fingerprint if presentation else None
 
     async def _audio_mix_plan_fingerprint(

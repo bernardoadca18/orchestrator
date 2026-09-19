@@ -2,8 +2,75 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, replace
 from uuid import UUID
+
+
+UNKNOWN_GAME = "__unknown_game__"
+
+
+def canonical_game_from_session_label(label: str) -> str:
+    """Extract canonical game identifier from session label.
+
+    Mirrors visual_retrieval_evaluation.canonical_game_from_session_label
+    to avoid cross-module import coupling.
+    """
+    normalized = label.strip().casefold().replace("-", "_").replace(" ", "_")
+    for game in ("gta_vi", "gta_iv", "gta_v"):
+        if normalized == game or normalized.startswith(f"{game}_"):
+            return game
+    return UNKNOWN_GAME
+
+
+def extract_game_from_query(query: str) -> str | None:
+    """Extract canonical game identifier from visual query text.
+
+    Returns None if no game is mentioned or the query is ambiguous.
+    This is a conservative extraction - only matches explicit game references.
+    """
+    normalized = query.casefold()
+
+    # GTA VI patterns (GTA 6, GTA VI, Grand Theft Auto VI, etc.)
+    if re.search(r"\bgta\s*6\b|\bgta\s*vi\b|\bgrand\s*theft\s*auto\s*6\b|\bgrand\s*theft\s*auto\s*vi\b", normalized):
+        return "gta_vi"
+
+    # GTA V patterns (GTA 5, GTA V, Grand Theft Auto V, etc.)
+    if re.search(r"\bgta\s*5\b|\bgta\s*v\b|\bgrand\s*theft\s*auto\s*5\b|\bgrand\s*theft\s*auto\s*v\b", normalized):
+        return "gta_v"
+
+    # GTA IV patterns (GTA 4, GTA IV, Grand Theft Auto IV, etc.)
+    if re.search(r"\bgta\s*4\b|\bgta\s*iv\b|\bgrand\s*theft\s*auto\s*4\b|\bgrand\s*theft\s*auto\s*iv\b", normalized):
+        return "gta_iv"
+
+    return None
+
+
+def filter_candidates_by_game(
+    candidates: list["VisualCandidate"],
+    query_game: str | None,
+) -> list["VisualCandidate"]:
+    """Filter candidates to only include those matching the query game.
+
+    This is a conservative guard: if query_game is None (no game detected in query),
+    all candidates pass through. Only when we have a clear game match do we filter.
+
+    Args:
+        candidates: List of video segment candidates
+        query_game: Canonical game identifier extracted from query, or None
+
+    Returns:
+        Filtered list of candidates matching the query game, or all candidates
+        if query_game is None.
+    """
+    if query_game is None:
+        return candidates
+
+    return [
+        candidate
+        for candidate in candidates
+        if canonical_game_from_session_label(candidate.session_label) == query_game
+    ]
 
 
 @dataclass(frozen=True, slots=True)

@@ -121,6 +121,7 @@ from app.services.operator_music import (
     OperatorMusicService,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.visual_director_service import resolve_production_profile_config
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_qa_service import (
     ProductionQANotFoundError,
@@ -1080,6 +1081,97 @@ async def reparar_timeline_producao(
     return repaired
 
 
+@router.post("/{workflow_id}/rebuild-narration-from-takes", response_model=WorkflowOut)
+async def reconstruir_narracao_dos_takes(
+    workflow_id: uuid.UUID,
+    payload: AudioActionIn,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    """Rebuild final narration from existing accepted takes with current tempo.
+
+    Does NOT call Qwen or generate new audio - reassembles from existing takes.
+    Used when AUDIO_NARRATION_TEMPO changes and we want to apply the new tempo
+    without re-synthesizing.
+    """
+    if not payload.confirm:
+        raise HTTPException(400, "Confirmação explícita é obrigatória para reconstruir a narração.")
+
+    key = _operator_action_key(idempotency_key)
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id_para_atualizacao(workflow_id)
+
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if wf.production_status == "cancelled" or wf.status == "cancelada":
+        raise HTTPException(409, "Workflow cancelado não aceita reconstrução de narração.")
+    if wf.production_status in {"queued", "running"} or wf.status in {"agendada", "gerando_audio"}:
+        raise HTTPException(409, "Produção ativa não aceita reconstrução de narração.")
+    if not wf.blocos:
+        raise HTTPException(400, "Workflow não possui blocos para reconstruir.")
+
+    # Reset audio materialization but preserve takes - the audio processor
+    # will reassemble from existing chunks with current tempo settings.
+    await repo.atualizar_producao(
+        wf.id,
+        status="queued",
+        phase="audio",
+    )
+    # Clear audio materialization flags to force reassembly
+    wf = await repo.obter_por_id(workflow_id)
+    if wf is not None:
+        # Mark that we want to reuse existing takes
+        await repo.reset_audio_materialization(wf.id)
+
+    processar_producao_workflow.delay(str(workflow_id))
+    result = await repo.obter_por_id(workflow_id)
+    assert result is not None
+    return result
+
+
+@router.post("/{workflow_id}/regenerate-visuals", response_model=WorkflowOut)
+async def regenerar_visuais(
+    workflow_id: uuid.UUID,
+    payload: AudioActionIn,
+    session: Annotated[AsyncSession, Depends(get_db)],
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+):
+    """Force VisualPlan and Timeline regeneration while preserving narration.
+
+    Used when visual search parameters change (e.g., Game Entity Guard)
+    and we want to re-run visual selection without changing audio.
+    """
+    if not payload.confirm:
+        raise HTTPException(400, "Confirmação explícita é obrigatória para regenerar visuais.")
+
+    key = _operator_action_key(idempotency_key)
+    repo = WorkflowRepository(session)
+    wf = await repo.obter_por_id_para_atualizacao(workflow_id)
+
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if wf.production_status == "cancelled" or wf.status == "cancelada":
+        raise HTTPException(409, "Workflow cancelado não aceita regeneração de visuais.")
+    if wf.production_status in {"queued", "running"} or wf.status in {"agendada", "gerando_audio"}:
+        raise HTTPException(409, "Produção ativa não aceita regeneração de visuais.")
+    if not wf.blocos:
+        raise HTTPException(400, "Workflow não possui blocos.")
+
+    # Check that audio is ready (alignment must exist)
+    alignment = await NarrationAlignmentService(session).current(workflow_id)
+    if alignment is None or alignment.status != "completed":
+        raise HTTPException(400, "Narração deve estar completa antes de regenerar visuais.")
+
+    # Force visual plan and timeline regeneration
+    # The orchestration will pick up from visual_plan phase
+    await ProductionOrchestrationService(session).force_visual_regeneration(wf)
+
+    processar_producao_workflow.delay(str(workflow_id))
+    result = await repo.obter_por_id(workflow_id)
+    assert result is not None
+    return result
+
+
 @router.patch("/{workflow_id}/cancelar", response_model=WorkflowOut)
 async def cancelar_workflow(
     workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
@@ -1271,7 +1363,11 @@ async def obter_composer_render_input(
     if workflow is None:
         raise HTTPException(404, "Workflow não encontrado")
     try:
-        presentation = build_presentation_spec(workflow, duration_seconds=timeline.duration_seconds)
+        profile_config = resolve_production_profile_config(workflow.perfil_producao)
+        burned_in_captions = profile_config.burned_in_captions if profile_config else True
+        presentation = build_presentation_spec(
+            workflow, duration_seconds=timeline.duration_seconds, burned_in_captions=burned_in_captions
+        )
         audio_mix_plan = build_audio_mix_plan(workflow, timeline, settings)
     except PresentationInputError as exc:
         raise HTTPException(409, str(exc)) from exc

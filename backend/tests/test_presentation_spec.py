@@ -356,3 +356,61 @@ def test_gta_caption_display_wraps_normalized_text_within_line_limit() -> None:
     assert cues[0].text.replace("\n", " ") == "Uma comparação detalhada entre GTA IV e GTA VI"
     assert all(len(line) <= 42 for line in cues[0].text.split("\n"))
     assert (cues[0].start_seconds, cues[0].end_seconds) == (0.0, 0.7)
+
+
+def test_faceless_pop_culture_lists_disables_burned_in_captions() -> None:
+    """Regression: faceless_pop_culture_lists must have burned_in_captions=False."""
+    from app.services.visual_director_service import (
+        PRODUCTION_PROFILE_CONFIGS,
+        resolve_production_profile_config,
+    )
+
+    # Verify the config directly
+    lists_config = PRODUCTION_PROFILE_CONFIGS.get("faceless_pop_culture_lists")
+    assert lists_config is not None, "faceless_pop_culture_lists config missing"
+    assert lists_config.burned_in_captions is False, (
+        "faceless_pop_culture_lists must have burned_in_captions=False"
+    )
+
+    # Verify via resolver
+    resolved = resolve_production_profile_config("faceless_pop_culture_lists")
+    assert resolved is not None
+    assert resolved.burned_in_captions is False
+
+    # Verify other profiles preserve captions (default True)
+    for profile_id in ["faceless_general", "faceless_informational", "faceless_pop_culture", "game_analysis"]:
+        config = resolve_production_profile_config(profile_id)
+        assert config is not None, f"{profile_id} config missing"
+        assert config.burned_in_captions is True, f"{profile_id} must preserve default burned_in_captions=True"
+
+
+def test_presentation_spec_omits_captions_when_profile_disables_them() -> None:
+    """Regression: PresentationSpec.captions is None when burned_in_captions=False."""
+    from app.services.visual_director_service import resolve_production_profile_config
+
+    words = _words(("Teste", 0.0, 0.5), ("de", 0.5, 0.7), ("legenda.", 0.7, 1.2))
+    workflow = _workflow(words)
+
+    # Simulate faceless_pop_culture_lists profile
+    profile_config = resolve_production_profile_config("faceless_pop_culture_lists")
+    assert profile_config is not None
+    burned_in_captions = profile_config.burned_in_captions
+
+    spec = build_presentation_spec(
+        workflow,
+        duration_seconds=6.0,
+        burned_in_captions=burned_in_captions,
+    )
+    assert spec is not None
+    assert spec.captions is None, "faceless_pop_culture_lists must produce PresentationSpec with captions=None"
+
+    # Verify default profile produces captions
+    default_profile = resolve_production_profile_config("faceless_general")
+    assert default_profile is not None
+    spec_with_captions = build_presentation_spec(
+        workflow,
+        duration_seconds=6.0,
+        burned_in_captions=default_profile.burned_in_captions,
+    )
+    assert spec_with_captions is not None
+    assert spec_with_captions.captions is not None, "default profile must produce captions"
