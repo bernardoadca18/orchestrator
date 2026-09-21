@@ -8,6 +8,7 @@ import pytest
 from app.clients.video_composer_client import (
     VideoComposerClient,
     VideoComposerConflictError,
+    VideoComposerContractError,
     VideoComposerError,
     VideoComposerNotFoundError,
     VideoComposerQueueFullError,
@@ -232,3 +233,46 @@ async def test_render_profiles_contract_is_typed() -> None:
         profiles = await client.get_render_profiles()
     assert profiles[0].width == 1920
     assert profiles[0].audio_sample_rate == 48_000
+
+
+@pytest.mark.asyncio
+async def test_502_with_dependency_contract_is_permanent() -> None:
+    """Regression: dependency_contract must be permanent, not transient."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            502,
+            json={"error": "dependency_contract", "message": "Invalid Orchestrator response"},
+        )
+
+    async with VideoComposerClient(_settings(), transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(VideoComposerContractError) as exc_info:
+            await client.get_render(str(uuid.uuid4()))
+    assert exc_info.value.category == "dependency_contract"
+
+
+@pytest.mark.asyncio
+async def test_502_without_body_is_transient() -> None:
+    """Unknown 502 errors remain transient for retry."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, content=b"bad gateway")
+
+    async with VideoComposerClient(_settings(), transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(VideoComposerTransientError):
+            await client.get_render(str(uuid.uuid4()))
+
+
+@pytest.mark.asyncio
+async def test_502_with_dependency_unavailable_is_transient() -> None:
+    """dependency_unavailable indicates temporary outage."""
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            502,
+            json={"error": "dependency_unavailable", "message": "Orchestrator timeout"},
+        )
+
+    async with VideoComposerClient(_settings(), transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(VideoComposerTransientError):
+            await client.get_render(str(uuid.uuid4()))

@@ -16,6 +16,10 @@ from app.core.config import Settings, settings
 class VideoComposerError(RuntimeError):
     """Permanent request or response-contract failure."""
 
+    def __init__(self, message: str, *, category: str | None = None) -> None:
+        super().__init__(message)
+        self.category = category
+
 
 class VideoComposerTransientError(VideoComposerError):
     """Network or server failure that may succeed later."""
@@ -26,6 +30,12 @@ class VideoComposerNotFoundError(VideoComposerError):
 
 
 class VideoComposerConflictError(VideoComposerError):
+    pass
+
+
+class VideoComposerContractError(VideoComposerError):
+    """Permanent contract violation from Video Composer."""
+
     pass
 
 
@@ -268,6 +278,17 @@ class VideoComposerClient:
         if status in {400, 422}:
             raise VideoComposerError(f"Video Composer rejected the request with HTTP {status}")
         if status >= 500:
+            # Parse error body to classify dependency_contract as permanent
+            try:
+                body = response.json()
+                category = body.get("error") or body.get("category")
+                if category == "dependency_contract":
+                    raise VideoComposerContractError(
+                        "Video Composer rejected the contract",
+                        category=category,
+                    )
+            except (ValueError, TypeError, KeyError):
+                pass
             raise VideoComposerTransientError(f"Video Composer returned HTTP {status}")
         raise VideoComposerError(f"Unexpected Video Composer response HTTP {status}")
 
