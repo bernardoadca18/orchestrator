@@ -157,10 +157,14 @@ class WorkflowRepository:
             stmt = stmt.options(selectinload(WorkflowExecucao.blocos))
         return (await self.session.execute(stmt)).scalar_one_or_none()
 
-    async def listar(self, status: str | None = None) -> Sequence[WorkflowExecucao]:
+    async def listar(
+        self, status: str | None = None, *, com_blocos: bool = False
+    ) -> Sequence[WorkflowExecucao]:
         stmt = select(WorkflowExecucao).order_by(WorkflowExecucao.criado_em.desc())
         if status:
             stmt = stmt.where(WorkflowExecucao.status == status)
+        if com_blocos:
+            stmt = stmt.options(selectinload(WorkflowExecucao.blocos))
         return (await self.session.execute(stmt)).scalars().all()
 
     async def atualizar_status(self, workflow_id: uuid.UUID, status: str, **campos) -> None:

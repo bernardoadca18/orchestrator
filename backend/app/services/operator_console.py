@@ -434,7 +434,7 @@ class OperatorConsoleService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[OperatorWorkflowSummaryOut]:
-        workflows = list(await self.workflows.listar())
+        workflows = list(await self.workflows.listar(com_blocos=True))
         summaries = [await self.summary(workflow) for workflow in workflows]
         if search:
             needle = search.casefold().strip()
