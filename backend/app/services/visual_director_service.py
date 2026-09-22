@@ -39,6 +39,12 @@ from app.schemas.workflow import (
     VisualVideoSegmentSourceSelectionOut,
 )
 from app.services.narration_alignment_service import NarrationAlignmentService
+from app.services.retrieval_query_transform import (
+    RETRIEVAL_STRATEGY_VERSION,
+    ContentLocale,
+    RetrievalTransform,
+    transform_retrieval_query,
+)
 from app.services.visual_director_algorithm import (
     HybridVisualCandidate,
     StaticImageCandidate,
@@ -59,11 +65,11 @@ from app.services.visual_diversity import (
 )
 
 __all__ = [
-    "ProductionProfileConfig",
-    "PRODUCTION_PROFILE_CONFIGS",
-    "resolve_production_profile_config",
     "FINAL_VISUAL_PRODUCTION_PROFILES",
+    "PRODUCTION_PROFILE_CONFIGS",
+    "ProductionProfileConfig",
     "VisualDirectorService",
+    "resolve_production_profile_config",
 ]
 
 logger = logging.getLogger(__name__)
@@ -172,6 +178,8 @@ class QueryContext:
     preferred_end_seconds: float | None
     desired_duration_seconds: float | None
     binding: VisualQueryNarrationBinding
+    retrieval_query: str | None = None
+    retrieval_transform: RetrievalTransform | None = None
 
     @property
     def target_duration_seconds(self) -> float | None:
@@ -181,6 +189,11 @@ class QueryContext:
         ):
             return None
         return self.binding.narration_end_seconds - self.binding.narration_start_seconds
+
+    @property
+    def effective_query(self) -> str:
+        """Return the query to use for retrieval (retrieval_query if available, else original)."""
+        return self.retrieval_query if self.retrieval_query else self.query
 
 
 @dataclass(slots=True)
@@ -434,6 +447,10 @@ class VisualDirectorService:
         blocks = workflow.roteiro_snapshot.get("blocos")
         if not isinstance(blocks, list):
             raise VisualDirectorInputError("Script blocks must be a list")
+        # Extract content locale for language-aware retrieval
+        content_locale: ContentLocale | None = workflow.roteiro_snapshot.get("content_locale")
+        if content_locale not in ("pt-BR", "en-US"):
+            content_locale = None
         for fallback_order, block in enumerate(blocks):
             if not isinstance(block, dict):
                 raise VisualDirectorInputError("Script block must be an object")
@@ -470,6 +487,14 @@ class VisualDirectorService:
                     raise VisualDirectorInputError(
                         f"Unsupported VisualQuery importance: {importance}"
                     )
+                original_query = _query_text(raw.get("query", ""))
+                # Apply retrieval query transformation for language-aware matching
+                retrieval_transform = transform_retrieval_query(
+                    original_query,
+                    content_locale=content_locale,
+                    # Default to Portuguese as predominant index language
+                    index_language="pt",
+                )
                 contexts.append(
                     QueryContext(
                         id=query_id,
@@ -477,7 +502,7 @@ class VisualDirectorService:
                         query_order=_integer(
                             raw.get("order", fallback_query_order), "VisualQuery.order"
                         ),
-                        query=_query_text(raw.get("query", "")),
+                        query=original_query,
                         intent=intent,
                         importance=importance,
                         source_note_id=_uuid(raw.get("source_note_id"), "source_note_id"),
@@ -494,6 +519,8 @@ class VisualDirectorService:
                             raw.get("desired_duration_seconds"), "desired_duration_seconds"
                         ),
                         binding=binding,
+                        retrieval_query=retrieval_transform.retrieval_query,
+                        retrieval_transform=retrieval_transform,
                     )
                 )
         return sorted(
@@ -596,12 +623,14 @@ class VisualDirectorService:
         script_value = {
             "workflow_id": str(workflow.id),
             "audio_sha256": workflow.audio_final_sha256,
+            "retrieval_strategy_version": RETRIEVAL_STRATEGY_VERSION,
             "visual_queries": [
                 {
                     "id": str(item.id),
                     "block_order": item.block_order,
                     "query_order": item.query_order,
                     "query": item.query,
+                    "retrieval_query": item.retrieval_query,
                     "intent": item.intent,
                     "importance": item.importance,
                     "source_note_id": str(item.source_note_id) if item.source_note_id else None,
@@ -868,15 +897,16 @@ class VisualDirectorService:
         for resolution in resolutions:
             item = resolution.query
             # Apply Game Entity Guard to direct/preferred provenance candidates
+            # Use original query for game extraction (game names are language-independent)
             query_games = extract_games_from_query(item.query)
-            direct_candidate = resolution.direct
-            if direct_candidate is not None and query_games:
+            direct_resolved = resolution.direct
+            if direct_resolved is not None and query_games:
                 # Direct candidate must match query games for game-bound queries
-                direct_game = candidate_game_identity(direct_candidate)
+                direct_game = candidate_game_identity(direct_resolved)
                 if direct_game is None or direct_game not in query_games:
                     # Reject direct candidate with wrong/unknown game
-                    direct_candidate = None
-            selected: HybridVisualCandidate | None = direct_candidate
+                    direct_resolved = None
+            selected: HybridVisualCandidate | None = direct_resolved
             alternatives: list[HybridVisualCandidate] = []
             ranked: list[HybridVisualCandidate] = []
             source_status = "resolved"
@@ -885,8 +915,12 @@ class VisualDirectorService:
             all_candidates_raw = [*resolution.candidates, *resolution.image_candidates]
             game_filtered_candidates = filter_candidates_by_game(all_candidates_raw, query_games)
             # Separate video and image candidates after game filtering for fusion
-            game_filtered_videos = [c for c in game_filtered_candidates if isinstance(c, VisualCandidate)]
-            game_filtered_images = [c for c in game_filtered_candidates if isinstance(c, StaticImageCandidate)]
+            game_filtered_videos = [
+                c for c in game_filtered_candidates if isinstance(c, VisualCandidate)
+            ]
+            game_filtered_images = [
+                c for c in game_filtered_candidates if isinstance(c, StaticImageCandidate)
+            ]
             all_candidates = game_filtered_candidates
             if selected is None and all_candidates:
                 if scope and scope.hybrid_enabled:
@@ -1016,6 +1050,26 @@ class VisualDirectorService:
                                 ranked if selected is not None and all_candidates else [], 1
                             )
                         ],
+                        "retrieval_transform": {
+                            "original_query": item.retrieval_transform.original_query
+                            if item.retrieval_transform
+                            else None,
+                            "retrieval_query": item.retrieval_transform.retrieval_query
+                            if item.retrieval_transform
+                            else None,
+                            "strategy": item.retrieval_transform.strategy
+                            if item.retrieval_transform
+                            else None,
+                            "original_language": item.retrieval_transform.original_language
+                            if item.retrieval_transform
+                            else None,
+                            "retrieval_language": item.retrieval_transform.retrieval_language
+                            if item.retrieval_transform
+                            else None,
+                            "strategy_version": RETRIEVAL_STRATEGY_VERSION,
+                        }
+                        if item.retrieval_transform
+                        else None,
                     },
                 )
             )
@@ -1201,7 +1255,7 @@ class VisualDirectorService:
             key: tuple[Any, ...] = (
                 "session",
                 str(session_id),
-                item.query,
+                item.effective_query,
                 max_results,
                 min_score,
             )
@@ -1210,7 +1264,7 @@ class VisualDirectorService:
                     key,
                     lambda: self.provider.search_session(
                         session_id,
-                        query=item.query,
+                        query=item.effective_query,
                         max_results=max_results,
                         min_score=min_score,
                     ),
@@ -1223,7 +1277,7 @@ class VisualDirectorService:
                 "project",
                 str(project_id),
                 tuple(str(value) for value in scope.session_ids),
-                item.query,
+                item.effective_query,
                 max_results,
                 min_score,
             )
@@ -1232,7 +1286,7 @@ class VisualDirectorService:
                     key,
                     lambda: self.provider.search_project(
                         project_id,
-                        query=item.query,
+                        query=item.effective_query,
                         max_results=max_results,
                         min_score=min_score,
                         session_ids=session_ids,
@@ -1242,13 +1296,13 @@ class VisualDirectorService:
         if scope.session_ids:
             calls = []
             for session_id in scope.session_ids:
-                key = ("session", str(session_id), item.query, max_results, min_score)
+                key = ("session", str(session_id), item.effective_query, max_results, min_score)
                 calls.append(
                     cached_search(
                         key,
                         lambda session_id=session_id: self.provider.search_session(
                             session_id,
-                            query=item.query,
+                            query=item.effective_query,
                             max_results=max_results,
                             min_score=min_score,
                         ),
@@ -1289,7 +1343,7 @@ class VisualDirectorService:
             key = (
                 "image",
                 str(scope.project_id),
-                item.query,
+                item.effective_query,
                 self.config.visual_director_image_search_top_k,
                 self.config.visual_director_image_min_semantic_score,
                 tuple(sorted(filters.to_dict().items())),
@@ -1299,7 +1353,7 @@ class VisualDirectorService:
                     key,
                     lambda filters=filters: self.provider.search_images(
                         scope.project_id,
-                        query=item.query,
+                        query=item.effective_query,
                         max_results=self.config.visual_director_image_search_top_k,
                         min_score=self.config.visual_director_image_min_semantic_score,
                         filters=filters,
