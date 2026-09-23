@@ -316,6 +316,19 @@ async def test_mode_and_changed_upstream_identity_create_distinct_reports() -> N
 
 
 @pytest.mark.asyncio
+async def test_qa_strategy_version_changes_report_identity() -> None:
+    repository = InMemoryQARepository()
+    service, inputs, _, _ = _service(qa_repo=repository)
+    service.config = Settings(production_qa_strategy_version="production_qa_v2")
+    old = await service.ensure(inputs.workflow.id)
+    service.config = Settings(production_qa_strategy_version="production_qa_v3_visual_semantic")
+    current = await service.ensure(inputs.workflow.id)
+    assert old.report.request_fingerprint != current.report.request_fingerprint
+    assert old.report.id != current.report.id
+    assert current.report.strategy_version == "production_qa_v3_visual_semantic"
+
+
+@pytest.mark.asyncio
 async def test_material_hybrid_policy_change_creates_a_distinct_report() -> None:
     repository = InMemoryQARepository()
     service, inputs, _, _ = _service(qa_repo=repository)

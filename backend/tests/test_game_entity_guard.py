@@ -9,14 +9,17 @@ from app.services.visual_director_algorithm import (
 
 
 class TestGameEntityGuardStrategyVersion:
-    """Item 5: Version the Game Entity Guard policy."""
+    """The current visual policy has its own identity after the guard version."""
 
-    def test_strategy_version_includes_game_guard(self):
-        """Verify strategy version string includes game_entity_guard."""
+    def test_current_strategy_versions_supersede_game_guard_version(self):
         from app.core.config import settings
 
-        assert "game_entity_guard" in settings.visual_director_strategy_version
-        assert "game_entity_guard" in settings.visual_director_hybrid_strategy_version
+        assert settings.visual_director_strategy_version == (
+            "visual_director_v8_quality_overlap_evidence"
+        )
+        assert settings.visual_director_hybrid_strategy_version == (
+            "visual_director_v6_hybrid_quality_overlap_evidence"
+        )
 
 
 class TestCanonicalGameExtraction:

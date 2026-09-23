@@ -30,7 +30,7 @@ PT_PATTERNS = [
     r"\b(de|da|do|das|dos|em|na|no|nas|nos|com|para|por|que|uma|um|o|a|os|as)\b",
     r"\b(é|são|está|estão|tem|têm|foi|foram|ser|estar|ter)\b",
     r"\b(mostrando|demonstrando|destacando|reagindo|sendo|tendo)\b",
-    r"\b(gameplay|cutscene|NPC|HUD|missão|personagem|cenário)\b",
+    r"\b(missão|personagem|cenário)\b",
 ]
 
 EN_PATTERNS = [

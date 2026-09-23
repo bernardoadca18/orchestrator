@@ -27,6 +27,18 @@ class TestDetectQueryLanguage:
         result = detect_query_language("GTA IV")
         assert result is None
 
+    @pytest.mark.parametrize(
+        ("query", "expected"),
+        [
+            ("GTA IV gameplay showing pedestrians", "en"),
+            ("Gameplay de GTA IV mostrando pedestres", "pt"),
+            ("GTA IV gameplay", None),
+            ("GTA IV NPC HUD cutscene", None),
+        ],
+    )
+    def test_neutral_game_terms_do_not_vote(self, query, expected):
+        assert detect_query_language(query) == expected
+
     def test_detects_portuguese_verbs(self):
         result = detect_query_language("NPCs reagindo organicamente")
         assert result == "pt"

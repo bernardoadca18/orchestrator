@@ -25,6 +25,7 @@ from app.models.workflow import (
     VisualQueryNarrationBinding,
     WorkflowExecucao,
 )
+from app.services.visual_director_algorithm import VisualCandidate
 from app.services.visual_director_service import (
     VISUAL_QUERIES_MISSING_CATEGORY,
     VisualDirectorInputError,
@@ -42,6 +43,28 @@ OTHER_SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000003")
 MEDIA_ID = uuid.UUID("20000000-0000-4000-8000-000000000004")
 INDEX_ID = uuid.UUID("20000000-0000-4000-8000-000000000005")
 THIRD_SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000006")
+
+
+def test_reused_source_metric_counts_only_strong_overlap() -> None:
+    base = VisualCandidate(
+        project_id=PROJECT_ID,
+        session_id=SESSION_ID,
+        media_id=MEDIA_ID,
+        start_seconds=0,
+        end_seconds=10,
+        semantic_score=0.8,
+        rank=1,
+        session_label="GTA IV",
+        media_filename="001.mkv",
+    )
+    from dataclasses import replace
+
+    assert not VisualDirectorService._candidate_reused(
+        base, replace(base, start_seconds=5, end_seconds=15)
+    )
+    assert VisualDirectorService._candidate_reused(
+        base, replace(base, start_seconds=2, end_seconds=12)
+    )
 
 
 class FakeWorkflowRepository:
@@ -588,6 +611,32 @@ async def test_quality_dependency_error_fails_plan_instead_of_semantic_unresolve
     assert plan.error_message == "quality_dependency_failed: unavailable"
     assert plan.diagnostics["error_category"] == "quality_dependency_failed"
     assert plan.diagnostics["quality_dependency_errors"] == 1
+
+
+@pytest.mark.asyncio
+async def test_optional_quality_error_keeps_clean_primary_and_checks_rank_three() -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)]
+    )
+    provider = FakeProvider()
+    provider.results = [
+        _candidate(start=100, end=140, score=0.90),
+        _candidate(start=200, end=240, score=0.80),
+        _candidate(start=300, end=340, score=0.70),
+    ]
+    provider.quality_overrides[200] = MediaIndexerUnavailableError("timeout")
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    decision = plan.decisions[0]
+    assert plan.status == "completed"
+    assert decision.selected_source["source_start_seconds"] == 100
+    assert [item["source_start_seconds"] for item in decision.alternatives] == [300]
+    assert plan.metrics["quality_dependency_errors"] == 1
+    assert any(
+        item["quality_status"] == "dependency_error"
+        and item["candidate_rank"] == 2
+        for item in decision.diagnostics["quality_outcomes"]
+    )
 
 
 @pytest.mark.asyncio

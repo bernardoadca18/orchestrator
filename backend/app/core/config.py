@@ -66,7 +66,7 @@ class Settings(BaseSettings):
     video_composer_render_profile: str = "youtube_1080p30_v1"
     video_composer_program_audio_render_profile: str = "youtube_1080p30_program_audio_v1"
 
-    production_qa_strategy_version: str = "production_qa_v2"
+    production_qa_strategy_version: str = "production_qa_v3_visual_semantic"
     production_qa_deep_max_video_bytes: int = 10 * 1024 * 1024 * 1024
     production_qa_task_max_retries: int = 2
     production_qa_task_retry_seconds: float = 5.0

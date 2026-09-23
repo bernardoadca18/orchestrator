@@ -48,6 +48,7 @@ from app.services.retrieval_query_transform import (
     RetrievalTransform,
     transform_retrieval_query,
 )
+from app.services.source_overlap import SourceRelation, classify_source_windows
 from app.services.visual_director_algorithm import (
     HybridVisualCandidate,
     StaticImageCandidate,
@@ -58,7 +59,6 @@ from app.services.visual_director_algorithm import (
     filter_candidates_by_game,
     fuse_hybrid_candidates,
     normalize_query,
-    overlap_ratio,
     rank_candidates,
 )
 from app.services.visual_diversity import (
@@ -1110,7 +1110,7 @@ class VisualDirectorService:
                 else []
             )
             if selected is not None:
-                valid = []
+                valid: list[HybridVisualCandidate] = []
                 for candidate_rank, candidate in enumerate([selected, *alternatives], 1):
                     if (
                         candidate is not direct_resolved
@@ -1119,11 +1119,30 @@ class VisualDirectorService:
                         < self.config.visual_director_min_semantic_score
                     ):
                         continue
-                    quality = (
-                        await cached_quality(candidate)
-                        if isinstance(candidate, VisualCandidate)
-                        else None
-                    )
+                    previous_plan_diagnostics = plan.diagnostics
+                    try:
+                        quality = (
+                            await cached_quality(candidate)
+                            if isinstance(candidate, VisualCandidate)
+                            else None
+                        )
+                    except MediaIndexerError as exc:
+                        if not valid:
+                            raise
+                        # Alternatives are useful but optional once a quality-valid
+                        # primary exists; continue to the next ranked candidate.
+                        plan.diagnostics = previous_plan_diagnostics
+                        quality_outcomes.append(
+                            {
+                                "candidate_rank": candidate_rank,
+                                "retrieval_rank": candidate.rank,
+                                "media_id": str(candidate.media_id),
+                                "quality_status": "dependency_error",
+                                "accepted": False,
+                                "error_category": exc.category,
+                            }
+                        )
+                        continue
                     checked = await self._quality_checked_candidate(
                         candidate, item, quality=quality
                     )
@@ -1664,7 +1683,19 @@ class VisualDirectorService:
                 and isinstance(previous, StaticImageCandidate)
                 and candidate.media_id == previous.media_id
             )
-        return overlap_ratio(candidate, previous) > 0.5
+        return (
+            classify_source_windows(
+                candidate.session_id,
+                candidate.media_id,
+                candidate.start_seconds,
+                candidate.end_seconds,
+                previous.session_id,
+                previous.media_id,
+                previous.start_seconds,
+                previous.end_seconds,
+            )
+            >= SourceRelation.STRONG_OVERLAP
+        )
 
     def _candidate_payload(
         self,

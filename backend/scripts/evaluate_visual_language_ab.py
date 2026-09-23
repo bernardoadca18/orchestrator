@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import statistics
 import uuid
 from dataclasses import replace
@@ -19,9 +20,27 @@ from app.clients.media_indexer_search import (
     VideoWindowQuality,
 )
 from app.core.database import task_session
-from app.models.workflow import VisualPlan
+from app.models.workflow import ProductionTimeline, VisualPlan
+from app.services.production_orchestration_service import ProductionOrchestrationService
+from app.services.production_qa_checks import visual_plan_semantic_metrics
+from app.services.production_timeline_algorithm import build_production_timeline
+from app.services.production_timeline_service import ProductionTimelineService
 from app.services.visual_director_service import VisualDirectorService
-from app.services.visual_diversity import VisualSourceWindow, evaluate_visual_diversity
+from app.services.visual_diversity import (
+    VisualSourceWindow,
+    evaluate_visual_diversity,
+    timeline_visual_diversity,
+)
+
+
+def json_ready(value: Any) -> Any:
+    if isinstance(value, float) and not math.isfinite(value):
+        return str(value)
+    if isinstance(value, dict):
+        return {key: json_ready(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [json_ready(item) for item in value]
+    return value
 
 
 class CachedQualityProvider:
@@ -224,16 +243,70 @@ async def run(args: argparse.Namespace) -> dict:
                     "actual_quality_http_calls": base_provider.actual_calls - prior_quality_calls,
                     "shared_quality_cache_hits": base_provider.cache_hits - prior_cache_hits,
                 }
-                args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+                args.output.write_text(
+                    json.dumps(json_ready(result), indent=2, ensure_ascii=False, allow_nan=False)
+                    + "\n"
+                )
                 continue
             result["variants"][name] = {"plan_status": status, **summarize(decisions, metrics)}
+            timeline_service = ProductionTimelineService(session)
+            hybrid = bool(scope.hybrid_enabled)
+            timeline_policy = timeline_service._policy(hybrid=hybrid)
+            assert workflow.duracao_audio_segundos is not None
+            timeline_result = build_production_timeline(
+                float(workflow.duracao_audio_segundos),
+                [timeline_service._decision_input(item, hybrid=hybrid) for item in decisions],
+                timeline_policy,
+            )
+            timeline_stub = cast(ProductionTimeline, SimpleNamespace(id=uuid.uuid4()))
+            placements = [
+                timeline_service._placement_model(timeline_stub, item, index, hybrid=hybrid)
+                for index, item in enumerate(timeline_result.placements)
+            ]
+            diversity_policy = ProductionOrchestrationService(session)._visual_diversity_policy(
+                cast(ProductionTimeline, SimpleNamespace(
+                    schema_version=(
+                        timeline_service.config.production_timeline_hybrid_schema_version
+                        if hybrid
+                        else timeline_service.config.production_timeline_schema_version
+                    )
+                ))
+            )
+            timeline_diversity = timeline_visual_diversity(placements, diversity_policy)
+            semantic_metrics = visual_plan_semantic_metrics(
+                cast(VisualPlan, SimpleNamespace(decisions=decisions))
+            )
+            semantic_failure = bool(
+                semantic_metrics["entity_violation_count"]
+                or (decisions and not semantic_metrics["semantic_coverage"])
+            )
+            result["variants"][name]["production_timeline"] = {
+                "strategy_version": timeline_service._versions(hybrid)[0],
+                "status": timeline_result.status,
+                "placement_count": len(placements),
+                "gap_count": len(timeline_result.gaps),
+                "visual_coverage_ratio": timeline_result.coverage_ratio,
+                "diversity": timeline_diversity.to_dict(),
+                "semantic_metrics": semantic_metrics,
+                "pre_render_visual_qa": (
+                    "BLOCK"
+                    if timeline_diversity.status == "failed" or semantic_failure
+                    else "WARNING"
+                    if timeline_diversity.status == "warning"
+                    else "PASS"
+                ),
+                "qa_reasons": list(timeline_diversity.reasons),
+            }
             result["variants"][name]["actual_quality_http_calls"] = (
                 base_provider.actual_calls - prior_quality_calls
             )
             result["variants"][name]["shared_quality_cache_hits"] = (
                 base_provider.cache_hits - prior_cache_hits
             )
-            args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+            args.output.write_text(
+                json.dumps(json_ready(result), indent=2, ensure_ascii=False, allow_nan=False)
+                + "\n"
+            )
         if {"raw", "transformed"}.issubset(args.variants) and all(
             "candidate_sets" in result["variants"][name] for name in ("raw", "transformed")
         ):
@@ -263,7 +336,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Small read-only smoke subset")
     args = parser.parse_args()
     result = asyncio.run(run(args))
-    args.output.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+    args.output.write_text(
+        json.dumps(json_ready(result), indent=2, ensure_ascii=False, allow_nan=False) + "\n"
+    )
     print(f"wrote {args.output}")
 
 
