@@ -31,6 +31,11 @@ from app.services.visual_director_service import (
     VisualDirectorService,
 )
 
+
+def test_visual_strategy_version_fits_persisted_column() -> None:
+    with pytest.raises(ValueError, match="64 characters"):
+        Settings(visual_director_strategy_version="x" * 65)
+
 PROJECT_ID = uuid.UUID("20000000-0000-4000-8000-000000000001")
 SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000002")
 OTHER_SESSION_ID = uuid.UUID("20000000-0000-4000-8000-000000000003")
@@ -91,6 +96,14 @@ class FakeVisualPlanRepository:
     async def mark_processing(self, plan):
         plan.status = "processing"
         plan.started_at = dt.datetime.now(dt.UTC)
+
+    async def claim_stale_processing(self, plan, cutoff):
+        if plan.status != "processing" or (
+            plan.started_at is not None and plan.started_at >= cutoff
+        ):
+            return False
+        plan.status = "pending"
+        return True
 
     async def mark_blocked(self, plan, reason, *, diagnostics=None):
         plan.status = "blocked"
@@ -176,6 +189,9 @@ class FakeProvider:
 
     async def video_window_quality(self, media_id, *, start_seconds, end_seconds):
         self.quality_calls.append((media_id, start_seconds, end_seconds))
+        override = self.quality_overrides.get(start_seconds, {"status": "clean"})
+        if isinstance(override, Exception):
+            raise override
         return VideoWindowQuality(
             version="black_window_quality_v1",
             window_start_seconds=start_seconds,
@@ -184,7 +200,7 @@ class FakeProvider:
             black_ratio=0,
             longest_black_seconds=0,
             black_intervals=[],
-            **self.quality_overrides.get(start_seconds, {"status": "clean"}),
+            **override,
         )
 
     async def get_session(self, session_id: uuid.UUID):
@@ -385,7 +401,7 @@ async def test_nonempty_final_faceless_narration_with_zero_queries_is_blocked() 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("hybrid", [False, True])
-async def test_video_quality_rejects_black_and_uses_only_bounded_alternatives(hybrid):
+async def test_video_quality_checks_full_bounded_pool(hybrid):
     workflow, alignment = _entities([_query(preferred_session_id=None, start=None, end=None)])
     if hybrid:
         workflow.roteiro_snapshot["media_context"]["static_images"] = {"enabled": True}
@@ -396,17 +412,37 @@ async def test_video_quality_rejects_black_and_uses_only_bounded_alternatives(hy
     provider.quality_overrides = {
         0: {"status": "mostly_black"},
         100: {"status": "internal_black"},
-        200: {
-            "status": "edge_black",
-            "recommended_start_seconds": 201.1,
-            "recommended_end_seconds": 215,
-        },
+        200: {"status": "mostly_black"},
     }
     service, _ = _service(workflow, alignment, provider)
     plan, _ = await service.ensure(workflow.id)
-    assert plan.decisions[0].selected_source["source_start_seconds"] == 201.1
-    assert [item[1] for item in provider.quality_calls] == [0, 100, 200]
+    assert plan.decisions[0].selected_source["source_start_seconds"] == 300
+    assert [item[1] for item in provider.quality_calls] == [0, 100, 200, 300]
     assert plan.decisions[0].alternatives == []
+    outcomes = plan.decisions[0].diagnostics["quality_outcomes"]
+    assert [item["quality_status"] for item in outcomes] == [
+        "mostly_black", "internal_black", "mostly_black", "clean"
+    ]
+    assert outcomes[-1]["accepted"] is True
+
+
+@pytest.mark.asyncio
+async def test_unused_late_rank_quality_failure_is_not_requested() -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)]
+    )
+    provider = FakeProvider()
+    provider.results = [
+        _candidate(start=i * 100, end=i * 100 + 15, score=0.9 - i * 0.1)
+        for i in range(4)
+    ]
+    provider.quality_overrides[300] = MediaIndexerUnavailableError("timeout")
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.status == "completed"
+    assert plan.decisions[0].selected_source["source_start_seconds"] == 0
+    assert plan.metrics["quality_dependency_errors"] == 0
+    assert [item[1] for item in provider.quality_calls] == [0, 100, 200]
 
 
 @pytest.mark.asyncio
@@ -421,7 +457,7 @@ async def test_video_quality_rejects_black_and_uses_only_bounded_alternatives(hy
         },
         {
             "status": "edge_black",
-            "recommended_start_seconds": 1239,
+            "recommended_start_seconds": 1239.9,
             "recommended_end_seconds": 1240,
         },
     ],
@@ -520,6 +556,53 @@ async def test_valid_preferred_provenance_resolves_without_media_search() -> Non
     assert provider.session_search_calls == []
     assert provider.project_search_calls == []
     assert workflow.roteiro_snapshot == snapshot
+
+
+@pytest.mark.asyncio
+async def test_black_preferred_provenance_falls_back_to_media_search() -> None:
+    workflow, alignment = _entities([_query()], media_session_ids=[SESSION_ID])
+    provider = FakeProvider()
+    provider.results = [_candidate(start=1300, end=1315)]
+    provider.quality_overrides[1200] = {"status": "mostly_black"}
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    decision = plan.decisions[0]
+    assert decision.source_resolution_status == "resolved"
+    assert decision.selection_strategy == "media_search"
+    assert decision.selected_source["source_start_seconds"] == 1300
+    assert [call[1] for call in provider.quality_calls] == [1200, 1300]
+    assert len(provider.session_search_calls) == 1
+    rejected = decision.diagnostics["quality_outcomes"][0]
+    assert rejected["preferred_provenance"] is True
+    assert rejected["rejection_reason"] == "mostly_black"
+
+
+@pytest.mark.asyncio
+async def test_quality_dependency_error_fails_plan_instead_of_semantic_unresolved() -> None:
+    workflow, alignment = _entities([_query()], media_session_ids=[SESSION_ID])
+    provider = FakeProvider()
+    provider.quality_overrides[1200] = MediaIndexerUnavailableError("timeout")
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.status == "failed"
+    assert plan.error_message == "quality_dependency_failed: unavailable"
+    assert plan.diagnostics["error_category"] == "quality_dependency_failed"
+    assert plan.diagnostics["quality_dependency_errors"] == 1
+
+
+@pytest.mark.asyncio
+async def test_edge_trim_keeps_shorter_usable_source() -> None:
+    workflow, alignment = _entities([_query(start=1200, end=1215)])
+    provider = FakeProvider()
+    provider.quality_overrides[1200] = {
+        "status": "edge_black",
+        "recommended_start_seconds": 1201,
+        "recommended_end_seconds": 1215,
+    }
+    service, _ = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    assert plan.decisions[0].source_resolution_status == "resolved"
+    assert plan.decisions[0].selected_source["source_start_seconds"] == 1201
 
 
 @pytest.mark.asyncio
@@ -660,7 +743,9 @@ async def test_hybrid_image_only_result_is_selected_without_temporal_fields() ->
     service, _ = _service(workflow, alignment, provider)
     plan, _ = await service.ensure(workflow.id)
     source = plan.decisions[0].selected_source
-    assert plan.strategy_version == "visual_director_v4_hybrid_game_entity_guard"
+    assert plan.strategy_version == (
+        "visual_director_v6_hybrid_quality_overlap_evidence"
+    )
     assert source["source_type"] == "static_image"
     assert "source_start_seconds" not in source
     assert len(provider.project_search_calls) == 1
@@ -743,6 +828,24 @@ async def test_idempotency_force_and_changed_query() -> None:
     changed, changed_created = await service.ensure(workflow.id)
     assert changed_created is True
     assert changed.id != first.id
+
+
+@pytest.mark.asyncio
+async def test_stale_processing_request_is_recovered_without_losing_identity() -> None:
+    workflow, alignment = _entities(
+        [_query(preferred_session_id=None, start=None, end=None)]
+    )
+    provider = FakeProvider()
+    provider.results = [_candidate()]
+    service, repository = _service(workflow, alignment, provider)
+    plan, _ = await service.ensure(workflow.id)
+    plan.status = "processing"
+    plan.started_at = dt.datetime.now(dt.UTC) - dt.timedelta(hours=4)
+    recovered, created = await service.ensure(workflow.id)
+    assert not created
+    assert recovered.id == plan.id
+    assert recovered.status == "completed"
+    assert repository.output_writes == 2
 
 
 @pytest.mark.asyncio

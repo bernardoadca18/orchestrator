@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import soundfile as sf  # type: ignore[import-untyped]
+import soundfile as sf
 from numpy.typing import NDArray
 
 from app.services.production_audio import (

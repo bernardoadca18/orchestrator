@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, replace
 from uuid import UUID
 
+from app.services.source_overlap import temporal_overlap_ratio
 
 UNKNOWN_GAME = "__unknown_game__"
 
@@ -53,23 +54,38 @@ def extract_games_from_query(query: str) -> frozenset[str]:
     games: set[str] = set()
 
     # GTA VI patterns (GTA 6, GTA VI, Grand Theft Auto VI, etc.)
-    if re.search(r"\bgta\s*6\b|\bgta\s*vi\b|\bgrand\s*theft\s*auto\s*6\b|\bgrand\s*theft\s*auto\s*vi\b", normalized):
+    if re.search(
+        r"\bgta\s*6\b|\bgta\s*vi\b|\bgrand\s*theft\s*auto\s*6\b|\bgrand\s*theft\s*auto\s*vi\b",
+        normalized,
+    ):
         games.add("gta6")
 
     # GTA V patterns (GTA 5, GTA V, Grand Theft Auto V, etc.)
-    if re.search(r"\bgta\s*5\b|\bgta\s*v\b|\bgrand\s*theft\s*auto\s*5\b|\bgrand\s*theft\s*auto\s*v\b", normalized):
+    if re.search(
+        r"\bgta\s*5\b|\bgta\s*v\b|\bgrand\s*theft\s*auto\s*5\b|\bgrand\s*theft\s*auto\s*v\b",
+        normalized,
+    ):
         games.add("gta5")
 
     # GTA IV patterns (GTA 4, GTA IV, Grand Theft Auto IV, etc.)
-    if re.search(r"\bgta\s*4\b|\bgta\s*iv\b|\bgrand\s*theft\s*auto\s*4\b|\bgrand\s*theft\s*auto\s*iv\b", normalized):
+    if re.search(
+        r"\bgta\s*4\b|\bgta\s*iv\b|\bgrand\s*theft\s*auto\s*4\b|\bgrand\s*theft\s*auto\s*iv\b",
+        normalized,
+    ):
         games.add("gta4")
 
     # GTA III patterns (GTA 3, GTA III, Grand Theft Auto III, etc.)
-    if re.search(r"\bgta\s*3\b|\bgta\s*iii\b|\bgrand\s*theft\s*auto\s*3\b|\bgrand\s*theft\s*auto\s*iii\b", normalized):
+    if re.search(
+        r"\bgta\s*3\b|\bgta\s*iii\b|\bgrand\s*theft\s*auto\s*3\b|\bgrand\s*theft\s*auto\s*iii\b",
+        normalized,
+    ):
         games.add("gta3")
 
     # RDR2 patterns (RDR2, RDR 2, Red Dead Redemption 2, etc.)
-    if re.search(r"\brdr\s*2\b|\brdr2\b|\bred\s*dead\s*redemption\s*2\b|\bred\s*dead\s*redemption\s*ii\b", normalized):
+    if re.search(
+        r"\brdr\s*2\b|\brdr2\b|\bred\s*dead\s*redemption\s*2\b|\bred\s*dead\s*redemption\s*ii\b",
+        normalized,
+    ):
         games.add("rdr2")
 
     return frozenset(games)
@@ -101,7 +117,7 @@ def game_identity_from_provenance(provenance: dict | None) -> str | None:
     return None
 
 
-def candidate_game_identity(candidate: "HybridVisualCandidate") -> str | None:
+def candidate_game_identity(candidate: HybridVisualCandidate) -> str | None:
     """Determine the canonical game identity for any candidate type.
 
     Returns:
@@ -136,9 +152,9 @@ def candidate_game_identity(candidate: "HybridVisualCandidate") -> str | None:
 
 
 def filter_candidates_by_game(
-    candidates: list["HybridVisualCandidate"],
+    candidates: list[HybridVisualCandidate],
     query_games: frozenset[str],
-) -> list["HybridVisualCandidate"]:
+) -> list[HybridVisualCandidate]:
     """Filter candidates to only include those matching the query games.
 
     This is a conservative guard:
@@ -238,14 +254,16 @@ def normalize_query(value: str) -> str:
 
 
 def overlap_ratio(left: VisualCandidate, right: VisualCandidate) -> float:
-    if left.session_id != right.session_id or left.media_id != right.media_id:
-        return 0.0
-    overlap = min(left.end_seconds, right.end_seconds) - max(
-        left.start_seconds, right.start_seconds
+    return temporal_overlap_ratio(
+        left.session_id,
+        left.media_id,
+        left.start_seconds,
+        left.end_seconds,
+        right.session_id,
+        right.media_id,
+        right.start_seconds,
+        right.end_seconds,
     )
-    if overlap <= 0:
-        return 0.0
-    return max(overlap / left.duration_seconds, overlap / right.duration_seconds)
 
 
 def deduplicate_candidates(
@@ -316,12 +334,9 @@ def score_candidate(
         consecutive_reuse_penalty *= 0.25
     reuse_penalty = overlap_penalty + exact_reuse_penalty + consecutive_reuse_penalty
     semantic_band_penalty = 0.0
-    if (
-        intent == "evidence"
-        and best_semantic_score is not None
-        and best_semantic_score - semantic > 0.02
-    ):
-        semantic_band_penalty = 0.25
+    if intent == "evidence" and best_semantic_score is not None:
+        semantic_gap_beyond_band = max(0.0, best_semantic_score - semantic - 0.02)
+        semantic_band_penalty = min(0.05, 0.25 * semantic_gap_beyond_band)
     score = max(
         0.0,
         min(
@@ -380,7 +395,6 @@ def rank_candidates(
     return sorted(
         scored,
         key=lambda item: (
-            bool((item.score_components or {}).get("semantic_band_penalty")),
             -item.selection_score,
             -(item.semantic_score or 0.0),
             str(item.session_id),
@@ -425,7 +439,7 @@ def _same_source(left: HybridVisualCandidate, right: HybridVisualCandidate) -> b
             and isinstance(right, StaticImageCandidate)
             and left.media_id == right.media_id
         )
-    return overlap_ratio(left, right) >= 0.95
+    return overlap_ratio(left, right) >= 0.8
 
 
 def fuse_hybrid_candidates(
@@ -470,11 +484,21 @@ def fuse_hybrid_candidates(
             else 0.0
         )
         reuse_count = sum(_same_source(candidate, previous) for previous in already_selected)
-        consecutive_reuse = bool(
-            already_selected and _same_source(candidate, already_selected[-1])
+        consecutive_reuse = bool(already_selected and _same_source(candidate, already_selected[-1]))
+        strongest_overlap = (
+            max(
+                overlap_ratio(candidate, previous)
+                for previous in already_selected
+                if isinstance(candidate, VisualCandidate) and isinstance(previous, VisualCandidate)
+            )
+            if isinstance(candidate, VisualCandidate)
+            and any(isinstance(previous, VisualCandidate) for previous in already_selected)
+            else 0.0
         )
-        reuse_penalty = min(0.012, 0.004 * reuse_count) + (
-            0.003 if consecutive_reuse else 0.0
+        reuse_penalty = (
+            min(0.012, 0.004 * reuse_count)
+            + (0.003 if consecutive_reuse else 0.0)
+            + 0.004 * strongest_overlap
         )
         fusion_score = max(0.0, rrf_score + preferred_bonus + note_bonus - reuse_penalty)
         scored.append(
@@ -493,6 +517,7 @@ def fuse_hybrid_candidates(
                     "preferred_session_bonus": preferred_bonus,
                     "source_note_bonus": note_bonus,
                     "reuse_count": reuse_count,
+                    "strongest_overlap": round(strongest_overlap, 6),
                     "consecutive_reuse": consecutive_reuse,
                     "reuse_penalty": round(reuse_penalty, 9),
                     "fusion_score": round(fusion_score, 9),

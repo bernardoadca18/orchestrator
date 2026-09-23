@@ -29,6 +29,7 @@ def test_quality_retry_derives_a_distinct_traceable_seed_from_production_default
 
 def test_workflow_locale_resolves_current_pt_and_english_voice():
     from types import SimpleNamespace
+
     from app.services.content_locale import resolve_narration_voice, workflow_content_locale
 
     config = Settings(_env_file=None)

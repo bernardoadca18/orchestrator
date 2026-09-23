@@ -1,10 +1,8 @@
 """Focal tests for audio reuse-only assembly feature (audit items 1-3, 7)."""
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import select
 
 from app.models.workflow import WorkflowExecucao
 from app.repositories.workflow_repository import WorkflowRepository
@@ -147,8 +145,8 @@ class TestAsyncBlockLoading:
     @pytest.mark.asyncio
     async def test_obter_por_id_para_atualizacao_loads_blocos(self, async_session):
         """Repository method should eagerly load blocos when requested."""
-        from app.models.workflow import BlocoWorkflow
-        from sqlalchemy.orm import selectinload
+
+        from app.models.workflow import AudioBloco
 
         wf_id = uuid.uuid4()
         wf = WorkflowExecucao(
@@ -158,10 +156,11 @@ class TestAsyncBlockLoading:
             roteiro_snapshot={},
             status="agendada",
         )
-        bloco = BlocoWorkflow(
+        bloco = AudioBloco(
             id=uuid.uuid4(),
-            workflow_id=wf_id,
+            workflow_execucao_id=wf_id,
             ordem=0,
+            tipo="introducao",
             texto="Teste bloco",
         )
         async_session.add(wf)

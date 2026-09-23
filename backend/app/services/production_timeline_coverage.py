@@ -14,9 +14,9 @@ def timeline_is_gap_free(timeline: Any) -> bool:
     gap_seconds = getattr(timeline, "visual_gap_seconds", None)
     coverage = getattr(timeline, "visual_coverage_ratio", None)
     duration = getattr(timeline, "duration_seconds", None)
-    if any(
-        value is None or not math.isfinite(value) for value in (gap_seconds, coverage, duration)
-    ):
+    if gap_seconds is None or coverage is None or duration is None:
+        return False
+    if not all(math.isfinite(value) for value in (gap_seconds, coverage, duration)):
         return False
     return (
         timeline.gap_count == 0

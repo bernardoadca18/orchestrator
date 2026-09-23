@@ -18,8 +18,12 @@ from app.models.workflow import (
     WorkflowRender,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.visual_director_service import resolve_production_profile_config
 from app.services.production_qa_policy import ProductionQAPolicy
+from app.services.visual_director_algorithm import (
+    canonical_game_from_session_label,
+    extract_games_from_query,
+)
+from app.services.visual_director_service import resolve_production_profile_config
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
     timeline_visual_diversity,
@@ -196,7 +200,9 @@ def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
         profile_config = resolve_production_profile_config(inputs.workflow.perfil_producao)
         burned_in_captions = profile_config.burned_in_captions if profile_config else True
         presentation = build_presentation_spec(
-            inputs.workflow, duration_seconds=inputs.timeline.duration_seconds, burned_in_captions=burned_in_captions
+            inputs.workflow,
+            duration_seconds=inputs.timeline.duration_seconds,
+            burned_in_captions=burned_in_captions,
         )
     except (PresentationInputError, ValueError) as exc:
         return ProductionQACheck(
@@ -229,22 +235,72 @@ def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
     )
 
 
+def visual_plan_semantic_metrics(plan: VisualPlan | None) -> dict[str, int | float]:
+    """Summarize the plan's deterministic semantic and entity signals."""
+    decisions = list(getattr(plan, "decisions", []) or [])
+    resolved = [item for item in decisions if item.selected_source]
+    scored = [
+        item for item in resolved
+        if (item.selected_source or {}).get("semantic_score") is not None
+    ]
+    strong = sum(
+        float((item.selected_source or {})["semantic_score"]) >= 0.6
+        for item in scored
+    )
+    violations = 0
+    for item in resolved:
+        expected = extract_games_from_query(getattr(item, "query", ""))
+        if not expected:
+            continue
+        selected = item.selected_source
+        assert selected is not None
+        label = selected.get("session_label")
+        if label and canonical_game_from_session_label(str(label)) not in expected:
+            violations += 1
+    return dict(
+        semantic_coverage=round(len(resolved) / len(decisions), 6) if decisions else 0.0,
+        strong_match_count=strong,
+        weak_match_count=len(scored) - strong,
+        unscored_match_count=len(resolved) - len(scored),
+        unresolved_count=sum(item.source_resolution_status == "unresolved" for item in decisions),
+        entity_violation_count=violations,
+    )
+
+
 def check_visual_diversity(inputs: ProductionQAInputs) -> ProductionQACheck:
     evaluation = timeline_visual_diversity(
         inputs.timeline.placements,
         inputs.visual_diversity_policy,
     )
+    actual = dict(evaluation.metrics)
+    actual.update(visual_plan_semantic_metrics(inputs.visual_plan))
+    semantic_failed = bool(
+        actual["entity_violation_count"]
+        or (inputs.visual_plan and inputs.visual_plan.decisions and not actual["semantic_coverage"])
+    )
+    reasons = list(evaluation.reasons)
+    if actual["entity_violation_count"]:
+        reasons.append("selected source conflicts with query game identity")
+    if inputs.visual_plan and inputs.visual_plan.decisions and not actual["semantic_coverage"]:
+        reasons.append("all visual queries lack selected sources")
+    status = "failed" if evaluation.status == "failed" or semantic_failed else evaluation.status
     return ProductionQACheck(
         "visual_diversity",
         "visual",
-        "failed" if evaluation.status == "failed" else "passed",
+        "failed"
+        if status == "failed"
+        else "warning"
+        if status == "warning"
+        else "passed",
         "Visual source diversity passed the deterministic policy."
-        if evaluation.status == "passed"
+        if status == "passed"
+        else "Visual source diversity needs review."
+        if status == "warning"
         else "Visual source diversity is degenerate.",
-        actual=evaluation.metrics,
+        actual=actual,
         details={
-            "status": evaluation.status,
-            "reasons": list(evaluation.reasons),
+            "status": status,
+            "reasons": reasons,
             "policy": evaluation.to_dict()["policy"],
         },
     )
@@ -873,9 +929,7 @@ def check_program_audio(inputs: ProductionQAInputs) -> list[ProductionQACheck]:
     plan_fingerprint = metrics.get("audioMixPlanFingerprint")
     music_asset_id = metrics.get("musicAssetId")
     music_sha = metrics.get("musicSha256")
-    after: dict[str, Any] = (
-        metrics["after"] if isinstance(metrics.get("after"), dict) else {}
-    )
+    after: dict[str, Any] = metrics["after"] if isinstance(metrics.get("after"), dict) else {}
     loudness = after.get("integratedLufs")
     true_peak = after.get("truePeakDbtp")
     target_lufs = metrics.get("targetLufs")

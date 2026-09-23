@@ -376,4 +376,8 @@ def process_narration_tempo_candidate(
 def resolve_narration_tempo(content_locale: str | None, config: Any) -> float:
     """Resolve the explicitly evidenced production tempo per locale."""
     locale = (content_locale or "pt-BR").replace("_", "-").lower()
-    return float(config.audio_narration_tempo_en_us if locale == "en-us" else config.audio_narration_tempo_pt_br)
+    return float(
+        config.audio_narration_tempo_en_us
+        if locale == "en-us"
+        else config.audio_narration_tempo_pt_br
+    )

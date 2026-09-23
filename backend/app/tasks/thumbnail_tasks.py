@@ -38,6 +38,8 @@ async def execute(package_id, *, retry_failed=False):
         # Hold a row lock through the bounded service call to serialize deliveries.
         # Running is already durable; a worker crash releases the lock for recovery.
         package = await session.scalar(query.execution_options(populate_existing=True))
+        if package is None:
+            return False
         if package.status == "completed" or (package.status == "failed" and not retry_failed):
             return False
         retryable = False

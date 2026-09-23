@@ -19,7 +19,7 @@ def _window(index: int = 0, *, anchored: bool = False) -> VisualSourceWindow:
 def test_historical_style_duplicate_plan_fails() -> None:
     result = evaluate_visual_diversity([_window()] * 22)
     assert result.status == "failed"
-    assert result.reasons == ("visual_plan_degenerate_reuse",)
+    assert "visual_plan_degenerate_reuse" in result.reasons
     assert result.metrics["unique_source_window_count"] == 1
     assert result.metrics["reused_source_count"] == 21
     assert result.metrics["dominant_window_use_ratio"] == 1.0
@@ -28,14 +28,40 @@ def test_historical_style_duplicate_plan_fails() -> None:
 def test_diverse_plan_passes_and_union_does_not_double_count_overlap() -> None:
     windows = [_window(index) for index in range(11)] * 2
     result = evaluate_visual_diversity(windows)
-    assert result.status == "passed"
+    assert result.status == "warning"
     assert result.metrics["unique_source_window_count"] == 11
     assert result.metrics["unique_source_duration_seconds"] == 220.0
 
 
-def test_short_or_explicitly_anchored_reuse_is_not_blocked() -> None:
+def test_short_reuse_passes_but_extreme_anchored_reuse_blocks() -> None:
     assert evaluate_visual_diversity([_window()] * 2).status == "passed"
-    assert evaluate_visual_diversity([_window(anchored=True)] * 22).status == "passed"
+    assert evaluate_visual_diversity([_window(anchored=True)] * 22).status == "failed"
+
+
+def test_overlapping_windows_are_near_duplicates_but_distant_windows_are_distinct() -> None:
+    windows = [
+        _window(),
+        VisualSourceWindow("session", "media", 2, 19, 17),
+        VisualSourceWindow("session", "media", 4, 23, 19),
+        _window(10),
+    ]
+    result = evaluate_visual_diversity(windows)
+    assert result.metrics["near_duplicate_count"] == 2
+    assert result.metrics["overlap_cluster_count"] == 2
+    assert result.metrics["partial_overlap_count"] == 0
+    assert result.metrics["consecutive_reuse_count"] == 2
+
+
+def test_occasional_reuse_passes_and_consecutive_reuse_blocks() -> None:
+    occasional = evaluate_visual_diversity(
+        [_window(0), _window(1), _window(0), _window(2), _window(3), _window(4)]
+    )
+    assert occasional.status == "passed"
+    consecutive = evaluate_visual_diversity(
+        [_window(0)] * 5 + [_window(index) for index in range(1, 5)]
+    )
+    assert consecutive.status == "failed"
+    assert "visual_plan_excessive_consecutive_reuse" in consecutive.reasons
 
 
 def _still(media_id: str, duration: float = 3.0) -> VisualSourceWindow:

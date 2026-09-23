@@ -373,17 +373,21 @@ class MediaIndexerSearchProvider:
     ) -> None:
         self._base_url = config.media_indexer_api_url
         self._timeout = config.media_indexer_api_timeout_seconds
+        self._quality_timeout = config.media_indexer_quality_timeout_seconds
         self._max_retries = config.media_indexer_http_max_retries
         self._backoff = config.media_indexer_http_backoff_seconds
         self._transport = transport
         self._sleep = sleep
 
-    async def _request(self, method: str, path: str, *, json: dict | None = None) -> Any:
+    async def _request(
+        self, method: str, path: str, *, json: dict | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         for attempt in range(self._max_retries + 1):
             try:
                 async with httpx.AsyncClient(
                     base_url=self._base_url,
-                    timeout=self._timeout,
+                    timeout=self._timeout if timeout is None else timeout,
                     transport=self._transport,
                 ) as client:
                     response = await client.request(method, path, json=json)
@@ -423,6 +427,7 @@ class MediaIndexerSearchProvider:
             "POST",
             f"/media-assets/{media_id}/video-window-quality",
             json={"start_seconds": start_seconds, "end_seconds": end_seconds},
+            timeout=self._quality_timeout,
         )
         try:
             parsed = VideoWindowQuality.model_validate(raw)

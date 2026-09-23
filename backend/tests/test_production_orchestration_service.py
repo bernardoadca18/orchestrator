@@ -39,6 +39,7 @@ def _workflow(*, phase: str = "audio", status: str = "queued") -> SimpleNamespac
         audio_final_sha256="a" * 64,
         audio_final_byte_size=100,
         duracao_audio_segundos=5.0,
+        perfil_producao="game_analysis",
         erro_mensagem=None,
     )
 
@@ -206,6 +207,28 @@ class FakeStage:
 
     async def current(self, _: uuid.UUID):
         return self.item
+
+
+@pytest.mark.asyncio
+async def test_pre_render_entity_mismatch_blocks_before_composer() -> None:
+    workflow = _workflow(phase="render")
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    service.visual.item.decisions = [
+        SimpleNamespace(
+            query="GTA IV street scene",
+            selected_source={"session_label": "gta_v_gameplay_ep001", "semantic_score": 0.8},
+            source_resolution_status="resolved",
+        )
+    ]
+
+    result = await service.process(workflow.id)
+
+    assert result.terminal is True
+    assert workflow.production_error_category == "visual_diversity_gate_failed"
+    assert "game identity" in workflow.production_error_message
+    assert composer.create_calls == []
 
 
 class FakeComposer:

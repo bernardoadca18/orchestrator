@@ -14,7 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from statistics import median
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, TypedDict, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,7 +85,15 @@ QUALITY_RETRY_SEED_STRATEGY = "qwen-orchestrator-quality-retry-v1"
 MANUAL_TAKE_SEED_STRATEGY = "qwen-orchestrator-manual-take-v1"
 MANUAL_CHUNK_SEED_STRATEGY = "qwen-orchestrator-manual-chunk-v1"
 
-SPEAKER_OUTLIER_POLICY = {
+class SpeakerOutlierPolicy(TypedDict):
+    version: str
+    minimum_chunk_count: int
+    absolute_floor: float
+    median_delta: float
+    maximum_automatic_retries: int
+
+
+SPEAKER_OUTLIER_POLICY: SpeakerOutlierPolicy = {
     "version": "speaker_outlier_v1",
     "minimum_chunk_count": 3,
     "absolute_floor": 0.965,
@@ -296,6 +304,8 @@ class AudioWorkflowService:
                     if not isinstance(canonical_text, str) or not canonical_text.strip():
                         raise VoiceClientError(f"empty script block at order {order}")
                     block_type = str(raw_block.get("tipo", f"bloco_{order}"))
+                    normalization: Any
+                    pronunciation: Any
                     if content_locale == "en-US":
                         normalization = SimpleNamespace(
                             normalized_text=canonical_text,
@@ -493,7 +503,7 @@ class AudioWorkflowService:
                                 "speaker_similarity_guard",
                                 "strong speaker outlier in physical chunks",
                             )
-                            failure.diagnostics = speaker_outlier
+                            failure.diagnostics = cast(dict[str, object], speaker_outlier)
                             take = await self._prepare_quality_retry(block, take, failure)
                             active_take = take
                             if hasattr(self.repo, "atualizar_take"):
@@ -580,7 +590,7 @@ class AudioWorkflowService:
                                 "content_quality_guard",
                                 f"generated speech classified as {classification}",
                             )
-                            failure.diagnostics = content_quality  # type: ignore[attr-defined]
+                            failure.diagnostics = content_quality
                             take = await self._prepare_quality_retry(block, take, failure)
                             active_take = take
                             if hasattr(self.repo, "atualizar_take"):
@@ -592,7 +602,7 @@ class AudioWorkflowService:
                                 "accent_quality_guard",
                                 "generated speech classified as likely PT-PT",
                             )
-                            failure.diagnostics = accent_quality  # type: ignore[attr-defined]
+                            failure.diagnostics = accent_quality
                             take = await self._prepare_quality_retry(block, take, failure)
                             active_take = take
                             if hasattr(self.repo, "atualizar_take"):
@@ -637,7 +647,7 @@ class AudioWorkflowService:
                                 f"Voice Service returned voice identity {actual_identity} "
                                 f"but expected {expected_identity}",
                             )
-                            failure.diagnostics = {  # type: ignore[attr-defined]
+                            failure.diagnostics = {
                                 "expected_identity": expected_identity,
                                 "actual_identity": actual_identity,
                                 "retry_required": True,
@@ -800,7 +810,7 @@ class AudioWorkflowService:
                 assembled_path, paced_path, tempo_factor=tempo_factor
             )
             time_scale = (
-                float(tempo["mastered_narration_duration_seconds"])
+                float(cast(float, tempo["mastered_narration_duration_seconds"]))
                 / assembly.metadata.duration_seconds
             )
             for offset in assembly.offsets:
@@ -814,8 +824,8 @@ class AudioWorkflowService:
             inserted_final_pauses = [
                 {
                     **item,
-                    "start_seconds": float(item["start_seconds"]) * time_scale,
-                    "end_seconds": float(item["end_seconds"]) * time_scale,
+                    "start_seconds": float(cast(float, item["start_seconds"])) * time_scale,
+                    "end_seconds": float(cast(float, item["end_seconds"])) * time_scale,
                 }
                 for item in inserted_final_pauses
             ]
@@ -829,7 +839,7 @@ class AudioWorkflowService:
             if (
                 abs(
                     mastered.metadata.duration_seconds
-                    - float(tempo["mastered_narration_duration_seconds"])
+                    - float(cast(float, tempo["mastered_narration_duration_seconds"]))
                 )
                 > self.config.audio_duration_tolerance_seconds
             ):
@@ -1628,7 +1638,12 @@ class AudioWorkflowService:
                 comparison_hypothesis,
                 thresholds=thresholds,
             ).to_dict()
-            mismatches = report.get("metrics", {}).get("pronunciation_or_asr_mismatches", [])
+            metrics = report.get("metrics")
+            mismatches = (
+                metrics.get("pronunciation_or_asr_mismatches", [])
+                if isinstance(metrics, dict)
+                else []
+            )
             if any(
                 isinstance(item, dict)
                 and is_known_pronunciation_defect(

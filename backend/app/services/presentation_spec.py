@@ -308,7 +308,8 @@ def segment_captions(
 
     def display(words: list[tuple[str, float, float, int | None]]) -> str:
         text = _render_tokens([item[0] for item in words])
-        title = (canonical_gta_titles or {}).get(words[0][3])
+        block_order = words[0][3]
+        title = (canonical_gta_titles or {}).get(block_order) if block_order is not None else None
         return _GTA_TITLE.sub(lambda _: title, text) if title else text
 
     def flush() -> None:

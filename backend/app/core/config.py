@@ -52,6 +52,7 @@ class Settings(BaseSettings):
 
     media_indexer_api_url: str = "http://localhost:8012"
     media_indexer_api_timeout_seconds: float = 30.0
+    media_indexer_quality_timeout_seconds: float = 120.0
     media_indexer_http_max_retries: int = 2
     media_indexer_http_backoff_seconds: float = 0.25
 
@@ -131,23 +132,28 @@ class Settings(BaseSettings):
     narration_quality_policy_version: str = "narration_speech_quality_v2"
     narration_quality_max_repeated_ngram_occurrences: int = 4
 
-    visual_director_strategy_version: str = "visual_director_v6_game_entity_guard"
+    visual_director_strategy_version: str = (
+        "visual_director_v8_quality_overlap_evidence"
+    )
     visual_director_max_queries: int = 100
     visual_director_search_top_k: int = 5
     visual_director_max_alternatives: int = 2
+    visual_director_corpus_language: Literal["pt", "en"] = "pt"
     visual_director_search_concurrency: int = 4
     visual_director_min_semantic_score: float = 0.25
     visual_director_media_search_strategy_version: str = "media_search_v4_hybrid_evidence"
-    visual_director_hybrid_strategy_version: str = "visual_director_v4_hybrid_game_entity_guard"
-    hybrid_visual_fusion_version: str = "hybrid_visual_fusion_v1"
+    visual_director_hybrid_strategy_version: str = (
+        "visual_director_v6_hybrid_quality_overlap_evidence"
+    )
+    hybrid_visual_fusion_version: str = "hybrid_visual_fusion_v2_overlap"
     visual_director_image_search_top_k: int = 5
     visual_director_image_min_semantic_score: float = 0.25
     visual_director_image_filter_combinations_max: int = 16
     hybrid_visual_fusion_rrf_k: int = 60
     hybrid_visual_fusion_video_weight: float = 1.0
     hybrid_visual_fusion_image_weight: float = 1.0
-    visual_diversity_policy_version: str = "visual_diversity_policy_v1"
-    visual_diversity_hybrid_policy_version: str = "visual_diversity_policy_v2"
+    visual_diversity_policy_version: str = "visual_diversity_policy_v3_overlap"
+    visual_diversity_hybrid_policy_version: str = "visual_diversity_policy_v3_hybrid_overlap"
     visual_diversity_minimum_window_count: int = 4
     visual_diversity_maximum_reuse_ratio: float = 0.75
     visual_diversity_maximum_dominant_window_ratio: float = 0.75
@@ -259,6 +265,13 @@ class Settings(BaseSettings):
             raise ValueError("version identities must not be empty")
         return value
 
+    @field_validator("visual_director_strategy_version", "visual_director_hybrid_strategy_version")
+    @classmethod
+    def validate_visual_strategy_storage_length(cls, value: str) -> str:
+        if len(value) > 64:
+            raise ValueError("Visual Director strategy version exceeds the persisted 64 characters")
+        return value
+
     @field_validator("pronunciation_locale")
     @classmethod
     def validate_pronunciation_locale(cls, value: str) -> str:
@@ -268,6 +281,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "media_indexer_api_timeout_seconds",
+        "media_indexer_quality_timeout_seconds",
         "media_indexer_http_backoff_seconds",
         "video_composer_http_timeout_seconds",
         "video_composer_http_backoff_seconds",

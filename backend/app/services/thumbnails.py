@@ -3,6 +3,7 @@
 import datetime as dt
 import uuid
 from types import SimpleNamespace
+from typing import cast
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -12,7 +13,11 @@ from app.models.workflow import WorkflowExecucao, WorkflowThumbnailPackage
 from app.schemas.thumbnail import STRATEGY, ThumbnailRequest
 from app.services.content_locale import workflow_content_locale
 from app.services.thumbnail_identity import digest
-from app.services.visual_director_service import VisualDirectorInputError, VisualDirectorService
+from app.services.visual_director_service import (
+    QueryContext,
+    VisualDirectorInputError,
+    VisualDirectorService,
+)
 
 
 def build_request(workflow, scope, revision):
@@ -138,7 +143,9 @@ class ThumbnailService:
             if q.get("preferred_session_id")
         ]
         try:
-            scope = VisualDirectorService(self.session)._scope(workflow.roteiro_snapshot, queries)
+            scope = VisualDirectorService(self.session)._scope(
+                workflow.roteiro_snapshot, cast(list[QueryContext], queries)
+            )
             if scope is None:
                 raise ValueError("Workflow has no frozen media scope")
             project = scope.project_id

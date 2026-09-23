@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 
-from celery.signals import worker_ready  # type: ignore[import-untyped]
+from celery.signals import worker_ready
 
 from app.clients.voice_client import (
     VoiceClient,

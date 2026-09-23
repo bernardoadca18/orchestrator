@@ -13,9 +13,6 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.repositories.workflow_repository import WorkflowRepository
 from app.schemas.operator import (
-    VoiceProfileOut,
-    VoiceProfilesOut,
-    VoicePreviewRequest,
     MusicAssetCatalogOut,
     MusicCatalogOut,
     OperatorComposerInspectionOut,
@@ -23,10 +20,12 @@ from app.schemas.operator import (
     OperatorWorkflowSnapshotOut,
     OperatorWorkflowSummaryOut,
     ReviewQueueItemOut,
+    VoicePreviewRequest,
+    VoiceProfileOut,
+    VoiceProfilesOut,
 )
 from app.services.operator_console import OperatorConsoleService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.visual_director_service import resolve_production_profile_config
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import (
     ProgramAudioError,
@@ -34,6 +33,7 @@ from app.services.program_audio import (
     load_music_registry,
     verify_music_asset,
 )
+from app.services.visual_director_service import resolve_production_profile_config
 
 router = APIRouter()
 
@@ -108,7 +108,9 @@ async def get_composer_inspection(
         profile_config = resolve_production_profile_config(workflow.perfil_producao)
         burned_in_captions = profile_config.burned_in_captions if profile_config else True
         presentation = build_presentation_spec(
-            workflow, duration_seconds=timeline.duration_seconds, burned_in_captions=burned_in_captions
+            workflow,
+            duration_seconds=timeline.duration_seconds,
+            burned_in_captions=burned_in_captions,
         )
         audio_mix = build_audio_mix_plan(workflow, timeline, settings)
     except PresentationInputError as exc:

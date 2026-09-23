@@ -378,10 +378,14 @@ def test_faceless_pop_culture_lists_disables_burned_in_captions() -> None:
     assert resolved.burned_in_captions is False
 
     # Verify other profiles preserve captions (default True)
-    for profile_id in ["faceless_general", "faceless_informational", "faceless_pop_culture", "game_analysis"]:
+    for profile_id in [
+        "faceless_general", "faceless_informational", "faceless_pop_culture", "game_analysis"
+    ]:
         config = resolve_production_profile_config(profile_id)
         assert config is not None, f"{profile_id} config missing"
-        assert config.burned_in_captions is True, f"{profile_id} must preserve default burned_in_captions=True"
+        assert config.burned_in_captions is True, (
+            f"{profile_id} must preserve default burned_in_captions=True"
+        )
 
 
 def test_presentation_spec_omits_captions_when_profile_disables_them() -> None:
@@ -402,7 +406,9 @@ def test_presentation_spec_omits_captions_when_profile_disables_them() -> None:
         burned_in_captions=burned_in_captions,
     )
     assert spec is not None
-    assert spec.captions is None, "faceless_pop_culture_lists must produce PresentationSpec with captions=None"
+    assert spec.captions is None, (
+        "faceless_pop_culture_lists must produce PresentationSpec with captions=None"
+    )
 
     # Verify default profile produces captions
     default_profile = resolve_production_profile_config("faceless_general")

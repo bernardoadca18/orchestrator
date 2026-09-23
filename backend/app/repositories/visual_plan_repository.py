@@ -6,7 +6,7 @@ import datetime as dt
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -64,6 +64,21 @@ class VisualPlanRepository:
         plan.started_at = dt.datetime.now(dt.UTC)
         plan.completed_at = None
         await self.session.commit()
+
+    async def claim_stale_processing(self, plan: VisualPlan, cutoff: dt.datetime) -> bool:
+        """Atomically release a timed-out request for one bounded retry."""
+        statement = (
+            update(VisualPlan)
+            .where(
+                VisualPlan.id == plan.id,
+                VisualPlan.status == "processing",
+                or_(VisualPlan.started_at.is_(None), VisualPlan.started_at < cutoff),
+            )
+            .values(status="pending", error_message="stale_processing_recovered")
+        )
+        result = await self.session.execute(statement)
+        await self.session.commit()
+        return bool(getattr(result, "rowcount", 0))
 
     async def clear_outputs(self, plan: VisualPlan) -> None:
         await self.session.execute(

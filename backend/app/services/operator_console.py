@@ -35,12 +35,14 @@ from app.schemas.operator import (
 )
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.visual_director_service import resolve_production_profile_config
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_timeline_coverage import can_repair_production_timeline
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
-from app.services.visual_director_service import VisualDirectorService
+from app.services.visual_director_service import (
+    VisualDirectorService,
+    resolve_production_profile_config,
+)
 
 
 def capability(
@@ -147,7 +149,10 @@ def derive_capabilities(
         ),
         "can_rebuild_narration_from_takes": capability(
             not cancelled and not active and bool(workflow.blocos),
-            "Aguarde a operação atual, retome a produção cancelada, ou certifique-se de que há blocos.",
+            (
+                "Aguarde a operação atual, retome a produção cancelada, "
+                "ou certifique-se de que há blocos."
+            ),
             (
                 "transcription",
                 "alignment",
@@ -498,7 +503,9 @@ class OperatorConsoleService:
                 profile_config = resolve_production_profile_config(workflow.perfil_producao)
                 burned_in_captions = profile_config.burned_in_captions if profile_config else True
                 presentation = build_presentation_spec(
-                    workflow, duration_seconds=timeline.duration_seconds, burned_in_captions=burned_in_captions
+                    workflow,
+                    duration_seconds=timeline.duration_seconds,
+                    burned_in_captions=burned_in_captions,
                 )
                 presentation_fingerprint = presentation.fingerprint if presentation else None
                 audio_mix = build_audio_mix_plan(workflow, timeline, self.config)

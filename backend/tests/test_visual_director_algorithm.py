@@ -127,7 +127,7 @@ def test_exact_reuse_loses_to_semantically_close_distinct_candidate() -> None:
     assert ranked[0].start_seconds == 200
 
 
-def test_evidence_query_does_not_trade_away_semantic_band_for_diversity() -> None:
+def test_evidence_query_prefers_distinct_scene_for_small_semantic_gap() -> None:
     previous = _candidate(100, 120, 0.8)
     ranked = rank_candidates(
         [_candidate(100, 120, 0.70), _candidate(200, 220, 0.67)],
@@ -137,8 +137,21 @@ def test_evidence_query_does_not_trade_away_semantic_band_for_diversity() -> Non
         already_selected=[previous],
         intent="evidence",
     )
+    assert ranked[0].start_seconds == 200
+    assert 0 < ranked[0].score_components["semantic_band_penalty"] < 0.01
+
+
+def test_evidence_query_preserves_large_semantic_advantage() -> None:
+    previous = _candidate(100, 120, 0.8)
+    ranked = rank_candidates(
+        [_candidate(100, 120, 0.70), _candidate(200, 220, 0.35)],
+        preferred_session_id=None,
+        source_note_id=None,
+        target_duration_seconds=None,
+        already_selected=[previous],
+        intent="evidence",
+    )
     assert ranked[0].start_seconds == 100
-    assert ranked[1].score_components["semantic_band_penalty"] == 0.25
 
 
 def test_trusted_provenance_is_hierarchical_and_not_diversity_penalized() -> None:
@@ -219,6 +232,25 @@ def test_hybrid_rrf_weights_and_reuse_penalty_allow_each_modality_to_win() -> No
     assert isinstance(video_first[0], VisualCandidate)
 
 
+def test_hybrid_penalizes_eighty_five_percent_overlap() -> None:
+    previous = _candidate(0, 20, 0.9)
+    near_duplicate = _candidate(3, 23, 0.9)
+    ranked = fuse_hybrid_candidates(
+        [near_duplicate],
+        [],
+        already_selected=[previous],
+        preferred_session_id=None,
+        source_note_id=None,
+        rrf_k=60,
+        video_weight=1,
+        image_weight=1,
+        strategy_version="hybrid_visual_fusion_v1",
+    )
+    assert ranked[0].score_components["reuse_count"] == 1
+    assert ranked[0].score_components["strongest_overlap"] == 0.85
+    assert ranked[0].score_components["reuse_penalty"] > 0
+
+
 class TestGameEntityGuard:
     """Tests for the Game Entity Guard filtering."""
 
@@ -279,7 +311,10 @@ class TestGameEntityGuard:
 
         candidates = [
             _candidate(0.0, 5.0, 0.8, session_id=uuid.UUID("00000000-0000-4000-8000-000000000001")),
-            _candidate(5.0, 10.0, 0.7, session_id=uuid.UUID("00000000-0000-4000-8000-000000000002")),
+            _candidate(
+                5.0, 10.0, 0.7,
+                session_id=uuid.UUID("00000000-0000-4000-8000-000000000002"),
+            ),
         ]
         # No game detected in query -> all candidates pass
         filtered = filter_candidates_by_game(candidates, query_games=frozenset())

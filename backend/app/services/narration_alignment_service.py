@@ -25,12 +25,12 @@ from app.models.workflow import (
 )
 from app.repositories.narration_alignment_repository import NarrationAlignmentRepository
 from app.repositories.workflow_repository import WorkflowRepository
-from app.services.content_locale import workflow_content_locale
 from app.services.content_coverage import (
     ContentCoverageLimitError,
     ContentCoverageSegment,
     ContentCoverageThresholds,
 )
+from app.services.content_locale import workflow_content_locale
 from app.services.narration_alignment_algorithm import (
     AlignmentAlgorithmError,
     BlockRange,

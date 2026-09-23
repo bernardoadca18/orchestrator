@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import soundfile as sf  # type: ignore[import-untyped]
+import soundfile as sf
 import yaml
 
 from app.services.content_coverage import ContentCoverageReport

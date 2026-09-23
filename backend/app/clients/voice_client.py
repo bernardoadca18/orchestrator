@@ -37,6 +37,7 @@ class VoiceJobFailedError(VoiceClientError):
         super().__init__(f"{category}: {message}")
         self.category = category
         self.public_message = message
+        self.diagnostics: dict[str, object] | None = None
 
 
 class VoiceClientCancelledError(VoiceClientError):

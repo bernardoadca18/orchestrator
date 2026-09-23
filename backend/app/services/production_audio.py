@@ -14,8 +14,8 @@ from pathlib import Path
 from uuid import uuid4
 
 import numpy as np
-import soundfile as sf  # type: ignore[import-untyped]
-from scipy.signal import resample_poly  # type: ignore[import-untyped]
+import soundfile as sf
+from scipy.signal import resample_poly
 
 
 class ProductionAudioError(RuntimeError):

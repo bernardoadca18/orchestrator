@@ -17,9 +17,9 @@ from pathlib import Path
 from typing import Literal
 
 import numpy as np
-import soundfile as sf  # type: ignore[import-untyped]
-from scipy.fft import dct  # type: ignore[import-untyped]
-from scipy.signal import resample_poly  # type: ignore[import-untyped]
+import soundfile as sf
+from scipy.fft import dct
+from scipy.signal import resample_poly
 
 AccentMode = Literal["off", "shadow", "enforce"]
 AccentClassification = Literal["pt_br_confident", "uncertain", "likely_pt_pt"]

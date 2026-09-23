@@ -308,6 +308,33 @@ def test_visual_diversity_check_reports_degenerate_reuse() -> None:
     assert check.result == "failed"
     assert check.actual["unique_source_window_count"] == 1
     assert check.actual["dominant_window_use_ratio"] == 1.0
+    assert check.actual["semantic_coverage"] == 1.0
+    assert check.actual["strong_match_count"] == 0
+    assert check.actual["weak_match_count"] == 0
+    assert check.actual["unscored_match_count"] == 1
+    assert check.actual["unresolved_count"] == 0
+    assert check.actual["entity_violation_count"] == 0
+
+
+def test_visual_qa_blocks_entity_mismatch_before_render() -> None:
+    inputs = _inputs()
+    decision = inputs.visual_plan.decisions[0]
+    decision.query = "GTA IV street scene"
+    decision.selected_source["session_label"] = "gta_v_gameplay_ep001"
+    check = _checks(inputs)["visual_diversity"]
+    assert check.result == "failed"
+    assert check.actual["entity_violation_count"] == 1
+
+
+def test_visual_qa_blocks_plan_with_no_selected_sources() -> None:
+    inputs = _inputs()
+    decision = inputs.visual_plan.decisions[0]
+    decision.selected_source = None
+    decision.source_resolution_status = "unresolved"
+    check = _checks(inputs)["visual_diversity"]
+    assert check.result == "failed"
+    assert check.actual["semantic_coverage"] == 0.0
+    assert check.actual["unresolved_count"] == 1
 
 
 @pytest.mark.parametrize(

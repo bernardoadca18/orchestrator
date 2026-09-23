@@ -7,7 +7,7 @@ task de workflow por vez para simplificar montagem, mastering e recuperação.
 Mesmo padrão já usado no pipeline de vídeo para filas de GPU.
 """
 
-from celery import Celery  # type: ignore[import-untyped]
+from celery import Celery
 
 from app.core.config import settings
 

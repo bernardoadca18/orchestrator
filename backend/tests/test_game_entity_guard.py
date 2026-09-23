@@ -1,6 +1,5 @@
 """Focal tests for Game Entity Guard on direct/preferred candidates (audit items 4-5)."""
 
-import pytest
 
 from app.services.visual_director_algorithm import (
     UNKNOWN_GAME,

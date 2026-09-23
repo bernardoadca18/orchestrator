@@ -28,6 +28,7 @@ from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_qa_checks import visual_plan_semantic_metrics
 from app.services.production_timeline_coverage import (
     can_repair_production_timeline,
     temporal_gap_details,
@@ -190,6 +191,7 @@ class ProductionOrchestrationService:
                             "Current render input is unavailable",
                         )
                         return OrchestrationResult(terminal=True)
+                    assert timeline is not None
                     hybrid_errors = self._hybrid_timeline_errors(timeline)
                     if hybrid_errors:
                         await self._block(
@@ -213,13 +215,30 @@ class ProductionOrchestrationService:
                         timeline.placements,
                         self._visual_diversity_policy(timeline),
                     )
-                    if diversity.status == "failed":
+                    visual_plan = await self.visual.current(workflow.id)
+                    semantic = visual_plan_semantic_metrics(visual_plan)
+                    semantic_failed = bool(
+                        semantic["entity_violation_count"]
+                        or (
+                            getattr(visual_plan, "decisions", None)
+                            and not semantic["semantic_coverage"]
+                        )
+                    )
+                    if diversity.status == "failed" or semantic_failed:
+                        reasons = list(diversity.reasons)
+                        if semantic["entity_violation_count"]:
+                            reasons.append("selected source conflicts with query game identity")
+                        if (
+                            getattr(visual_plan, "decisions", None)
+                            and not semantic["semantic_coverage"]
+                        ):
+                            reasons.append("all visual queries lack selected sources")
                         await self._block(
                             workflow,
                             "render",
                             "visual_diversity_gate_failed",
-                            "ProductionTimeline failed pre-render visual diversity gate: "
-                            + ", ".join(diversity.reasons),
+                            "ProductionTimeline failed pre-render visual QA gate: "
+                            + ", ".join(reasons),
                         )
                         return OrchestrationResult(terminal=True)
                     render = await self._ensure_local_render(workflow, timeline)
@@ -569,7 +588,9 @@ class ProductionOrchestrationService:
         profile_config = resolve_production_profile_config(workflow.perfil_producao)
         burned_in_captions = profile_config.burned_in_captions if profile_config else True
         presentation = build_presentation_spec(
-            workflow, duration_seconds=timeline.duration_seconds, burned_in_captions=burned_in_captions
+            workflow,
+            duration_seconds=timeline.duration_seconds,
+            burned_in_captions=burned_in_captions,
         )
         return presentation.fingerprint if presentation else None
 

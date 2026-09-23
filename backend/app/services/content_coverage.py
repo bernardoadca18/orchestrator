@@ -24,6 +24,7 @@ from app.services.narration_alignment_algorithm import (
     token_similarity,
     tokenize,
 )
+from app.services.text_normalization import PortugueseTextNormalizer
 
 KNOWN_RETRYABLE_PRONUNCIATION_DEFECTS = {
     ("veiculos", "vaiculos"),
@@ -41,7 +42,7 @@ def is_known_pronunciation_defect(expected: str, observed: str) -> bool:
         normalize_pronunciation_defect_token(expected),
         normalize_pronunciation_defect_token(observed),
     ) in KNOWN_RETRYABLE_PRONUNCIATION_DEFECTS
-from app.services.text_normalization import PortugueseTextNormalizer
+
 
 CONTENT_COVERAGE_VERSION = "narration_content_coverage_v3"
 CONTENT_COVERAGE_STRATEGY = "block_segmented_v1"

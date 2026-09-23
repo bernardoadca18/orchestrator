@@ -1,10 +1,22 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from pathlib import Path
 
 import numpy as np
 import pytest
 import soundfile as sf
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.pool import StaticPool
+
+from app.models.workflow import Base
+
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_for_sqlite(_type, _compiler, **_kwargs):
+    return "JSON"
 
 
 @pytest.fixture
@@ -31,15 +43,6 @@ def write_tone():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-import uuid
-from collections.abc import AsyncGenerator
-
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.pool import StaticPool
-
-from app.models.workflow import Base
 
 
 @pytest.fixture

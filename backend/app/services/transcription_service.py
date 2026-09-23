@@ -80,7 +80,7 @@ class FasterWhisperNarrationProvider:
         self._active_transcriptions = 0
 
     def _create_model(self) -> Any:
-        from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+        from faster_whisper import WhisperModel
 
         model = WhisperModel(
             self.config.transcription_model,
@@ -96,7 +96,7 @@ class FasterWhisperNarrationProvider:
         if self._model is None:
             with self._state_lock:
                 if self._model is None:
-                    from faster_whisper import WhisperModel  # type: ignore[import-untyped]
+                    from faster_whisper import WhisperModel
 
                     self._model = WhisperModel(
                         self.config.transcription_model,

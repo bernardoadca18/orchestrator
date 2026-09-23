@@ -1,7 +1,7 @@
 """Resolve narration configuration from the immutable script snapshot."""
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, cast
 
 from app.core.config import Settings
 
@@ -19,7 +19,7 @@ class NarrationVoice:
     generation_profile: str
     language: str
     seed: int
-    accent_mode: str
+    accent_mode: Literal["off", "shadow", "enforce"]
 
 
 def resolve_narration_voice(locale: str, config: Settings) -> NarrationVoice:
@@ -31,5 +31,9 @@ def resolve_narration_voice(locale: str, config: Settings) -> NarrationVoice:
         generation_profile=config.voice_generation_profile,
         language="English" if english else config.voice_language,
         seed=config.voice_seed,
-        accent_mode="off" if english else config.audio_accent_qa_mode,
+        accent_mode=(
+            "off"
+            if english
+            else cast(Literal["off", "shadow", "enforce"], config.audio_accent_qa_mode)
+        ),
     )

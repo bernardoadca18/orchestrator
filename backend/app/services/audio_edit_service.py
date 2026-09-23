@@ -8,7 +8,7 @@ import time
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -256,7 +256,7 @@ class AudioEditMaterializationService:
             tempo_factor=resolve_narration_tempo(workflow_content_locale(workflow), self.config),
         )
         time_scale = (
-            float(tempo["mastered_narration_duration_seconds"])
+            float(cast(float, tempo["mastered_narration_duration_seconds"]))
             / narration.metadata.duration_seconds
         )
         final_assembly_seconds = time.monotonic() - final_assembly_started
@@ -268,7 +268,7 @@ class AudioEditMaterializationService:
         if (
             abs(
                 mastered.metadata.duration_seconds
-                - float(tempo["mastered_narration_duration_seconds"])
+                - float(cast(float, tempo["mastered_narration_duration_seconds"]))
             )
             > self.config.audio_duration_tolerance_seconds
         ):

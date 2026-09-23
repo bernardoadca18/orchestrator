@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import hashlib
 import json
 import logging
 import math
 import time
 import uuid
-from dataclasses import dataclass, field, replace
+from collections.abc import Awaitable, Callable
+from dataclasses import asdict, dataclass, field, replace
 from itertools import product
 from typing import Any
 
@@ -22,6 +24,7 @@ from app.clients.media_indexer_search import (
     MediaSearchProvider,
     MediaSearchResultSet,
     MediaSessionMetadata,
+    VideoWindowQuality,
 )
 from app.core.config import Settings, settings
 from app.models.workflow import (
@@ -78,6 +81,8 @@ VISUAL_QUERIES_MISSING_CATEGORY = "visual_queries_missing"
 VISUAL_QUERIES_MISSING_MESSAGE = (
     "Final visual production requires structured VisualQueries for non-empty narration"
 )
+
+
 @dataclass(frozen=True, slots=True)
 class ProductionProfileConfig:
     """Production profile configuration flags."""
@@ -207,7 +212,7 @@ class Resolution:
     image_error: MediaIndexerError | None = None
     error: MediaIndexerError | None = None
     reason: str | None = None
-
+    direct_quality_outcome: dict[str, Any] | None = None
 
 
 def _sha256(value: Any) -> str:
@@ -340,7 +345,13 @@ class VisualDirectorService:
             )
             return await self.repository.reload(plan), created
         if not created and not force:
-            return plan, False
+            cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(hours=3)
+            stale = plan.status == "processing" and (
+                plan.started_at is None or plan.started_at < cutoff
+            )
+            if not stale or not await self.repository.claim_stale_processing(plan, cutoff):
+                return plan, False
+            await self.repository.clear_outputs(plan)
         if len(queries) > self.config.visual_director_max_queries:
             await self.repository.mark_failed(
                 plan,
@@ -406,6 +417,9 @@ class VisualDirectorService:
             return plan, created
         except VisualDirectorInputError as exc:
             await self.repository.mark_failed(plan, str(exc))
+        except MediaIndexerError as exc:
+            logger.exception("visual plan quality dependency failed")
+            await self.repository.mark_failed(plan, f"quality_dependency_failed: {exc.category}")
         except Exception:
             logger.exception(
                 "visual plan failed",
@@ -492,8 +506,7 @@ class VisualDirectorService:
                 retrieval_transform = transform_retrieval_query(
                     original_query,
                     content_locale=content_locale,
-                    # Default to Portuguese as predominant index language
-                    index_language="pt",
+                    index_language=self.config.visual_director_corpus_language,
                 )
                 contexts.append(
                     QueryContext(
@@ -658,6 +671,7 @@ class VisualDirectorService:
                 "video_window_quality": "black_window_quality_v1",
                 "search_top_k": self.config.visual_director_search_top_k,
                 "max_alternatives": self.config.visual_director_max_alternatives,
+                "retrieval_index_language": self.config.visual_director_corpus_language,
                 "min_semantic_score": self.config.visual_director_min_semantic_score,
                 "candidate_format": "visual_source_v2" if hybrid else "visual_source_v1",
                 "media_search_strategy": (
@@ -677,21 +691,7 @@ class VisualDirectorService:
                 }
                 if hybrid
                 else None,
-                "diversity_policy": {
-                    "version": diversity_policy.version,
-                    "minimum_window_count": diversity_policy.minimum_window_count,
-                    "maximum_reuse_ratio": diversity_policy.maximum_reuse_ratio,
-                    "maximum_dominant_window_ratio": (
-                        diversity_policy.maximum_dominant_window_ratio
-                    ),
-                    "maximum_dominant_static_ratio": (
-                        diversity_policy.maximum_dominant_static_ratio
-                    ),
-                    "maximum_static_reuse_count": diversity_policy.maximum_static_reuse_count,
-                    "maximum_consecutive_static_seconds": (
-                        diversity_policy.maximum_consecutive_static_seconds
-                    ),
-                },
+                "diversity_policy": asdict(diversity_policy),
             },
         }
         return _sha256(request), script_fingerprint, scope_fingerprint
@@ -700,17 +700,23 @@ class VisualDirectorService:
         self,
         candidate: HybridVisualCandidate,
         query: QueryContext,
+        quality_lookup: Callable[[VisualCandidate], Awaitable[VideoWindowQuality]] | None = None,
+        quality: VideoWindowQuality | None = None,
     ) -> HybridVisualCandidate | None:
         if isinstance(candidate, StaticImageCandidate):
             return candidate
         try:
-            quality = await self.provider.video_window_quality(
-                candidate.media_id,
-                start_seconds=candidate.start_seconds,
-                end_seconds=candidate.end_seconds,
+            quality = quality or (
+                await quality_lookup(candidate)
+                if quality_lookup is not None
+                else await self.provider.video_window_quality(
+                    candidate.media_id,
+                    start_seconds=candidate.start_seconds,
+                    end_seconds=candidate.end_seconds,
+                )
             )
         except MediaIndexerError:
-            return None
+            raise
         if quality.status == "clean":
             return candidate
         if quality.status != "edge_black":
@@ -718,12 +724,7 @@ class VisualDirectorService:
         start, end = quality.recommended_start_seconds, quality.recommended_end_seconds
         if start is None or end is None:
             return None
-        required_duration = min(
-            candidate.duration_seconds,
-            query.target_duration_seconds
-            or query.desired_duration_seconds
-            or candidate.duration_seconds,
-        )
+        required_duration = self.config.production_timeline_min_visual_seconds
         if not candidate.start_seconds <= start < end <= candidate.end_seconds or end - start < max(
             self.config.production_timeline_min_visual_seconds, required_duration
         ):
@@ -744,6 +745,11 @@ class VisualDirectorService:
         scope: MediaScope | None,
     ) -> tuple[list[VisualDecision], dict, dict, dict, str]:
         semaphore = asyncio.Semaphore(self.config.visual_director_search_concurrency)
+        quality_semaphore = asyncio.Semaphore(
+            min(2, self.config.visual_director_search_concurrency)
+        )
+        quality_tasks: dict[tuple[uuid.UUID, float, float], asyncio.Task[VideoWindowQuality]] = {}
+        quality_failures: list[dict[str, Any]] = []
         session_tasks: dict[uuid.UUID, asyncio.Task[MediaSessionMetadata]] = {}
         search_tasks: dict[tuple, asyncio.Task[MediaSearchResultSet]] = {}
         image_tasks: dict[tuple, asyncio.Task[ImageSearchResultSet]] = {}
@@ -753,7 +759,54 @@ class VisualDirectorService:
             "search_seconds": 0.0,
             "image_search_seconds": 0.0,
             "metadata_calls": 0,
+            "quality_check_calls": 0,
+            "quality_check_cache_hits": 0,
+            "quality_check_seconds": 0.0,
+            "quality_rejected_candidates": 0,
+            "quality_dependency_errors": 0,
         }
+
+        async def cached_quality(candidate: VisualCandidate) -> VideoWindowQuality:
+            key = (candidate.media_id, candidate.start_seconds, candidate.end_seconds)
+            if key in quality_tasks:
+                stats["quality_check_cache_hits"] += 1
+            else:
+
+                async def execute() -> VideoWindowQuality:
+                    async with quality_semaphore:
+                        started = time.perf_counter()
+                        stats["quality_check_calls"] += 1
+                        try:
+                            return await self.provider.video_window_quality(
+                                candidate.media_id,
+                                start_seconds=candidate.start_seconds,
+                                end_seconds=candidate.end_seconds,
+                            )
+                        except MediaIndexerError as exc:
+                            stats["quality_dependency_errors"] += 1
+                            quality_failures.append(
+                                {
+                                    "category": exc.category,
+                                    "media_id": str(candidate.media_id),
+                                    "start_seconds": candidate.start_seconds,
+                                    "end_seconds": candidate.end_seconds,
+                                }
+                            )
+                            plan.diagnostics = {
+                                "error_category": "quality_dependency_failed",
+                                "quality_check_calls": stats["quality_check_calls"],
+                                "quality_check_cache_hits": stats["quality_check_cache_hits"],
+                                "quality_dependency_errors": stats["quality_dependency_errors"],
+                                "failed_media_id": str(candidate.media_id),
+                                "failed_start_seconds": candidate.start_seconds,
+                                "failed_end_seconds": candidate.end_seconds,
+                            }
+                            raise
+                        finally:
+                            stats["quality_check_seconds"] += time.perf_counter() - started
+
+                quality_tasks[key] = asyncio.create_task(execute())
+            return await quality_tasks[key]
 
         async def get_session(session_id: uuid.UUID) -> MediaSessionMetadata:
             if session_id not in session_tasks:
@@ -798,30 +851,84 @@ class VisualDirectorService:
 
         async def resolve(item: QueryContext) -> Resolution:
             direct_reason = None
+            direct_quality_outcome = None
             if self._structurally_valid_preferred(item, scope):
                 assert item.preferred_session_id is not None
                 assert item.preferred_start_seconds is not None
                 assert item.preferred_end_seconds is not None
                 try:
                     metadata = await get_session(item.preferred_session_id)
-                    direct_reason = self._direct_metadata_error(item, scope, metadata)
-                    if direct_reason is None:
-                        return Resolution(
-                            query=item,
-                            direct=direct_candidate(
-                                project_id=metadata.project_id,
-                                session_id=metadata.id,
-                                media_id=metadata.media_id,
-                                start_seconds=item.preferred_start_seconds,
-                                end_seconds=item.preferred_end_seconds,
-                                session_label=metadata.label,
-                                media_filename=metadata.media_filename,
-                            ),
-                            candidates=[],
-                            result_sets=[],
-                        )
                 except MediaIndexerError as exc:
                     direct_reason = f"preferred provenance validation failed: {exc.category}"
+                else:
+                    direct_reason = self._direct_metadata_error(item, scope, metadata)
+                    if direct_reason is None:
+                        preferred = direct_candidate(
+                            project_id=metadata.project_id,
+                            session_id=metadata.id,
+                            media_id=metadata.media_id,
+                            start_seconds=item.preferred_start_seconds,
+                            end_seconds=item.preferred_end_seconds,
+                            session_label=metadata.label,
+                            media_filename=metadata.media_filename,
+                        )
+                        preferred_quality = await cached_quality(preferred)
+                        checked_preferred = await self._quality_checked_candidate(
+                            preferred, item, quality=preferred_quality
+                        )
+                        if checked_preferred is not None:
+                            assert isinstance(checked_preferred, VisualCandidate)
+                            return Resolution(
+                                query=item,
+                                direct=checked_preferred,
+                                candidates=[],
+                                result_sets=[],
+                            )
+                        direct_reason = "preferred provenance rejected by video window quality"
+                        stats["quality_rejected_candidates"] += 1
+                        direct_quality_outcome = {
+                            "candidate_rank": 0,
+                            "retrieval_rank": 0,
+                            "media_id": str(preferred.media_id),
+                            "session_id": str(preferred.session_id),
+                            "start_seconds": preferred.start_seconds,
+                            "end_seconds": preferred.end_seconds,
+                            "duration_seconds": preferred.duration_seconds,
+                            "quality_status": preferred_quality.status,
+                            "black_ratio": preferred_quality.black_ratio,
+                            "longest_black_seconds": preferred_quality.longest_black_seconds,
+                            "black_intervals": preferred_quality.black_intervals,
+                            "recommended_start_seconds": (
+                                preferred_quality.recommended_start_seconds
+                            ),
+                            "recommended_end_seconds": preferred_quality.recommended_end_seconds,
+                            "trimmed_duration_seconds": (
+                                preferred_quality.recommended_end_seconds
+                                - preferred_quality.recommended_start_seconds
+                                if preferred_quality.recommended_start_seconds is not None
+                                and preferred_quality.recommended_end_seconds is not None
+                                else None
+                            ),
+                            "required_duration_seconds": (
+                                self.config.production_timeline_min_visual_seconds
+                            ),
+                            "accepted": False,
+                            "rejection_reason": preferred_quality.status,
+                            "preferred_provenance": True,
+                        }
+                        if preferred_quality.status == "edge_black":
+                            start = preferred_quality.recommended_start_seconds
+                            end = preferred_quality.recommended_end_seconds
+                            if start is None or end is None:
+                                direct_quality_outcome["rejection_reason"] = "edge_trim_missing"
+                            elif start < preferred.start_seconds or end > preferred.end_seconds:
+                                direct_quality_outcome["rejection_reason"] = (
+                                    "edge_trim_out_of_bounds"
+                                )
+                            else:
+                                direct_quality_outcome["rejection_reason"] = (
+                                    "edge_trim_below_minimum_duration"
+                                )
 
             if scope is None:
                 return Resolution(
@@ -830,6 +937,7 @@ class VisualDirectorService:
                     candidates=[],
                     result_sets=[],
                     reason=direct_reason or "media scope is unavailable",
+                    direct_quality_outcome=direct_quality_outcome,
                 )
             temporal_call = self._search_query(
                 item,
@@ -846,9 +954,7 @@ class VisualDirectorService:
                     temporal_call, image_call, return_exceptions=True
                 )
             else:
-                temporal_results = await asyncio.gather(
-                    temporal_call, return_exceptions=True
-                )
+                temporal_results = await asyncio.gather(temporal_call, return_exceptions=True)
                 temporal_result = temporal_results[0]
                 image_result = []
             temporal_error = (
@@ -888,9 +994,28 @@ class VisualDirectorService:
                 error=temporal_error,
                 image_error=image_error,
                 reason=direct_reason or ("; ".join(branch_reasons) if branch_reasons else None),
+                direct_quality_outcome=direct_quality_outcome,
             )
 
         resolutions = await asyncio.gather(*(resolve(item) for item in queries))
+        prefetch: dict[tuple[uuid.UUID, float, float], VisualCandidate] = {}
+        for resolution in resolutions:
+            query_games = extract_games_from_query(resolution.query.query)
+            prefetch_pool: list[HybridVisualCandidate] = list(resolution.candidates)
+            # Warm the likely primary and alternatives; later ranks remain available
+            # on demand when an earlier candidate fails the quality guard.
+            for candidate in filter_candidates_by_game(prefetch_pool, query_games)[
+                : 1 + self.config.visual_director_max_alternatives
+            ]:
+                assert isinstance(candidate, VisualCandidate)
+                prefetch.setdefault(
+                    (candidate.media_id, candidate.start_seconds, candidate.end_seconds),
+                    candidate,
+                )
+        await asyncio.gather(
+            *(cached_quality(candidate) for candidate in prefetch.values()),
+            return_exceptions=True,
+        )
         already_selected: list[HybridVisualCandidate] = []
         decisions: list[VisualDecision] = []
         reused = 0
@@ -912,7 +1037,10 @@ class VisualDirectorService:
             source_status = "resolved"
             reason = resolution.reason
             # Apply Game Entity Guard: filter candidates by game if query mentions one
-            all_candidates_raw = [*resolution.candidates, *resolution.image_candidates]
+            all_candidates_raw: list[HybridVisualCandidate] = [
+                *resolution.candidates,
+                *resolution.image_candidates,
+            ]
             game_filtered_candidates = filter_candidates_by_game(all_candidates_raw, query_games)
             # Separate video and image candidates after game filtering for fusion
             game_filtered_videos = [
@@ -938,7 +1066,7 @@ class VisualDirectorService:
                 else:
                     ranked.extend(
                         rank_candidates(
-                            game_filtered_candidates,
+                            game_filtered_videos,
                             preferred_session_id=item.preferred_session_id,
                             source_note_id=item.source_note_id,
                             target_duration_seconds=item.target_duration_seconds,
@@ -950,16 +1078,13 @@ class VisualDirectorService:
                             intent=item.intent,
                         )
                     )
-                if (
-                    ranked
-                    and (
-                        isinstance(ranked[0], StaticImageCandidate)
-                        or (ranked[0].semantic_score or 0)
-                        >= self.config.visual_director_min_semantic_score
-                    )
+                if ranked and (
+                    isinstance(ranked[0], StaticImageCandidate)
+                    or (ranked[0].semantic_score or 0)
+                    >= self.config.visual_director_min_semantic_score
                 ):
                     selected = ranked[0]
-                    alternatives = ranked[1 : 1 + self.config.visual_director_max_alternatives]
+                    alternatives = ranked[1:]
                     reason = resolution.reason
                 else:
                     source_status = "unresolved"
@@ -979,14 +1104,84 @@ class VisualDirectorService:
                     source_status = "unresolved"
                 reason = reason or "Media Search returned no relevant results"
 
+            quality_outcomes: list[dict[str, Any]] = (
+                [resolution.direct_quality_outcome]
+                if resolution.direct_quality_outcome is not None
+                else []
+            )
             if selected is not None:
                 valid = []
-                for candidate in [selected, *alternatives[:2]]:
-                    checked = await self._quality_checked_candidate(candidate, item)
+                for candidate_rank, candidate in enumerate([selected, *alternatives], 1):
+                    if (
+                        candidate is not direct_resolved
+                        and not isinstance(candidate, StaticImageCandidate)
+                        and (candidate.semantic_score or 0)
+                        < self.config.visual_director_min_semantic_score
+                    ):
+                        continue
+                    quality = (
+                        await cached_quality(candidate)
+                        if isinstance(candidate, VisualCandidate)
+                        else None
+                    )
+                    checked = await self._quality_checked_candidate(
+                        candidate, item, quality=quality
+                    )
+                    if quality is not None:
+                        assert isinstance(candidate, VisualCandidate)
+                        trimmed_duration = (
+                            quality.recommended_end_seconds - quality.recommended_start_seconds
+                            if quality.recommended_start_seconds is not None
+                            and quality.recommended_end_seconds is not None
+                            else None
+                        )
+                        rejection_reason: str | None = None
+                        if checked is None:
+                            if quality.status != "edge_black":
+                                rejection_reason = quality.status
+                            elif trimmed_duration is None:
+                                rejection_reason = "edge_trim_missing"
+                            else:
+                                assert quality.recommended_start_seconds is not None
+                                assert quality.recommended_end_seconds is not None
+                                if (
+                                    quality.recommended_start_seconds < candidate.start_seconds
+                                    or quality.recommended_end_seconds > candidate.end_seconds
+                                ):
+                                    rejection_reason = "edge_trim_out_of_bounds"
+                                else:
+                                    rejection_reason = "edge_trim_below_minimum_duration"
+                        quality_outcomes.append(
+                            {
+                                "candidate_rank": candidate_rank,
+                                "retrieval_rank": candidate.rank,
+                                "media_id": str(candidate.media_id),
+                                "session_id": str(candidate.session_id),
+                                "start_seconds": candidate.start_seconds,
+                                "end_seconds": candidate.end_seconds,
+                                "duration_seconds": candidate.duration_seconds,
+                                "quality_status": quality.status,
+                                "black_ratio": quality.black_ratio,
+                                "longest_black_seconds": quality.longest_black_seconds,
+                                "black_intervals": quality.black_intervals,
+                                "recommended_start_seconds": quality.recommended_start_seconds,
+                                "recommended_end_seconds": quality.recommended_end_seconds,
+                                "trimmed_duration_seconds": trimmed_duration,
+                                "required_duration_seconds": (
+                                    self.config.production_timeline_min_visual_seconds
+                                ),
+                                "accepted": checked is not None,
+                                "rejection_reason": rejection_reason,
+                            }
+                        )
                     if checked is not None:
                         valid.append(checked)
+                    else:
+                        stats["quality_rejected_candidates"] += 1
+                    if len(valid) >= 1 + self.config.visual_director_max_alternatives:
+                        break
                 selected = valid[0] if valid else None
-                alternatives = valid[1:]
+                alternatives = valid[1 : 1 + self.config.visual_director_max_alternatives]
                 if selected is None:
                     source_status = "unresolved"
                     reason = "No bounded candidate passed video window quality"
@@ -1033,6 +1228,25 @@ class VisualDirectorService:
                         "candidate_count": len(all_candidates),
                         "temporal_candidate_count": len(resolution.candidates),
                         "image_candidate_count": len(resolution.image_candidates),
+                        "quality_outcomes": quality_outcomes,
+                        "candidate_pool": [
+                            {
+                                "rank": rank,
+                                "source_type": candidate.source_type,
+                                "media_id": str(candidate.media_id),
+                                "session_id": str(candidate.session_id)
+                                if isinstance(candidate, VisualCandidate)
+                                else None,
+                                "start_seconds": candidate.start_seconds
+                                if isinstance(candidate, VisualCandidate)
+                                else None,
+                                "end_seconds": candidate.end_seconds
+                                if isinstance(candidate, VisualCandidate)
+                                else None,
+                                "semantic_score": candidate.semantic_score,
+                            }
+                            for rank, candidate in enumerate(ranked, 1)
+                        ],
                         "temporal_branch_error": resolution.error.category
                         if resolution.error
                         else None,
@@ -1086,6 +1300,11 @@ class VisualDirectorService:
             "temporal_search_calls": stats["media_search_calls"],
             "image_search_calls": stats["image_search_calls"],
             "metadata_calls": stats["metadata_calls"],
+            "quality_check_calls": stats["quality_check_calls"],
+            "quality_check_cache_hits": stats["quality_check_cache_hits"],
+            "quality_check_seconds": round(stats["quality_check_seconds"], 6),
+            "quality_rejected_candidates": stats["quality_rejected_candidates"],
+            "quality_dependency_errors": stats["quality_dependency_errors"],
             "search_seconds": round(stats["search_seconds"], 6),
             "average_search_seconds": round(
                 stats["search_seconds"] / stats["media_search_calls"], 6
@@ -1093,12 +1312,8 @@ class VisualDirectorService:
             if stats["media_search_calls"]
             else 0.0,
             "reused_source_count": reused,
-            "temporal_candidate_count": sum(
-                len(item.candidates) for item in resolutions
-            ),
-            "image_candidate_count": sum(
-                len(item.image_candidates) for item in resolutions
-            ),
+            "temporal_candidate_count": sum(len(item.candidates) for item in resolutions),
+            "image_candidate_count": sum(len(item.image_candidates) for item in resolutions),
             "selected_video_count": sum(
                 isinstance(item.selected_source, dict)
                 and item.selected_source.get("source_type") in {"gameplay", "video_segment"}
@@ -1159,8 +1374,11 @@ class VisualDirectorService:
                 "exact_reuse_penalty": 0.18,
                 "consecutive_exact_reuse_penalty": 0.08,
                 "evidence_semantic_band": 0.02,
+                "evidence_gap_penalty_weight": 0.25,
+                "evidence_gap_penalty_cap": 0.05,
             },
             "visual_diversity": diversity.to_dict(),
+            "quality_dependency_failures": quality_failures,
         }
         failed = sum(item.source_resolution_status == "failed" for item in decisions)
         resolved = sum(item.source_resolution_status == "resolved" for item in decisions)
@@ -1189,19 +1407,13 @@ class VisualDirectorService:
                 self.config.visual_diversity_maximum_dominant_window_ratio
             ),
             maximum_dominant_static_ratio=(
-                self.config.visual_diversity_maximum_dominant_static_ratio
-                if hybrid
-                else 1.0
+                self.config.visual_diversity_maximum_dominant_static_ratio if hybrid else 1.0
             ),
             maximum_static_reuse_count=(
-                self.config.visual_diversity_maximum_static_reuse_count
-                if hybrid
-                else 1_000_000
+                self.config.visual_diversity_maximum_static_reuse_count if hybrid else 1_000_000
             ),
             maximum_consecutive_static_seconds=(
-                self.config.static_image_maximum_consecutive_seconds
-                if hybrid
-                else 1_000_000.0
+                self.config.static_image_maximum_consecutive_seconds if hybrid else 1_000_000.0
             ),
         )
 
@@ -1371,10 +1583,7 @@ class VisualDirectorService:
     ) -> list[VisualCandidate]:
         candidates: list[VisualCandidate] = []
         for result_set in result_sets:
-            if (
-                result_set.strategy
-                != self.config.visual_director_media_search_strategy_version
-            ):
+            if result_set.strategy != self.config.visual_director_media_search_strategy_version:
                 raise VisualDirectorInputError(
                     "Media Search strategy is incompatible with Visual Director policy"
                 )
@@ -1440,8 +1649,7 @@ class VisualDirectorService:
         ):
             deduplicated.setdefault(candidate.media_id, candidate)
         return [
-            replace(candidate, rank=rank)
-            for rank, candidate in enumerate(deduplicated.values(), 1)
+            replace(candidate, rank=rank) for rank, candidate in enumerate(deduplicated.values(), 1)
         ]
 
     @staticmethod
@@ -1492,9 +1700,7 @@ class VisualDirectorService:
                 target / candidate.duration_seconds,
             )
         source_class = (
-            VisualVideoSegmentSourceSelectionOut
-            if hybrid
-            else VisualGameplaySourceSelectionOut
+            VisualVideoSegmentSourceSelectionOut if hybrid else VisualGameplaySourceSelectionOut
         )
         values = {
             "project_id": candidate.project_id,
@@ -1596,9 +1802,7 @@ class VisualDirectorService:
                     "failures": sum(item.error is not None for item in resolutions),
                 },
                 "static_image": {
-                    "result_sets": sum(
-                        len(item.image_result_sets) for item in resolutions
-                    ),
+                    "result_sets": sum(len(item.image_result_sets) for item in resolutions),
                     "failures": sum(item.image_error is not None for item in resolutions),
                 },
             },

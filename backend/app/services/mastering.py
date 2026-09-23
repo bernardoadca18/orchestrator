@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 
-import soundfile as sf  # type: ignore[import-untyped]
+import soundfile as sf
 
 from app.services.production_audio import AudioFileMetadata, inspect_wav
 

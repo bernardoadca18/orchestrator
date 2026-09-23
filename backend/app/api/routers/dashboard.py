@@ -47,6 +47,7 @@ async def _queue_depth() -> tuple[int | None, str | None]:
     client: redis.Redis | None = None
     try:
         client = redis.from_url(settings.redis_url)
+        assert client is not None
         # Kombu's Redis transport materializes the Celery queue as this list.
         depth = await cast(Awaitable[int], client.llen(CELERY_PRODUCTION_QUEUE))
         return int(depth), None

@@ -53,6 +53,7 @@ async def _check_dependencies() -> DependenciasHealth:
     try:
         start = time.monotonic()
         redis_client = redis.from_url(settings.redis_url)
+        assert redis_client is not None
         await redis_client.ping()
         latency = (time.monotonic() - start) * 1000
         deps["redis"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))

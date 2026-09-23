@@ -121,7 +121,6 @@ from app.services.operator_music import (
     OperatorMusicService,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.visual_director_service import resolve_production_profile_config
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_qa_service import (
     ProductionQANotFoundError,
@@ -144,6 +143,7 @@ from app.services.visual_director_service import (
     VisualDirectorInputError,
     VisualDirectorNotFoundError,
     VisualDirectorService,
+    resolve_production_profile_config,
 )
 from app.tasks.audio_edit_tasks import aplicar_edicoes_audio
 from app.tasks.audio_tasks import gerar_audio_workflow
@@ -764,7 +764,7 @@ async def preparar_visual_queries_para_producao(roteiro_id: uuid.UUID):
 async def criar_workflow(
     payload: WorkflowCreateIn, session: Annotated[AsyncSession, Depends(get_db)]
 ):
-    from psycopg2.errors import UniqueViolation  # type: ignore[import-untyped]
+    from psycopg2.errors import UniqueViolation
     from sqlalchemy.exc import IntegrityError
 
     repo = WorkflowRepository(session)
@@ -1127,9 +1127,9 @@ async def reconstruir_narracao_dos_takes(
             # This validates that all current takes exist, are valid, and match SHA
             await active_block_manifest(session, block)
         except ProductionAudioError as e:
-            validation_errors.append(f"Bloco {block.ordem}: {str(e)}")
+            validation_errors.append(f"Bloco {block.ordem}: {e!s}")
         except Exception as e:
-            validation_errors.append(f"Bloco {block.ordem}: erro inesperado - {str(e)}")
+            validation_errors.append(f"Bloco {block.ordem}: erro inesperado - {e!s}")
 
     if validation_errors:
         raise HTTPException(
@@ -1147,7 +1147,10 @@ async def reconstruir_narracao_dos_takes(
     # the workflow is already fully materialized. The rebuild from the SAME takes
     # should preserve this state - the new final narration from the same chunks
     # represents the same edit revision.
-    preserve_materialization = current_edit_revision == current_materialized_revision and current_edit_revision > 0
+    preserve_materialization = (
+        current_edit_revision == current_materialized_revision
+        and current_edit_revision > 0
+    )
 
     # Reset audio materialization flags to force reassembly with current tempo
     # BUT preserve the edit/materialization relationship if they were already in sync
@@ -1204,7 +1207,7 @@ async def regenerar_visuais(
     if not payload.confirm:
         raise HTTPException(400, "Confirmação explícita é obrigatória para regenerar visuais.")
 
-    key = _operator_action_key(idempotency_key)
+    _operator_action_key(idempotency_key)
     repo = WorkflowRepository(session)
     wf = await repo.obter_por_id_para_atualizacao(workflow_id, com_blocos=True)
 
@@ -1426,7 +1429,9 @@ async def obter_composer_render_input(
         profile_config = resolve_production_profile_config(workflow.perfil_producao)
         burned_in_captions = profile_config.burned_in_captions if profile_config else True
         presentation = build_presentation_spec(
-            workflow, duration_seconds=timeline.duration_seconds, burned_in_captions=burned_in_captions
+            workflow,
+            duration_seconds=timeline.duration_seconds,
+            burned_in_captions=burned_in_captions,
         )
         audio_mix_plan = build_audio_mix_plan(workflow, timeline, settings)
     except PresentationInputError as exc:

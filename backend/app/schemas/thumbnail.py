@@ -4,10 +4,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-STRATEGY = "thumbnail_director_v2"
-PROMPT = "thumbnail_concepts_v2"
-TEMPLATES = "thumbnail_templates_v1"
-RENDERER = "libvips_thumbnail_v1"
+STRATEGY: Literal["thumbnail_director_v2"] = "thumbnail_director_v2"
+PROMPT: Literal["thumbnail_concepts_v2"] = "thumbnail_concepts_v2"
+TEMPLATES: Literal["thumbnail_templates_v1"] = "thumbnail_templates_v1"
+RENDERER: Literal["libvips_thumbnail_v1"] = "libvips_thumbnail_v1"
 Template = Literal["split_compare_v1", "hero_focus_v1", "curiosity_focus_v1"]
 FAMILIES = dict(A="split_compare_v1", B="hero_focus_v1", C="curiosity_focus_v1")
 

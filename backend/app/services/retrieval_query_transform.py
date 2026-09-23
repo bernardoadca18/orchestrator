@@ -80,7 +80,7 @@ def detect_content_language_from_sessions(
     if not session_summaries:
         return "pt"
 
-    # Count language indicators from session summaries
+    # Only explicit index or session language metadata is trustworthy.
     pt_count = 0
     en_count = 0
 
@@ -93,15 +93,6 @@ def detect_content_language_from_sessions(
             elif lang.startswith("en"):
                 en_count += 1
             continue
-
-        # Check label for language indicators
-        label = summary.get("label", "")
-        if any(
-            indicator in label.lower()
-            for indicator in ["test", "fixed", "br", "pt", "bra"]
-        ):
-            # These often indicate Portuguese-authored notes
-            pt_count += 1
 
     # Default to Portuguese for the canonical corpus
     if pt_count >= en_count:
