@@ -1257,3 +1257,48 @@ async def test_query_warning_only_cannot_trigger_repair():
         await service.repair_timeline(workflow)
     service.timelines.ensure.assert_not_awaited()
     service.visual.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delivery", "visual", "category"),
+    [
+        ("manual_edit_package", "semantic_match", "delivery_mode_not_implemented"),
+        ("rendered_video", "background_fill", "visual_mode_not_implemented"),
+        ("rendered_video", "storyboard", "visual_mode_not_implemented"),
+    ],
+)
+async def test_future_modes_block_before_semantic_visual_director(delivery, visual, category):
+    workflow = _workflow(phase="visual_plan", status="running")
+    workflow.production_capabilities = {
+        "delivery_mode": delivery,
+        "visual_mode": visual,
+        "requires_media_scope": False,
+        "caption_policy": "burned_in",
+        "render_profile": None,
+        "version": "production_capabilities_v1",
+    }
+    timeline = _timeline(workflow.id)
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    result = await service.process(workflow.id)
+    assert result.terminal
+    assert workflow.production_status == "blocked"
+    assert workflow.production_error_category == category
+    service.visual.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_explicit_render_profile_override_is_snapshotted():
+    workflow = _workflow(phase="render", status="running")
+    workflow.production_capabilities = {
+        "delivery_mode": "rendered_video",
+        "visual_mode": "semantic_match",
+        "requires_media_scope": True,
+        "caption_policy": "burned_in",
+        "render_profile": "custom_render_v1",
+        "version": "production_capabilities_v1",
+    }
+    timeline = _timeline(workflow.id)
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    render = await service._ensure_local_render(workflow, timeline)
+    assert render.render_profile == "custom_render_v1"

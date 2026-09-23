@@ -28,6 +28,7 @@ from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_service import processar_workflow
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_capabilities import burned_in_captions_for, capabilities_for
 from app.services.production_qa_checks import visual_plan_semantic_metrics
 from app.services.production_timeline_coverage import (
     can_repair_production_timeline,
@@ -39,7 +40,6 @@ from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
 from app.services.visual_director_service import (
     VisualDirectorService,
-    resolve_production_profile_config,
 )
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
@@ -131,6 +131,23 @@ class ProductionOrchestrationService:
                     return OrchestrationResult(terminal=True)
 
                 if phase == "visual_plan":
+                    capabilities = capabilities_for(workflow)
+                    if capabilities["delivery_mode"] != "rendered_video":
+                        await self._block(
+                            workflow,
+                            phase,
+                            "delivery_mode_not_implemented",
+                            "Delivery mode is not implemented",
+                        )
+                        return OrchestrationResult(terminal=True)
+                    if capabilities["visual_mode"] != "semantic_match":
+                        await self._block(
+                            workflow,
+                            phase,
+                            "visual_mode_not_implemented",
+                            "Visual mode is not implemented",
+                        )
+                        return OrchestrationResult(terminal=True)
                     plan, _ = await self.visual.ensure(workflow.id, force=False)
                     if plan.status in {"completed", "completed_with_gaps"}:
                         await self._advance(workflow, "production_timeline")
@@ -322,9 +339,7 @@ class ProductionOrchestrationService:
                 await self.renders.mark_failed(
                     render, "composer_timeout", "Video Composer render timed out"
                 )
-                await self._fail(
-                    workflow, "composer_timeout", "Video Composer render timed out"
-                )
+                await self._fail(workflow, "composer_timeout", "Video Composer render timed out")
                 return OrchestrationResult(terminal=True)
             return result
         except VideoComposerTransientError as exc:
@@ -445,9 +460,7 @@ class ProductionOrchestrationService:
         and we want to re-run visual selection without changing audio.
         """
         # Start from visual_plan phase, preserving audio and alignment
-        await self.workflows.atualizar_producao(
-            workflow.id, status="running", phase="visual_plan"
-        )
+        await self.workflows.atualizar_producao(workflow.id, status="running", phase="visual_plan")
         try:
             # Force regeneration of visual plan
             plan, _ = await self.visual.ensure(workflow.id, force=True)
@@ -507,7 +520,10 @@ class ProductionOrchestrationService:
             return None
         presentation_fingerprint = await self._presentation_fingerprint(workflow_id, timeline)
         audio_mix_plan_fingerprint = await self._audio_mix_plan_fingerprint(workflow_id, timeline)
-        render_profile = self._render_profile(audio_mix_plan_fingerprint)
+        workflow = await self.workflows.obter_por_id(workflow_id)
+        render_profile = capabilities_for(workflow)["render_profile"] or self._render_profile(
+            audio_mix_plan_fingerprint
+        )
         fingerprint = self.render_request_fingerprint(
             workflow_id,
             timeline,
@@ -522,7 +538,9 @@ class ProductionOrchestrationService:
     ) -> WorkflowRender:
         presentation_fingerprint = await self._presentation_fingerprint(workflow.id, timeline)
         audio_mix_plan_fingerprint = await self._audio_mix_plan_fingerprint(workflow.id, timeline)
-        render_profile = self._render_profile(audio_mix_plan_fingerprint)
+        render_profile = capabilities_for(workflow)["render_profile"] or self._render_profile(
+            audio_mix_plan_fingerprint
+        )
         fingerprint = self.render_request_fingerprint(
             workflow.id,
             timeline,
@@ -585,8 +603,7 @@ class ProductionOrchestrationService:
         )
         if workflow is None:
             return None
-        profile_config = resolve_production_profile_config(workflow.perfil_producao)
-        burned_in_captions = profile_config.burned_in_captions if profile_config else True
+        burned_in_captions = burned_in_captions_for(workflow)
         presentation = build_presentation_spec(
             workflow,
             duration_seconds=timeline.duration_seconds,

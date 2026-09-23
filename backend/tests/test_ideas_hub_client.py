@@ -90,6 +90,14 @@ async def test_production_readiness_contract_is_typed_and_uses_canonical_endpoin
             json={
                 "status": "ready",
                 "profile": "game_analysis",
+                "capabilities": {
+                    "delivery_mode": "rendered_video",
+                    "visual_mode": "semantic_match",
+                    "requires_media_scope": True,
+                    "caption_policy": "burned_in",
+                    "render_profile": None,
+                    "version": "production_capabilities_v1",
+                },
                 "editorial_status": "aprovado",
                 "visual": {
                     "status": "ready",
@@ -225,3 +233,21 @@ async def test_visual_enrichment_rejects_malformed_or_invalid_upstream_revision(
 
     with pytest.raises(IdeasHubContractError):
         await IdeasHubClient(settings(), transport=transport).preparar_producao(script_id)
+
+
+def test_invalid_production_capabilities_are_rejected() -> None:
+    from pydantic import ValidationError
+
+    from app.clients.ideas_hub_client import IdeasHubProductionCapabilities
+
+    valid = dict(
+        delivery_mode="rendered_video",
+        visual_mode="semantic_match",
+        requires_media_scope=True,
+        caption_policy="burned_in",
+        render_profile=None,
+        version="production_capabilities_v1",
+    )
+    assert IdeasHubProductionCapabilities.model_validate(valid).visual_mode == "semantic_match"
+    with pytest.raises(ValidationError):
+        IdeasHubProductionCapabilities.model_validate({**valid, "visual_mode": "unknown"})

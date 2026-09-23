@@ -18,12 +18,12 @@ from app.models.workflow import (
     WorkflowRender,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_capabilities import burned_in_captions_for
 from app.services.production_qa_policy import ProductionQAPolicy
 from app.services.visual_director_algorithm import (
     canonical_game_from_session_label,
     extract_games_from_query,
 )
-from app.services.visual_director_service import resolve_production_profile_config
 from app.services.visual_diversity import (
     VisualDiversityPolicy,
     timeline_visual_diversity,
@@ -197,8 +197,7 @@ def check_presentation_spec(inputs: ProductionQAInputs) -> ProductionQACheck:
             "PresentationSpec evidence is unavailable in this compatibility fixture.",
         )
     try:
-        profile_config = resolve_production_profile_config(inputs.workflow.perfil_producao)
-        burned_in_captions = profile_config.burned_in_captions if profile_config else True
+        burned_in_captions = burned_in_captions_for(inputs.workflow)
         presentation = build_presentation_spec(
             inputs.workflow,
             duration_seconds=inputs.timeline.duration_seconds,
@@ -240,13 +239,9 @@ def visual_plan_semantic_metrics(plan: VisualPlan | None) -> dict[str, int | flo
     decisions = list(getattr(plan, "decisions", []) or [])
     resolved = [item for item in decisions if item.selected_source]
     scored = [
-        item for item in resolved
-        if (item.selected_source or {}).get("semantic_score") is not None
+        item for item in resolved if (item.selected_source or {}).get("semantic_score") is not None
     ]
-    strong = sum(
-        float((item.selected_source or {})["semantic_score"]) >= 0.6
-        for item in scored
-    )
+    strong = sum(float((item.selected_source or {})["semantic_score"]) >= 0.6 for item in scored)
     violations = 0
     for item in resolved:
         expected = extract_games_from_query(getattr(item, "query", ""))
@@ -287,11 +282,7 @@ def check_visual_diversity(inputs: ProductionQAInputs) -> ProductionQACheck:
     return ProductionQACheck(
         "visual_diversity",
         "visual",
-        "failed"
-        if status == "failed"
-        else "warning"
-        if status == "warning"
-        else "passed",
+        "failed" if status == "failed" else "warning" if status == "warning" else "passed",
         "Visual source diversity passed the deterministic policy."
         if status == "passed"
         else "Visual source diversity needs review."

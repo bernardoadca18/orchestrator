@@ -35,13 +35,13 @@ from app.schemas.operator import (
 )
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_capabilities import burned_in_captions_for
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_timeline_coverage import can_repair_production_timeline
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
 from app.services.visual_director_service import (
     VisualDirectorService,
-    resolve_production_profile_config,
 )
 
 
@@ -164,9 +164,7 @@ def derive_capabilities(
             ),
         ),
         "can_regenerate_visuals": capability(
-            not cancelled
-            and not active
-            and bool(workflow.blocos),
+            not cancelled and not active and bool(workflow.blocos),
             "Aguarde a operação atual ou retome a produção cancelada.",
             (
                 "visual_plan",
@@ -500,8 +498,7 @@ class OperatorConsoleService:
         audio_mix_fingerprint = None
         if timeline is not None:
             try:
-                profile_config = resolve_production_profile_config(workflow.perfil_producao)
-                burned_in_captions = profile_config.burned_in_captions if profile_config else True
+                burned_in_captions = burned_in_captions_for(workflow)
                 presentation = build_presentation_spec(
                     workflow,
                     duration_seconds=timeline.duration_seconds,

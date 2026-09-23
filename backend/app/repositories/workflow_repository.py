@@ -94,12 +94,14 @@ class WorkflowRepository:
         roteiro_id: uuid.UUID,
         roteiro_snapshot: dict,
         perfil_producao: str | None = None,
+        production_capabilities: dict | None = None,
     ) -> WorkflowExecucao:
         wf = WorkflowExecucao(
             ideia_id=ideia_id,
             roteiro_id=roteiro_id,
             roteiro_snapshot=roteiro_snapshot,
             perfil_producao=perfil_producao,
+            production_capabilities=copy.deepcopy(production_capabilities),
             production_status="queued",
             production_phase="audio",
         )

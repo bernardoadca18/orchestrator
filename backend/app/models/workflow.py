@@ -65,6 +65,7 @@ class WorkflowExecucao(Base):
     roteiro_id: Mapped[uuid.UUID] = mapped_column(PgUUID(as_uuid=True), nullable=False, index=True)
     roteiro_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     perfil_producao: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    production_capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     status: Mapped[str] = mapped_column(
         PgEnum(

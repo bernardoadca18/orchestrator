@@ -121,6 +121,7 @@ from app.services.operator_music import (
     OperatorMusicService,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_capabilities import burned_in_captions_for
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_qa_service import (
     ProductionQANotFoundError,
@@ -143,7 +144,6 @@ from app.services.visual_director_service import (
     VisualDirectorInputError,
     VisualDirectorNotFoundError,
     VisualDirectorService,
-    resolve_production_profile_config,
 )
 from app.tasks.audio_edit_tasks import aplicar_edicoes_audio
 from app.tasks.audio_tasks import gerar_audio_workflow
@@ -799,6 +799,7 @@ async def criar_workflow(
             roteiro_id=payload.roteiro_id,
             roteiro_snapshot=roteiro["estrutura"],
             perfil_producao=perfil_producao,
+            production_capabilities=readiness["capabilities"],
         )
         processar_producao_workflow.delay(str(wf.id))
         return wf
@@ -1135,7 +1136,7 @@ async def reconstruir_narracao_dos_takes(
         raise HTTPException(
             422,
             f"Não é possível reconstruir: takes atuais inválidos ou ausentes. "
-            f"{'; '.join(validation_errors)}"
+            f"{'; '.join(validation_errors)}",
         )
 
     # Store the current materialization revision before reset
@@ -1148,8 +1149,7 @@ async def reconstruir_narracao_dos_takes(
     # should preserve this state - the new final narration from the same chunks
     # represents the same edit revision.
     preserve_materialization = (
-        current_edit_revision == current_materialized_revision
-        and current_edit_revision > 0
+        current_edit_revision == current_materialized_revision and current_edit_revision > 0
     )
 
     # Reset audio materialization flags to force reassembly with current tempo
@@ -1426,8 +1426,7 @@ async def obter_composer_render_input(
     if workflow is None:
         raise HTTPException(404, "Workflow não encontrado")
     try:
-        profile_config = resolve_production_profile_config(workflow.perfil_producao)
-        burned_in_captions = profile_config.burned_in_captions if profile_config else True
+        burned_in_captions = burned_in_captions_for(workflow)
         presentation = build_presentation_spec(
             workflow,
             duration_seconds=timeline.duration_seconds,

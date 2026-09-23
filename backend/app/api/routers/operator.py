@@ -26,6 +26,7 @@ from app.schemas.operator import (
 )
 from app.services.operator_console import OperatorConsoleService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
+from app.services.production_capabilities import burned_in_captions_for
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import (
     ProgramAudioError,
@@ -33,7 +34,6 @@ from app.services.program_audio import (
     load_music_registry,
     verify_music_asset,
 )
-from app.services.visual_director_service import resolve_production_profile_config
 
 router = APIRouter()
 
@@ -105,8 +105,7 @@ async def get_composer_inspection(
     if timeline is None:
         raise HTTPException(404, "Production Timeline compatível ainda não disponível")
     try:
-        profile_config = resolve_production_profile_config(workflow.perfil_producao)
-        burned_in_captions = profile_config.burned_in_captions if profile_config else True
+        burned_in_captions = burned_in_captions_for(workflow)
         presentation = build_presentation_spec(
             workflow,
             duration_seconds=timeline.duration_seconds,

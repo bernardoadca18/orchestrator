@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import uuid
-from typing import Any
+from typing import Any, Literal
 
 import httpx
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, TypeAdapter, ValidationError
 
 from app.core.config import Settings, settings
 
@@ -63,15 +63,27 @@ class IdeasHubIdea(BaseModel):
     perfil_producao: str | None = None
 
 
+class IdeasHubProductionCapabilities(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    delivery_mode: Literal["rendered_video", "manual_edit_package"]
+    visual_mode: Literal["semantic_match", "background_fill", "storyboard"]
+    requires_media_scope: StrictBool
+    caption_policy: Literal["burned_in", "none"]
+    render_profile: str | None
+    version: str = Field(min_length=1)
+
+
 class IdeasHubVisualReadiness(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
-    policy_version: str
-    policy_identity: str
-    speakable_content_identity: str
-    block_count: int = Field(ge=0)
-    visual_beat_count: int = Field(ge=0)
-    textual_coverage_ratio: float = Field(ge=0, le=1)
+    required: bool = True
+    mode: Literal["semantic_match", "background_fill", "storyboard"] = "semantic_match"
+    policy_version: str | None = None
+    policy_identity: str | None = None
+    speakable_content_identity: str | None = None
+    block_count: int = Field(default=0, ge=0)
+    visual_beat_count: int = Field(default=0, ge=0)
+    textual_coverage_ratio: float = Field(default=0, ge=0, le=1)
     missing_ranges: list[dict[str, int]] = Field(default_factory=list)
     overlap_ranges: list[dict[str, int]] = Field(default_factory=list)
     issues: list[dict[str, Any]] = Field(default_factory=list)
@@ -89,6 +101,7 @@ class IdeasHubProductionReadiness(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
     profile: str
+    capabilities: IdeasHubProductionCapabilities
     editorial_status: str
     visual: IdeasHubVisualReadiness
     media_scope: IdeasHubMediaScopeReadiness

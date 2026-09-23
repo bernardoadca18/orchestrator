@@ -42,6 +42,7 @@ from app.schemas.workflow import (
     VisualVideoSegmentSourceSelectionOut,
 )
 from app.services.narration_alignment_service import NarrationAlignmentService
+from app.services.production_capabilities import capabilities_for
 from app.services.retrieval_query_transform import (
     RETRIEVAL_STRATEGY_VERSION,
     ContentLocale,
@@ -67,13 +68,7 @@ from app.services.visual_diversity import (
     evaluate_visual_diversity,
 )
 
-__all__ = [
-    "FINAL_VISUAL_PRODUCTION_PROFILES",
-    "PRODUCTION_PROFILE_CONFIGS",
-    "ProductionProfileConfig",
-    "VisualDirectorService",
-    "resolve_production_profile_config",
-]
+__all__ = ["VisualDirectorService"]
 
 logger = logging.getLogger(__name__)
 
@@ -81,40 +76,6 @@ VISUAL_QUERIES_MISSING_CATEGORY = "visual_queries_missing"
 VISUAL_QUERIES_MISSING_MESSAGE = (
     "Final visual production requires structured VisualQueries for non-empty narration"
 )
-
-
-@dataclass(frozen=True, slots=True)
-class ProductionProfileConfig:
-    """Production profile configuration flags."""
-
-    profile_id: str
-    burned_in_captions: bool = True
-
-
-PRODUCTION_PROFILE_CONFIGS: dict[str, ProductionProfileConfig] = {
-    "faceless_general": ProductionProfileConfig("faceless_general", burned_in_captions=True),
-    "faceless_informational": ProductionProfileConfig(
-        "faceless_informational", burned_in_captions=True
-    ),
-    "faceless_pop_culture": ProductionProfileConfig(
-        "faceless_pop_culture", burned_in_captions=True
-    ),
-    "faceless_pop_culture_lists": ProductionProfileConfig(
-        "faceless_pop_culture_lists", burned_in_captions=False
-    ),
-    "game_analysis": ProductionProfileConfig("game_analysis", burned_in_captions=True),
-}
-
-
-def resolve_production_profile_config(profile_id: str | None) -> ProductionProfileConfig | None:
-    """Resolve the production profile configuration by ID."""
-
-    if profile_id is None:
-        return None
-    return PRODUCTION_PROFILE_CONFIGS.get(profile_id)
-
-
-FINAL_VISUAL_PRODUCTION_PROFILES = frozenset(PRODUCTION_PROFILE_CONFIGS.keys())
 
 
 class VisualDirectorError(RuntimeError):
@@ -306,6 +267,15 @@ class VisualDirectorService:
         if workflow is None:
             raise VisualDirectorNotFoundError("Workflow não encontrado")
 
+        capabilities = capabilities_for(workflow)
+        if (
+            capabilities["delivery_mode"] != "rendered_video"
+            or capabilities["visual_mode"] != "semantic_match"
+        ):
+            raise VisualDirectorInputError(
+                "Semantic Visual Director is not applicable to this workflow"
+            )
+
         alignment = await self.alignment_service.current(workflow_id)
         queries = self._queries(workflow, alignment) if alignment else []
         scope = self._scope(workflow.roteiro_snapshot, queries)
@@ -444,7 +414,7 @@ class VisualDirectorService:
     @staticmethod
     def _requires_visual_queries(workflow: WorkflowExecucao) -> bool:
         return bool(
-            workflow.perfil_producao in FINAL_VISUAL_PRODUCTION_PROFILES
+            capabilities_for(workflow)["visual_mode"] == "semantic_match"
             and workflow.duracao_audio_segundos
             and workflow.duracao_audio_segundos > 0
         )
