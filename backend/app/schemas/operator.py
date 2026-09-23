@@ -83,6 +83,7 @@ class OperatorWorkflowSummaryOut(BaseModel):
     audio_duration_seconds: float | None
     production_profile: str | None
     manual_edit_package_url: str | None = None
+    visual_mode: str = "semantic_match"
     legacy_status: str
     production_status: str | None
     production_phase: str | None

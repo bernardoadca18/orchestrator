@@ -18,3 +18,5 @@ soundfile==0.12.*
 pyloudnorm==0.1.1
 PyYAML==6.0.*
 num2words==0.5.14
+
+python-multipart==0.0.22

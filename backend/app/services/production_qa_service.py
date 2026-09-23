@@ -351,6 +351,11 @@ class ProductionQAService:
                 profile_unavailable=profile_unavailable,
             )
             checks = standard_local_checks(inputs)
+            from app.services.production_capabilities import capabilities_for
+            if capabilities_for(upstream.workflow)["visual_mode"] == "storyboard":
+                from app.services.production_orchestration_service import ProductionOrchestrationService
+                errors = await ProductionOrchestrationService(self.session, self.config)._validate_static_image_assets(upstream.timeline)
+                checks.append(ProductionQACheck("storyboard_asset_registry", "storyboard", "failed" if errors else "passed", "Media Indexer image identities verified", actual=errors))
             metrics["local_check_time_ms"] = round((time.perf_counter() - local_started) * 1000, 3)
             range_started = time.perf_counter()
             if upstream.policy.validate_video_delivery:

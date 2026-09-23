@@ -18,7 +18,7 @@ from app.models.workflow import (
     WorkflowRender,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.production_capabilities import burned_in_captions_for
+from app.services.production_capabilities import burned_in_captions_for, capabilities_for
 from app.services.production_qa_policy import ProductionQAPolicy
 from app.services.visual_director_algorithm import (
     canonical_game_from_session_label,
@@ -1115,7 +1115,53 @@ def check_render_duration(inputs: ProductionQAInputs) -> ProductionQACheck:
     )
 
 
+def check_storyboard(inputs: ProductionQAInputs) -> ProductionQACheck:
+    from app.services.storyboard import identity
+    from app.schemas.workflow import StaticImagePresentationV2Out
+    board = getattr(inputs.workflow, "resolved_storyboard", None) or {}
+    bindings = getattr(inputs.workflow, "storyboard_bindings", None) or {}
+    failures = []
+    try:
+        if board.get("identity") != identity({k: v for k, v in board.items() if k != "identity"}):
+            failures.append("storyboard_identity_invalid")
+        if board["final_audio_sha256"] != inputs.workflow.audio_final_sha256 or board["alignment_identity"] != inputs.alignment.fingerprint:
+            failures.append("storyboard_stale")
+        scenes = board["scenes"]
+        placements = sorted(inputs.timeline.placements, key=lambda p: p.order)
+        if len(scenes) != len(placements):
+            failures.append("storyboard_asset_missing")
+        previous = 0.
+        for scene, placement in zip(scenes, placements, strict=True):
+            asset = bindings.get(scene["id"])
+            if not asset or asset["media_id"] != str(placement.source_media_id) or asset["project_id"] != str(placement.source_project_id):
+                failures.append("storyboard_asset_invalid")
+            if scene["start_seconds"] != previous or scene["end_seconds"] <= previous or placement.timeline_start_seconds != previous or placement.timeline_end_seconds != scene["end_seconds"]:
+                failures.append("storyboard_timeline_gap")
+            if placement.source_provenance != asset or placement.presentation != scene["presentation"]:
+                failures.append("storyboard_asset_integrity_mismatch")
+            StaticImagePresentationV2Out.model_validate(placement.presentation)
+            previous = scene["end_seconds"]
+        if previous != inputs.timeline.duration_seconds:
+            failures.append("storyboard_timeline_gap")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        failures.append("storyboard_invalid")
+    return ProductionQACheck("storyboard_integrity", "storyboard", "failed" if failures else "passed",
+                             "Storyboard, assets, motion and timeline integrity", actual=failures)
+
+
 def standard_local_checks(inputs: ProductionQAInputs) -> list[ProductionQACheck]:
+    if capabilities_for(inputs.workflow)["visual_mode"] == "storyboard":
+        return [
+            check_production_workflow_status(inputs), check_artifact_chain(inputs),
+            check_final_audio_identity(inputs), check_final_audio_format(inputs),
+            check_mastering_true_peak(inputs), check_mastering_loudness(inputs),
+            check_transcription_identity(inputs), check_presentation_spec(inputs),
+            check_narration_alignment_status(inputs), check_narration_alignment_coverage(inputs),
+            check_storyboard(inputs), check_production_timeline_status(inputs),
+            check_production_timeline_gap_free(inputs), check_production_timeline_visual_coverage(inputs),
+            check_source_types(inputs), check_render_status(inputs), *check_program_audio(inputs),
+            check_render_timeline_identity(inputs), check_render_output_profile(inputs), check_render_duration(inputs),
+        ]
     return [
         check_production_workflow_status(inputs),
         check_artifact_chain(inputs),

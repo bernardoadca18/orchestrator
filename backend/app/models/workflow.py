@@ -52,7 +52,7 @@ class WorkflowExecucao(Base):
         ),
         CheckConstraint(
             "production_phase IS NULL OR production_phase IN "
-            "('audio', 'narration_alignment', 'manual_edit_package', 'visual_plan', "
+            "('audio', 'narration_alignment', 'manual_edit_package', 'storyboard', 'storyboard_assets', 'visual_plan', "
             "'production_timeline', 'render', 'completed')",
             name="ck_workflow_production_phase",
         ),
@@ -66,6 +66,9 @@ class WorkflowExecucao(Base):
     roteiro_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     perfil_producao: Mapped[str | None] = mapped_column(String(50), nullable=True)
     production_capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    resolved_storyboard: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    storyboard_bindings: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    storyboard_media_project_id: Mapped[uuid.UUID | None] = mapped_column(PgUUID(as_uuid=True), nullable=True)
     manual_edit_package: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     status: Mapped[str] = mapped_column(
@@ -1189,7 +1192,7 @@ class TimelinePlacement(Base):
             "source_end_seconds > source_start_seconds "
             "AND playback_rate = 1.0 AND presentation IS NULL) OR "
             "(source_type = 'static_image' AND source_session_id IS NULL AND "
-            "source_image_semantic_index_id IS NOT NULL AND candidate_start_seconds IS NULL AND "
+            "candidate_start_seconds IS NULL AND "
             "candidate_end_seconds IS NULL AND source_start_seconds IS NULL AND "
             "source_end_seconds IS NULL AND playback_rate IS NULL AND presentation IS NOT NULL)",
             name="ck_timeline_placement_source_union",
@@ -1202,7 +1205,8 @@ class TimelinePlacement(Base):
         CheckConstraint(
             "presentation IS NULL OR (presentation->>'fit' IN ('cover', 'contain') AND "
             "presentation->>'background' IN ('black', 'blurred_fill') AND "
-            "presentation->>'motion' IN ('none', 'slow_zoom_in', 'slow_zoom_out'))",
+            "(presentation->>'motion' IN ('none', 'slow_zoom_in', 'slow_zoom_out') OR "
+            "(presentation->>'policy_version' = 'static_image_presentation_v2' AND presentation ? 'transform')))",
             name="ck_timeline_placement_presentation",
         ),
         CheckConstraint(

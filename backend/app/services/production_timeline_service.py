@@ -195,6 +195,11 @@ class ProductionTimelineService:
         return workflow, alignment, visual_plan
 
     async def current(self, workflow_id: uuid.UUID) -> ProductionTimeline | None:
+        workflow = await self.workflows.obter_por_id(workflow_id)
+        from app.services.production_capabilities import capabilities_for
+        if workflow and capabilities_for(workflow)["visual_mode"] == "storyboard":
+            from app.services.storyboard_service import StoryboardService
+            return await StoryboardService(self.session, self.config).timeline(workflow_id)
         workflow, alignment, visual_plan = await self._upstream(workflow_id)
         hybrid = self._is_hybrid(visual_plan)
         policy = self._policy(hybrid=hybrid)
@@ -465,6 +470,13 @@ class ProductionTimelineService:
     async def ensure(
         self, workflow_id: uuid.UUID, *, force: bool = False
     ) -> tuple[ProductionTimeline, bool]:
+        workflow = await self.workflows.obter_por_id(workflow_id)
+        from app.services.production_capabilities import capabilities_for
+        if workflow and capabilities_for(workflow)["visual_mode"] == "storyboard":
+            from app.services.storyboard_service import StoryboardService
+            service = StoryboardService(self.session, self.config)
+            existing = await service.timeline(workflow_id)
+            return await service.timeline(workflow_id, create=True), existing is None
         workflow, alignment, visual_plan = await self._upstream(workflow_id)
         hybrid = self._is_hybrid(visual_plan)
         policy = self._policy(hybrid=hybrid)

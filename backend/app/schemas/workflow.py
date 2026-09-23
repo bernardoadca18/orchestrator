@@ -656,7 +656,7 @@ class TimelineStaticImageSourceOut(BaseModel):
     source_type: Literal["static_image"] = "static_image"
     project_id: uuid.UUID
     media_id: uuid.UUID
-    image_semantic_index_id: uuid.UUID
+    image_semantic_index_id: uuid.UUID | None = None
     expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     expected_byte_size: int = Field(ge=0)
     content_type: Literal["image/jpeg", "image/png", "image/webp"]
@@ -678,6 +678,34 @@ class StaticImagePresentationOut(BaseModel):
     zoom_amount: float = Field(ge=0, le=0.1)
 
 
+class StaticImageTransformOut(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    start_scale: float = Field(ge=1, le=2)
+    end_scale: float = Field(ge=1, le=2)
+    start_x: float = Field(ge=-1, le=1)
+    end_x: float = Field(ge=-1, le=1)
+    start_y: float = Field(ge=-1, le=1)
+    end_y: float = Field(ge=-1, le=1)
+    easing: Literal["linear", "ease_in_out"]
+
+
+class StaticImagePresentationV2Out(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    policy_version: Literal["static_image_presentation_v2"]
+    fit: Literal["cover", "contain"]
+    background: Literal["black", "blurred_fill"]
+    transform: StaticImageTransformOut
+
+    @model_validator(mode="after")
+    def bounds(self):
+        if self.fit == "cover":
+            for endpoint in ("start", "end"):
+                margin = (getattr(self.transform, endpoint + "_scale") - 1) / 2
+                if any(abs(getattr(self.transform, endpoint + "_" + axis)) > margin + 1e-9 for axis in ("x", "y")):
+                    raise ValueError("storyboard_motion_invalid: transform exposes edges")
+        return self
+
+
 class TimelinePlacementOut(BaseModel):
     id: uuid.UUID
     order: int = Field(ge=0)
@@ -688,7 +716,7 @@ class TimelinePlacementOut(BaseModel):
     timeline_end_seconds: float = Field(gt=0)
     source: TimelineSourceOut
     playback_rate: float | None = None
-    presentation: StaticImagePresentationOut | None = None
+    presentation: StaticImagePresentationOut | StaticImagePresentationV2Out | None = None
     transition: str
     strategy: str
     importance: str
@@ -777,6 +805,12 @@ class ProductionTimelineOut(BaseModel):
     def validate_schema_source_types(self) -> ProductionTimelineOut:
         placements = self.tracks.primary_visual.placements
         if self.schema_version == "production_timeline_schema_v2":
+            for item in placements:
+                if isinstance(item.source, TimelineStaticImageSourceOut) and (
+                    item.source.image_semantic_index_id is None or not isinstance(item.presentation, StaticImagePresentationOut)
+                ):
+                    raise ValueError("Timeline V2 requires semantic image identity and V1 presentation")
+        if self.schema_version in {"production_timeline_schema_v2", "production_timeline_schema_v3"}:
             if any(isinstance(item.source, TimelineGameplaySourceOut) for item in placements):
                 raise ValueError("ProductionTimeline V2 forbids legacy gameplay sources")
         elif any(not isinstance(item.source, TimelineGameplaySourceOut) for item in placements):

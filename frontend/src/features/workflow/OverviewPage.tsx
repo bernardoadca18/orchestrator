@@ -1,3 +1,4 @@
+import { StoryboardPanel } from "./StoryboardPanel";
 import { useState } from "react";
 import { api, BASE_URL } from "../../api/client";
 import { Alert, ActionButton, Card, ConfirmDialog, DefinitionList, Diagnostics, Progress, StatusBadge } from "../../components/ui";
@@ -15,10 +16,12 @@ const videoStages = [
   ["render", "Render"],
 ] as const;
 
-export function stagePresentation(phase: string | null, status: string | null, stage: string) {
+const storyboardStages = [["audio", "Narração"], ["narration_alignment", "Alignment"], ["storyboard", "Storyboard"], ["storyboard_assets", "Imagens"], ["production_timeline", "Timeline"], ["render", "Render"]] as const;
+
+export function stagePresentation(phase: string | null, status: string | null, stage: string, storyboard = false) {
   const stages = phase === "manual_edit_package" || stage === "manual_edit_package"
     ? [["audio", "Narração"], ["manual_edit_package", "Pacote para edição"]] as const
-    : videoStages;
+    : storyboard ? storyboardStages : videoStages;
   const current = stages.findIndex(([key]) => key === phase);
   const index = stages.findIndex(([key]) => key === stage);
   if (status === "completed") return "completed";
@@ -53,10 +56,12 @@ export default function OverviewPage() {
     : null;
   return <div className="workspace-grid">
     <Card title="Progresso da produção" className="span-full">
-      <div className="stage-grid">{(workflow.manual_edit_package_url ? [["audio", "Narração"], ["manual_edit_package", "Pacote para edição"]] as const : videoStages).map(([key, label]) => {
-        const state = stagePresentation(workflow.production_phase, workflow.production_status, key);
+      <div className="stage-grid">{(workflow.manual_edit_package_url ? [["audio", "Narração"], ["manual_edit_package", "Pacote para edição"]] as const : workflow.visual_mode === "storyboard" ? storyboardStages : videoStages).map(([key, label]) => {
+        const state = stagePresentation(workflow.production_phase, workflow.production_status, key, workflow.visual_mode === "storyboard");
         return <div className={`stage-card ${state}`} key={key}><StatusBadge value={state} /><strong>{label}</strong><small>{key === workflow.production_phase ? workflow.current_error_message : ""}</small></div>;
-      })}</div>
+      })}
+      {!workflow.manual_edit_package_url && <div className="stage-card"><StatusBadge value={workflow.qa?.status || "not_started"} /><strong>QA</strong></div>}
+      </div>
       {renderProgress?.kind === "progress"
         ? <Progress value={renderProgress.value} label={renderProgress.label} />
         : renderProgress && <p>{renderProgress.label}</p>}
@@ -64,6 +69,7 @@ export default function OverviewPage() {
     {workflow.manual_edit_package_url && <Card title="Pacote para edição manual" className="span-full">
       <a href={`${BASE_URL}${workflow.manual_edit_package_url}`}>Consultar manifest e arquivos do pacote</a>
     </Card>}
+    {workflow.visual_mode === "storyboard" && <StoryboardPanel workflowId={workflow.id} phase={workflow.production_phase} onChange={refresh} />}
     <Card title="Estado atual">
       <DefinitionList items={[
         ["Produção", <StatusBadge value={workflow.production_status || workflow.legacy_status} />],
@@ -78,7 +84,7 @@ export default function OverviewPage() {
       <DefinitionList items={[
         ["Narração SHA", workflow.render ? "ver Render" : "—"],
         ["NarrationAlignment", snapshot.artifacts.narration_alignment?.fingerprint || "—"],
-        ["VisualPlan", snapshot.artifacts.visual_plan?.fingerprint || "—"],
+        ...(workflow.visual_mode === "storyboard" ? [] : [["VisualPlan", snapshot.artifacts.visual_plan?.fingerprint || "—"]] as [string, string][]),
         ["ProductionTimeline", snapshot.artifacts.production_timeline?.fingerprint || "—"],
         ["PresentationSpec", snapshot.artifacts.presentation_fingerprint || "—"],
         ["AudioMixPlan", snapshot.artifacts.audio_mix_plan_fingerprint || "—"],

@@ -1,3 +1,4 @@
+import { StoryboardPanel } from "../workflow/StoryboardPanel";
 import { useCallback, useState } from "react";
 import { operatorApi, ProductionTimelineDetail, VisualPlanDetail, VisualSource } from "../../api/operator";
 import { Alert, ActionButton, Card, ConfirmDialog, DefinitionList, Diagnostics, EmptyState, LoadingState, ScoreBar, StatusBadge, TableWrap } from "../../components/ui";
@@ -53,7 +54,7 @@ function Timeline({ timeline }: { timeline: ProductionTimelineDetail }) {
   </Card>;
 }
 
-export default function VisualsPage() {
+function SemanticVisualsPage() {
   const { snapshot, refresh } = useWorkflowContext();
   const [revision, setRevision] = useState(0);
   const [confirm, setConfirm] = useState(false);
@@ -105,4 +106,21 @@ export default function VisualsPage() {
     </Card>}
     {timeline.data ? <Timeline timeline={timeline.data} /> : <EmptyState title="Production Timeline ainda não disponível" />}
   </div>;
+}
+
+function StoryboardVisualsPage() {
+  const { snapshot, refresh } = useWorkflowContext();
+  const id = snapshot.workflow.id;
+  const loader = useCallback((signal?: AbortSignal) => operatorApi.getTimeline(id, signal), [id]);
+  const timeline = useColdArtifact<ProductionTimelineDetail>(id, "timeline", snapshot.artifacts.production_timeline?.fingerprint, loader);
+  return <div className="workspace-stack">
+    <StoryboardPanel workflowId={id} phase={snapshot.workflow.production_phase} onChange={refresh} />
+    {timeline.error && <Alert tone="danger">{timeline.error}</Alert>}
+    {timeline.data ? <Timeline timeline={timeline.data} /> : <EmptyState title="Timeline disponível após vincular as imagens" />}
+  </div>;
+}
+
+export default function VisualsPage() {
+  const { snapshot } = useWorkflowContext();
+  return snapshot.workflow.visual_mode === "storyboard" ? <StoryboardVisualsPage /> : <SemanticVisualsPage />;
 }

@@ -103,6 +103,9 @@ def resolve_qa_policy(
     static_image_maximum_hold_seconds: float = STATIC_IMAGE_MAXIMUM_HOLD_SECONDS,
     static_image_maximum_consecutive_seconds: float = (STATIC_IMAGE_MAXIMUM_CONSECUTIVE_SECONDS),
 ) -> ProductionQAPolicy:
+    if timeline_schema_version == "production_timeline_schema_v3":
+        return replace(GENERIC_POLICY, name="storyboard", version="storyboard_qa_v1",
+                       supported_source_types=("video_segment", "static_image"), require_visual_plan=False)
     hybrid = timeline_schema_version == "production_timeline_schema_v2"
     if perfil_producao == "game_analysis":
         base = GAME_ANALYSIS_HYBRID_POLICY if hybrid else GAME_ANALYSIS_POLICY

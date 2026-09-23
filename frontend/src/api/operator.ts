@@ -66,6 +66,7 @@ export interface OperatorWorkflowSummary {
   audio_duration_seconds: number | null;
   production_profile: string | null;
   manual_edit_package_url?: string | null;
+  visual_mode?: string;
   legacy_status: string;
   production_status: string | null;
   production_phase: string | null;

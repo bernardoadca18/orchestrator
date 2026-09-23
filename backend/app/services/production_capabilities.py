@@ -16,7 +16,7 @@ def capabilities_for(workflow: WorkflowExecucao) -> dict:
         "visual_mode": "semantic_match",
         "requires_media_scope": True,
         "caption_policy": "none"
-        if workflow.perfil_producao == "faceless_pop_culture_lists"
+        if getattr(workflow, "perfil_producao", None) == "faceless_pop_culture_lists"
         else "burned_in",
         "render_profile": None,
         "version": "legacy_workflow_v1",

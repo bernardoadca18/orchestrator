@@ -397,6 +397,7 @@ class OperatorConsoleService:
             script_duration_seconds=script_duration,
             audio_duration_seconds=workflow.duracao_audio_segundos,
             production_profile=workflow.perfil_producao,
+            visual_mode=capabilities_for(workflow)["visual_mode"],
             manual_edit_package_url=(
                 f"/workflow/{workflow.id}/manual-edit-package"
                 if capabilities_for(workflow)["delivery_mode"] == "manual_edit_package"
@@ -506,7 +507,7 @@ class OperatorConsoleService:
         )
         visual = (
             None
-            if manual
+            if manual or capabilities_for(workflow)["visual_mode"] != "semantic_match"
             else await VisualDirectorService(self.session, config=self.config).current(workflow_id)
         )
         timeline = (

@@ -25,6 +25,8 @@ from app.core.config import Settings, settings
 from app.models.workflow import ProductionTimeline, WorkflowExecucao, WorkflowRender
 from app.repositories.workflow_render_repository import WorkflowRenderRepository
 from app.repositories.workflow_repository import WorkflowRepository
+from app.services.storyboard import StoryboardError
+from app.services.storyboard_service import StoryboardService
 from app.services.audio_service import processar_workflow
 from app.services.manual_edit_package import ManualEditPackageError, ManualEditPackageService
 from app.services.narration_alignment_service import NarrationAlignmentService
@@ -74,7 +76,9 @@ class ProductionOrchestrationService:
         composer_client_factory: Callable[[], VideoComposerClient] | None = None,
         media_provider: MediaSearchProvider | None = None,
         manual_package_service: Any | None = None,
+        storyboard_service: Any | None = None,
     ) -> None:
+        self.storyboards = storyboard_service or StoryboardService(session, config)
         self.session = session
         self.config = config
         self.workflows = workflow_repository or WorkflowRepository(session)
@@ -153,12 +157,28 @@ class ProductionOrchestrationService:
                 if phase == "narration_alignment":
                     alignment, _ = await self.alignments.ensure(workflow.id, force=False)
                     if alignment.status == "completed":
-                        await self._advance(workflow, "visual_plan")
+                        await self._advance(workflow, "storyboard" if capabilities_for(workflow)["visual_mode"] == "storyboard" else "visual_plan")
                         continue
                     await self._upstream_terminal(
                         workflow, "narration_alignment", alignment.status, alignment.error_message
                     )
                     return OrchestrationResult(terminal=True)
+
+                if phase == "storyboard":
+                    await self.storyboards.ensure(workflow.id)
+                    await self._advance(workflow, "storyboard_assets")
+                    continue
+
+                if phase == "storyboard_assets":
+                    if await self.storyboards.current(workflow.id) is None:
+                        await self._advance(workflow, "storyboard")
+                        continue
+                    view = await self.storyboards.view(workflow.id)
+                    if not view["ready"]:
+                        await self._block(workflow, phase, "storyboard_asset_missing", "Aguardando imagens das cenas")
+                        return OrchestrationResult(terminal=True)
+                    await self._advance(workflow, "production_timeline")
+                    continue
 
                 if phase == "visual_plan":
                     capabilities = capabilities_for(workflow)
@@ -262,7 +282,7 @@ class ProductionOrchestrationService:
                         timeline.placements,
                         self._visual_diversity_policy(timeline),
                     )
-                    visual_plan = await self.visual.current(workflow.id)
+                    visual_plan = await self.visual.current(workflow.id) if capabilities_for(workflow)["visual_mode"] == "semantic_match" else None
                     semantic = visual_plan_semantic_metrics(visual_plan)
                     semantic_failed = bool(
                         semantic["entity_violation_count"]
@@ -271,7 +291,7 @@ class ProductionOrchestrationService:
                             and not semantic["semantic_coverage"]
                         )
                     )
-                    if diversity.status == "failed" or semantic_failed:
+                    if capabilities_for(workflow)["visual_mode"] == "semantic_match" and (diversity.status == "failed" or semantic_failed):
                         reasons = list(diversity.reasons)
                         if semantic["entity_violation_count"]:
                             reasons.append("selected source conflicts with query game identity")
@@ -299,6 +319,11 @@ class ProductionOrchestrationService:
                     return await self._apply_remote(workflow, render, remote)
 
                 return OrchestrationResult(terminal=True)
+        except StoryboardError as exc:
+            current = await self.workflows.obter_por_id(workflow_id)
+            if current is not None:
+                await self._block(current, current.production_phase, exc.category, str(exc))
+            return OrchestrationResult(terminal=True)
         except VideoComposerTransientError as exc:
             logger.warning(
                 "transient Video Composer failure; scheduling bounded reconciliation",
@@ -929,6 +954,13 @@ class ProductionOrchestrationService:
         alignment = await self.alignments.current(workflow.id)
         if alignment is None or alignment.status != "completed":
             return "narration_alignment"
+        if capabilities_for(workflow)["visual_mode"] == "storyboard":
+            if await self.storyboards.current(workflow.id) is None:
+                return "storyboard"
+            if not (await self.storyboards.view(workflow.id))["ready"]:
+                return "storyboard_assets"
+            timeline = await self.timelines.current(workflow.id)
+            return "render" if timeline_is_gap_free(timeline) else "production_timeline"
         plan = await self.visual.current(workflow.id)
         if plan is None or plan.status not in {"completed", "completed_with_gaps"}:
             return "visual_plan"

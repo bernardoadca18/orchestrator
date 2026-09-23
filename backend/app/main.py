@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routers import dashboard, health, operator, thumbnails, workflow
+from app.api.routers import storyboard, dashboard, health, operator, thumbnails, workflow
 from app.core.config import settings
 from app.core.logging_config import setup_logging
 
@@ -25,3 +25,4 @@ app.include_router(dashboard.router, prefix="/dashboard", tags=["dashboard"])
 app.include_router(operator.router, prefix="/operator", tags=["operator"])
 
 app.include_router(thumbnails.router)
+app.include_router(storyboard.router)
