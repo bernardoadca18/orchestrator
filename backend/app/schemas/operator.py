@@ -82,6 +82,7 @@ class OperatorWorkflowSummaryOut(BaseModel):
     script_duration_seconds: float | None
     audio_duration_seconds: float | None
     production_profile: str | None
+    manual_edit_package_url: str | None = None
     legacy_status: str
     production_status: str | None
     production_phase: str | None

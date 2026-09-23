@@ -110,6 +110,7 @@ from app.services.human_review import (
     HumanReviewNotFoundError,
     HumanReviewService,
 )
+from app.services.manual_edit_package import FILENAMES
 from app.services.narration_alignment_service import (
     NarrationAlignmentNotFoundError,
     NarrationAlignmentService,
@@ -121,7 +122,7 @@ from app.services.operator_music import (
     OperatorMusicService,
 )
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.production_capabilities import burned_in_captions_for
+from app.services.production_capabilities import burned_in_captions_for, capabilities_for
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_qa_service import (
     ProductionQANotFoundError,
@@ -1163,6 +1164,7 @@ async def reconstruir_narracao_dos_takes(
 
     wf.audio_final_path = None
     wf.audio_final_sha256 = None
+    wf.manual_edit_package = None
     wf.audio_final_sample_rate = None
     wf.audio_final_channels = None
     wf.audio_final_byte_size = None
@@ -2236,6 +2238,101 @@ async def baixar_chunk_audio(
         metadata,
         filename=f"chunk_{chunk.chunk_index:04d}_take_{take.take_number:02d}.wav",
         immutable=True,
+    )
+
+
+@router.get("/{workflow_id}/manual-edit-package")
+async def obter_manual_edit_package(
+    workflow_id: uuid.UUID, session: Annotated[AsyncSession, Depends(get_db)]
+):
+    wf = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if wf is None:
+        raise HTTPException(404, "Workflow não encontrado")
+    if capabilities_for(wf)["delivery_mode"] != "manual_edit_package":
+        raise HTTPException(404, "Workflow não usa pacote de edição manual")
+    package = wf.manual_edit_package
+    if (
+        package is None
+        or package.get("created_from", {}).get("audio_sha256") != wf.audio_final_sha256
+    ):
+        return {"status": "pending", "workflow_id": str(workflow_id)}
+    return {
+        "status": "completed" if wf.production_status == "completed" else wf.production_status,
+        **package,
+    }
+
+
+@router.get("/{workflow_id}/manual-edit-package/files/{filename}")
+async def baixar_manual_edit_file(
+    workflow_id: uuid.UUID,
+    filename: str,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    import hashlib
+    import json
+
+    if filename not in (*FILENAMES, "narration.wav"):
+        raise HTTPException(404, "Artifact não encontrado")
+    wf = await WorkflowRepository(session).obter_por_id(workflow_id)
+    if wf is None or not wf.manual_edit_package:
+        raise HTTPException(404, "Pacote não disponível")
+    package = wf.manual_edit_package
+    if package.get("created_from", {}).get("audio_sha256") != wf.audio_final_sha256:
+        raise HTTPException(409, "Pacote stale em relação ao áudio final")
+    if filename == "narration.wav":
+        if not wf.audio_final_path:
+            raise HTTPException(409, "Áudio final indisponível")
+        try:
+            path, metadata = verify_audio_artifact(
+                wf.audio_final_path,
+                AudioArtifactExpectation(
+                    sha256=wf.audio_final_sha256,
+                    byte_size=wf.audio_final_byte_size,
+                    duration_seconds=wf.duracao_audio_segundos,
+                    sample_rate=wf.audio_final_sample_rate,
+                    channels=wf.audio_final_channels,
+                    frame_count=wf.audio_final_frame_count,
+                    subtype=wf.audio_final_subtype,
+                ),
+            )
+        except AudioServingIntegrityError as exc:
+            raise HTTPException(409, "Integridade do áudio final falhou") from exc
+        return audio_file_response(path, metadata, filename="narration.wav")
+    identity = package.get("identity", "")
+    if (
+        not isinstance(identity, str)
+        or len(identity) != 64
+        or not all(c in "0123456789abcdef" for c in identity)
+    ):
+        raise HTTPException(409, "Identidade do pacote inválida")
+    path = (
+        Path(settings.audio_storage_path)
+        / str(workflow_id)
+        / "manual_edit_package"
+        / identity
+        / filename
+    )
+    if not path.is_file():
+        raise HTTPException(404, "Artifact não encontrado")
+    expected = package.get("files", {}).get(filename, {}).get("sha256")
+    actual_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    if filename == "manifest.json":
+        expected = hashlib.sha256(
+            json.dumps(package, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+    if actual_sha != expected:
+        raise HTTPException(409, "Integridade do artifact falhou")
+    return FileResponse(
+        path,
+        media_type={
+            ".json": "application/json",
+            ".txt": "text/plain",
+            ".srt": "application/x-subrip",
+            ".csv": "text/csv",
+        }[path.suffix],
+        filename=filename,
     )
 
 

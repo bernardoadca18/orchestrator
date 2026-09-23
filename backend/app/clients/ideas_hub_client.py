@@ -66,7 +66,7 @@ class IdeasHubIdea(BaseModel):
 class IdeasHubProductionCapabilities(BaseModel):
     model_config = ConfigDict(extra="forbid")
     delivery_mode: Literal["rendered_video", "manual_edit_package"]
-    visual_mode: Literal["semantic_match", "background_fill", "storyboard"]
+    visual_mode: Literal["none", "semantic_match", "background_fill", "storyboard"]
     requires_media_scope: StrictBool
     caption_policy: Literal["burned_in", "none"]
     render_profile: str | None
@@ -77,7 +77,7 @@ class IdeasHubVisualReadiness(BaseModel):
     model_config = ConfigDict(extra="allow")
     status: str
     required: bool = True
-    mode: Literal["semantic_match", "background_fill", "storyboard"] = "semantic_match"
+    mode: Literal["none", "semantic_match", "background_fill", "storyboard"] = "semantic_match"
     policy_version: str | None = None
     policy_identity: str | None = None
     speakable_content_identity: str | None = None

@@ -35,7 +35,7 @@ from app.schemas.operator import (
 )
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
-from app.services.production_capabilities import burned_in_captions_for
+from app.services.production_capabilities import burned_in_captions_for, capabilities_for
 from app.services.production_orchestration_service import ProductionOrchestrationService
 from app.services.production_timeline_coverage import can_repair_production_timeline
 from app.services.production_timeline_service import ProductionTimelineService
@@ -164,7 +164,10 @@ def derive_capabilities(
             ),
         ),
         "can_regenerate_visuals": capability(
-            not cancelled and not active and bool(workflow.blocos),
+            capabilities_for(workflow)["delivery_mode"] == "rendered_video"
+            and not cancelled
+            and not active
+            and bool(workflow.blocos),
             "Aguarde a operação atual ou retome a produção cancelada.",
             (
                 "visual_plan",
@@ -363,7 +366,8 @@ class OperatorConsoleService:
         render: WorkflowRender | None = None
         projection_error: str | None = None
         try:
-            render = await self.production.current_render(workflow.id)
+            if capabilities_for(workflow)["delivery_mode"] == "rendered_video":
+                render = await self.production.current_render(workflow.id)
         except PresentationInputError as exc:
             projection_error = (
                 f"Presentation indisponível ({exc.reason or 'presentation_input_invalid'})."
@@ -393,6 +397,11 @@ class OperatorConsoleService:
             script_duration_seconds=script_duration,
             audio_duration_seconds=workflow.duracao_audio_segundos,
             production_profile=workflow.perfil_producao,
+            manual_edit_package_url=(
+                f"/workflow/{workflow.id}/manual-edit-package"
+                if capabilities_for(workflow)["delivery_mode"] == "manual_edit_package"
+                else None
+            ),
             legacy_status=workflow.status,
             production_status=workflow.production_status,
             production_phase=workflow.production_phase,
@@ -487,12 +496,25 @@ class OperatorConsoleService:
         )
         if workflow is None:
             return None
-        alignment = await NarrationAlignmentService(self.session, config=self.config).current(
-            workflow_id
+        manual = capabilities_for(workflow)["delivery_mode"] == "manual_edit_package"
+        alignment = (
+            None
+            if manual
+            else await NarrationAlignmentService(self.session, config=self.config).current(
+                workflow_id
+            )
         )
-        visual = await VisualDirectorService(self.session, config=self.config).current(workflow_id)
-        timeline = await ProductionTimelineService(self.session, config=self.config).current(
-            workflow_id
+        visual = (
+            None
+            if manual
+            else await VisualDirectorService(self.session, config=self.config).current(workflow_id)
+        )
+        timeline = (
+            None
+            if manual
+            else await ProductionTimelineService(self.session, config=self.config).current(
+                workflow_id
+            )
         )
         presentation_fingerprint = None
         audio_mix_fingerprint = None

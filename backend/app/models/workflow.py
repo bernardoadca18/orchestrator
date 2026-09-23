@@ -52,7 +52,7 @@ class WorkflowExecucao(Base):
         ),
         CheckConstraint(
             "production_phase IS NULL OR production_phase IN "
-            "('audio', 'narration_alignment', 'visual_plan', "
+            "('audio', 'narration_alignment', 'manual_edit_package', 'visual_plan', "
             "'production_timeline', 'render', 'completed')",
             name="ck_workflow_production_phase",
         ),
@@ -66,6 +66,7 @@ class WorkflowExecucao(Base):
     roteiro_snapshot: Mapped[dict] = mapped_column(JSONB, nullable=False)
     perfil_producao: Mapped[str | None] = mapped_column(String(50), nullable=True)
     production_capabilities: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    manual_edit_package: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     status: Mapped[str] = mapped_column(
         PgEnum(
@@ -1245,9 +1246,7 @@ class TimelinePlacement(Base):
     strategy: Mapped[str] = mapped_column(String(40), nullable=False)
     importance: Mapped[str] = mapped_column(String(24), nullable=False)
     source_provenance: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    presentation: Mapped[dict | None] = mapped_column(
-        JSONB(none_as_null=True), nullable=True
-    )
+    presentation: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     diagnostics: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     criado_em: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
@@ -1298,9 +1297,7 @@ class TimelineGap(Base):
 class WorkflowThumbnailPackage(Base):
     __tablename__ = "workflow_thumbnail_packages"
     __table_args__ = (
-        UniqueConstraint(
-            "workflow_execucao_id", "creative_revision", name="uq_thumbnail_revision"
-        ),
+        UniqueConstraint("workflow_execucao_id", "creative_revision", name="uq_thumbnail_revision"),
         CheckConstraint(
             "status IN ('pending', 'running', 'completed', 'failed')",
             name="ck_thumbnail_status",
@@ -1325,9 +1322,5 @@ class WorkflowThumbnailPackage(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
-    completed_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    selected_at: Mapped[dt.datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    completed_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    selected_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api } from "../../api/client";
+import { api, BASE_URL } from "../../api/client";
 import { Alert, ActionButton, Card, ConfirmDialog, DefinitionList, Diagnostics, Progress, StatusBadge } from "../../components/ui";
 import { coldArtifactCache } from "../../data/coldArtifactCache";
 import { createActionKey } from "../../data/operatorAction";
@@ -7,7 +7,7 @@ import { useOperatorAction } from "../../hooks/useOperatorAction";
 import { presentRenderProgress } from "../render/renderProgress";
 import { useWorkflowContext } from "./WorkflowWorkspace";
 
-const stages = [
+const videoStages = [
   ["audio", "Narração"],
   ["narration_alignment", "Alignment"],
   ["visual_plan", "VisualPlan"],
@@ -16,6 +16,9 @@ const stages = [
 ] as const;
 
 export function stagePresentation(phase: string | null, status: string | null, stage: string) {
+  const stages = phase === "manual_edit_package" || stage === "manual_edit_package"
+    ? [["audio", "Narração"], ["manual_edit_package", "Pacote para edição"]] as const
+    : videoStages;
   const current = stages.findIndex(([key]) => key === phase);
   const index = stages.findIndex(([key]) => key === stage);
   if (status === "completed") return "completed";
@@ -50,7 +53,7 @@ export default function OverviewPage() {
     : null;
   return <div className="workspace-grid">
     <Card title="Progresso da produção" className="span-full">
-      <div className="stage-grid">{stages.map(([key, label]) => {
+      <div className="stage-grid">{(workflow.manual_edit_package_url ? [["audio", "Narração"], ["manual_edit_package", "Pacote para edição"]] as const : videoStages).map(([key, label]) => {
         const state = stagePresentation(workflow.production_phase, workflow.production_status, key);
         return <div className={`stage-card ${state}`} key={key}><StatusBadge value={state} /><strong>{label}</strong><small>{key === workflow.production_phase ? workflow.current_error_message : ""}</small></div>;
       })}</div>
@@ -58,6 +61,9 @@ export default function OverviewPage() {
         ? <Progress value={renderProgress.value} label={renderProgress.label} />
         : renderProgress && <p>{renderProgress.label}</p>}
     </Card>
+    {workflow.manual_edit_package_url && <Card title="Pacote para edição manual" className="span-full">
+      <a href={`${BASE_URL}${workflow.manual_edit_package_url}`}>Consultar manifest e arquivos do pacote</a>
+    </Card>}
     <Card title="Estado atual">
       <DefinitionList items={[
         ["Produção", <StatusBadge value={workflow.production_status || workflow.legacy_status} />],

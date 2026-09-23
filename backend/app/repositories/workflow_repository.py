@@ -244,6 +244,7 @@ class WorkflowRepository:
         # Clear final audio artifacts to force re-generation
         workflow.audio_final_path = None
         workflow.audio_final_sha256 = None
+        workflow.manual_edit_package = None
         workflow.audio_final_sample_rate = None
         workflow.audio_final_channels = None
         workflow.audio_final_byte_size = None
@@ -266,6 +267,7 @@ class WorkflowRepository:
         """
         workflow.audio_final_path = None
         workflow.audio_final_sha256 = None
+        workflow.manual_edit_package = None
         workflow.audio_final_sample_rate = None
         workflow.audio_final_channels = None
         workflow.audio_final_byte_size = None

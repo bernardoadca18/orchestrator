@@ -1263,7 +1263,6 @@ async def test_query_warning_only_cannot_trigger_repair():
 @pytest.mark.parametrize(
     ("delivery", "visual", "category"),
     [
-        ("manual_edit_package", "semantic_match", "delivery_mode_not_implemented"),
         ("rendered_video", "background_fill", "visual_mode_not_implemented"),
         ("rendered_video", "storyboard", "visual_mode_not_implemented"),
     ],
@@ -1302,3 +1301,78 @@ async def test_explicit_render_profile_override_is_snapshotted():
     service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
     render = await service._ensure_local_render(workflow, timeline)
     assert render.render_profile == "custom_render_v1"
+
+
+@pytest.mark.asyncio
+async def test_manual_edit_delivery_completes_without_visual_pipeline():
+    workflow = _workflow(phase="audio", status="queued")
+    workflow.production_capabilities = {
+        "delivery_mode": "manual_edit_package",
+        "visual_mode": "none",
+        "requires_media_scope": False,
+        "caption_policy": "none",
+        "render_profile": None,
+        "version": "production_capabilities_v1",
+    }
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    package = SimpleNamespace(ensure=AsyncMock(return_value={"identity": "a" * 64}))
+    service = _service(workflow, timeline, composer)
+    service.manual_package = package
+    result = await service.process(workflow.id)
+    assert result.terminal
+    assert workflow.production_status == "completed"
+    assert workflow.production_phase == "completed"
+    package.ensure.assert_awaited_once_with(workflow.id)
+    service.alignments.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()
+    service.timelines.ensure.assert_not_awaited()
+    assert composer.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_manual_delivery_materializes_package_and_completes(tmp_path):
+    from app.services.manual_edit_package import ManualEditPackageService
+    from tests.test_manual_edit_package import _fixture
+
+    workflow, transcript, _ = _fixture(tmp_path, "pt-BR")
+    workflow.status = "audio_concluido"
+    workflow.production_status = "queued"
+    workflow.production_phase = "audio"
+    workflow.production_error_category = None
+    workflow.production_error_message = None
+    workflow.production_started_at = None
+    workflow.production_completed_at = None
+    workflow.transcricao = transcript
+    workflow.manual_edit_package = None
+    workflow.audio_phase = "completed"
+    workflow.production_capabilities = {
+        "delivery_mode": "manual_edit_package",
+        "visual_mode": "none",
+        "requires_media_scope": False,
+        "caption_policy": "none",
+        "render_profile": None,
+        "version": "production_capabilities_v1",
+    }
+    timeline = _timeline(workflow.id)
+    composer = FakeComposer(_remote(workflow.id, timeline))
+    service = _service(workflow, timeline, composer)
+    service.manual_package = ManualEditPackageService(
+        service.session, service.workflows, str(tmp_path)
+    )
+    result = await service.process(workflow.id)
+    assert result.terminal
+    assert workflow.production_status == "completed"
+    assert (
+        workflow.manual_edit_package["files"]["narration"]["sha256"] == workflow.audio_final_sha256
+    )
+    assert (
+        tmp_path
+        / str(workflow.id)
+        / "manual_edit_package"
+        / workflow.manual_edit_package["identity"]
+        / "captions.srt"
+    ).is_file()
+    service.visual.ensure.assert_not_awaited()
+    service.timelines.ensure.assert_not_awaited()
+    assert composer.create_calls == []

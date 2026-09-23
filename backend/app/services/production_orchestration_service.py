@@ -26,6 +26,7 @@ from app.models.workflow import ProductionTimeline, WorkflowExecucao, WorkflowRe
 from app.repositories.workflow_render_repository import WorkflowRenderRepository
 from app.repositories.workflow_repository import WorkflowRepository
 from app.services.audio_service import processar_workflow
+from app.services.manual_edit_package import ManualEditPackageError, ManualEditPackageService
 from app.services.narration_alignment_service import NarrationAlignmentService
 from app.services.presentation_spec import PresentationInputError, build_presentation_spec
 from app.services.production_capabilities import burned_in_captions_for, capabilities_for
@@ -72,6 +73,7 @@ class ProductionOrchestrationService:
         audio_processor: Callable[..., Any] = processar_workflow,
         composer_client_factory: Callable[[], VideoComposerClient] | None = None,
         media_provider: MediaSearchProvider | None = None,
+        manual_package_service: Any | None = None,
     ) -> None:
         self.session = session
         self.config = config
@@ -85,6 +87,9 @@ class ProductionOrchestrationService:
             lambda: VideoComposerClient(config)
         )
         self.media_provider = media_provider or MediaIndexerSearchProvider(config)
+        self.manual_package = manual_package_service or ManualEditPackageService(
+            session, self.workflows, config.audio_storage_path
+        )
 
     async def process(self, workflow_id: uuid.UUID) -> OrchestrationResult:
         workflow = await self.workflows.obter_por_id(workflow_id)
@@ -104,6 +109,15 @@ class ProductionOrchestrationService:
                 if workflow is None or self._cancelled(workflow):
                     return OrchestrationResult(terminal=True)
                 phase = workflow.production_phase or "audio"
+                if (
+                    capabilities_for(workflow)["delivery_mode"] == "manual_edit_package"
+                    and phase not in {"audio", "manual_edit_package"}
+                ):
+                    await self._advance(
+                        workflow,
+                        "manual_edit_package" if self._audio_is_reusable(workflow) else "audio",
+                    )
+                    continue
                 if phase == "audio":
                     if not self._audio_is_reusable(workflow):
                         await self.audio_processor(self.session, workflow.id)
@@ -117,8 +131,24 @@ class ProductionOrchestrationService:
                                 workflow.erro_mensagem or "Final narration production failed",
                             )
                             return OrchestrationResult(terminal=True)
-                    await self._advance(workflow, "narration_alignment")
+                    next_phase = (
+                        "manual_edit_package"
+                        if capabilities_for(workflow)["delivery_mode"] == "manual_edit_package"
+                        else "narration_alignment"
+                    )
+                    await self._advance(workflow, next_phase)
                     continue
+
+                if phase == "manual_edit_package":
+                    try:
+                        await self.manual_package.ensure(workflow.id)
+                    except ManualEditPackageError as exc:
+                        await self._block(workflow, phase, exc.category, str(exc))
+                        return OrchestrationResult(terminal=True)
+                    await self.workflows.atualizar_producao(
+                        workflow.id, status="completed", phase="completed", complete=True
+                    )
+                    return OrchestrationResult(terminal=True)
 
                 if phase == "narration_alignment":
                     alignment, _ = await self.alignments.ensure(workflow.id, force=False)
@@ -894,6 +924,8 @@ class ProductionOrchestrationService:
     async def _earliest_missing_phase(self, workflow: WorkflowExecucao) -> str:
         if not self._audio_is_reusable(workflow):
             return "audio"
+        if capabilities_for(workflow)["delivery_mode"] == "manual_edit_package":
+            return "manual_edit_package"
         alignment = await self.alignments.current(workflow.id)
         if alignment is None or alignment.status != "completed":
             return "narration_alignment"

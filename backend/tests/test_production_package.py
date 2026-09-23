@@ -76,6 +76,14 @@ async def test_workflow_snapshot_preserves_visual_queries_unchanged() -> None:
         return_value={
             "status": "ready",
             "profile": "analysis",
+            "capabilities": {
+                "delivery_mode": "rendered_video",
+                "visual_mode": "semantic_match",
+                "requires_media_scope": True,
+                "caption_policy": "burned_in",
+                "render_profile": None,
+                "version": "production_capabilities_v1",
+            },
             "editorial_status": "aprovado",
             "visual": {
                 "status": "ready",

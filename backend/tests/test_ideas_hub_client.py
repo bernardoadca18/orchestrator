@@ -249,5 +249,11 @@ def test_invalid_production_capabilities_are_rejected() -> None:
         version="production_capabilities_v1",
     )
     assert IdeasHubProductionCapabilities.model_validate(valid).visual_mode == "semantic_match"
+    assert (
+        IdeasHubProductionCapabilities.model_validate(
+            {**valid, "delivery_mode": "manual_edit_package", "visual_mode": "none"}
+        ).visual_mode
+        == "none"
+    )
     with pytest.raises(ValidationError):
         IdeasHubProductionCapabilities.model_validate({**valid, "visual_mode": "unknown"})
