@@ -30,7 +30,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-async def _check_dependencies() -> DependenciasHealth:
+async def _check_dependencies(focus: str = "full") -> DependenciasHealth:
     """Check the durable stores and runtime services required by production."""
     deps: dict[str, DependenciaStatus] = {}
     all_healthy = True
@@ -76,20 +76,25 @@ async def _check_dependencies() -> DependenciasHealth:
         all_healthy = False
         deps["ideas_hub"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
-    # Media Indexer
-    try:
-        start = time.monotonic()
-        async with httpx.AsyncClient(
-            base_url=settings.media_indexer_api_url,
-            timeout=5.0,
-        ) as client:
-            resp = await client.get("/health/ready")
-            resp.raise_for_status()
-        latency = (time.monotonic() - start) * 1000
-        deps["media_indexer"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
-    except Exception as exc:
-        all_healthy = False
-        deps["media_indexer"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
+    if focus != "gamedev":
+        # Media Indexer
+        try:
+            start = time.monotonic()
+            async with httpx.AsyncClient(
+                base_url=settings.media_indexer_api_url,
+                timeout=5.0,
+            ) as client:
+                resp = await client.get("/health/ready")
+                resp.raise_for_status()
+            latency = (time.monotonic() - start) * 1000
+            deps["media_indexer"] = DependenciaStatus(
+                status="healthy", latency_ms=round(latency, 2)
+            )
+        except Exception as exc:
+            all_healthy = False
+            deps["media_indexer"] = DependenciaStatus(
+                status="unavailable", error=type(exc).__name__
+            )
 
     # Canonical Qwen Voice Service readiness
     try:
@@ -103,17 +108,22 @@ async def _check_dependencies() -> DependenciasHealth:
         all_healthy = False
         deps["voice_service"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
 
-    # Frozen Stage 16 Video Composer readiness
-    try:
-        start = time.monotonic()
-        async with VideoComposerClient() as composer:
-            if not await composer.health_ready():
-                raise RuntimeError("not_ready")
-        latency = (time.monotonic() - start) * 1000
-        deps["video_composer"] = DependenciaStatus(status="healthy", latency_ms=round(latency, 2))
-    except Exception as exc:
-        all_healthy = False
-        deps["video_composer"] = DependenciaStatus(status="unavailable", error=type(exc).__name__)
+    if focus != "gamedev":
+        # Frozen Stage 16 Video Composer readiness
+        try:
+            start = time.monotonic()
+            async with VideoComposerClient() as composer:
+                if not await composer.health_ready():
+                    raise RuntimeError("not_ready")
+            latency = (time.monotonic() - start) * 1000
+            deps["video_composer"] = DependenciaStatus(
+                status="healthy", latency_ms=round(latency, 2)
+            )
+        except Exception as exc:
+            all_healthy = False
+            deps["video_composer"] = DependenciaStatus(
+                status="unavailable", error=type(exc).__name__
+            )
 
     return DependenciasHealth(
         status="ready" if all_healthy else "degraded",
@@ -127,8 +137,10 @@ async def health_dependencias() -> DependenciasHealth:
 
 
 @router.get("/health/ready", response_model=DependenciasHealth)
-async def health_ready(response: Response) -> DependenciasHealth:
-    result = await _check_dependencies()
+async def health_ready(
+    response: Response, focus: Literal["full", "pov", "gamedev"] = "full"
+) -> DependenciasHealth:
+    result = await _check_dependencies(focus)
     if result.status != "ready":
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
     return result

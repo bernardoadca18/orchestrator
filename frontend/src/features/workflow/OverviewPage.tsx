@@ -1,6 +1,7 @@
 import { StoryboardPanel } from "./StoryboardPanel";
+import { ManualPackagePanel } from "./ManualPackagePanel";
 import { useState } from "react";
-import { api, BASE_URL } from "../../api/client";
+import { api } from "../../api/client";
 import { Alert, ActionButton, Card, ConfirmDialog, DefinitionList, Diagnostics, Progress, StatusBadge } from "../../components/ui";
 import { coldArtifactCache } from "../../data/coldArtifactCache";
 import { createActionKey } from "../../data/operatorAction";
@@ -66,9 +67,7 @@ export default function OverviewPage() {
         ? <Progress value={renderProgress.value} label={renderProgress.label} />
         : renderProgress && <p>{renderProgress.label}</p>}
     </Card>
-    {workflow.manual_edit_package_url && <Card title="Pacote para edição manual" className="span-full">
-      <a href={`${BASE_URL}${workflow.manual_edit_package_url}`}>Consultar manifest e arquivos do pacote</a>
-    </Card>}
+    {workflow.manual_edit_package_url && <ManualPackagePanel url={workflow.manual_edit_package_url} status={workflow.production_status} />}
     {workflow.visual_mode === "storyboard" && <StoryboardPanel workflowId={workflow.id} phase={workflow.production_phase} onChange={refresh} />}
     <Card title="Estado atual">
       <DefinitionList items={[

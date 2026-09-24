@@ -15,7 +15,7 @@ from app.services.narration_alignment_algorithm import (
 )
 from app.services.narration_alignment_service import NarrationAlignmentService
 
-RESOLVER_VERSION = "storyboard_resolver_v1"
+RESOLVER_VERSION = "storyboard_resolver_v2"
 
 
 class StoryboardError(ValueError):
@@ -126,7 +126,10 @@ def resolve_storyboard(workflow, alignment) -> dict:
                 if t.start_char < a["end_char"] and t.end_char > a["start_char"]
             ]
             indexes = [m.canonical_to_asr_word[t.order] for t in tokens]
-            if not indexes or any(i is None for i in indexes):
+            coverage = sum(i is not None for i in indexes) / len(indexes) if indexes else 0.0
+            # Minor internal ASR substitutions do not change measured anchor boundaries.
+            # Both boundaries must still be mapped; never interpolate missing timestamps.
+            if not indexes or indexes[0] is None or indexes[-1] is None or coverage < 0.9:
                 raise ValueError("Scene contains unaligned words")
             start = m.asr_words[indexes[0]].start_seconds
             end = m.asr_words[indexes[-1]].end_seconds
@@ -144,6 +147,10 @@ def resolve_storyboard(workflow, alignment) -> dict:
                     "order": order,
                     "anchor_start_seconds": start,
                     "anchor_end_seconds": end,
+                    "alignment_coverage": coverage,
+                    "alignment_warnings": (
+                        ["internal_anchor_words_unaligned"] if coverage < 1.0 else []
+                    ),
                     "start_seconds": start,
                     "end_seconds": end,
                     "presentation": resolve_motion(scene["motion_intent"]),

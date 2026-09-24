@@ -63,23 +63,10 @@ export default function NewProductionPage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    Promise.allSettled([
-      api.listarRoteirosDisponiveis(controller.signal),
-      api.listarProjetosMidia(controller.signal),
-    ]).then(([scriptResult, projectResult]) => {
-      if (scriptResult.status === "fulfilled") {
-        setScripts(scriptResult.value);
-        setSelectedId(defaultRevisionId(scriptResult.value));
-      } else if (!controller.signal.aborted) {
-        setError(scriptResult.reason instanceof Error ? scriptResult.reason.message : "Falha ao carregar revisões");
-      }
-      if (projectResult.status === "fulfilled") {
-        setProjects(projectResult.value);
-      } else if (!controller.signal.aborted && scriptResult.status === "fulfilled") {
-        setError(projectResult.reason instanceof Error ? projectResult.reason.message : "Falha ao carregar projetos de mídia");
-      }
-    }).catch((reason) => {
-      if (!controller.signal.aborted) setError(reason instanceof Error ? reason.message : "Falha ao carregar preparação da produção");
+    api.listarRoteirosDisponiveis(controller.signal).then(items => {
+      setScripts(items); setSelectedId(defaultRevisionId(items));
+    }).catch(reason => {
+      if (!controller.signal.aborted) setError(String(reason));
     }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, []);
@@ -98,6 +85,15 @@ export default function NewProductionPage() {
       });
     return () => controller.abort();
   }, [selectedId]);
+
+  useEffect(() => {
+    if (!readiness?.production_readiness.media_scope.required) return;
+    const controller = new AbortController();
+    api.listarProjetosMidia(controller.signal).then(setProjects).catch(reason => {
+      if (!controller.signal.aborted) setError(String(reason));
+    });
+    return () => controller.abort();
+  }, [readiness]);
 
   useEffect(() => {
     setSessions([]);

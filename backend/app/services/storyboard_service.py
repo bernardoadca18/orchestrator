@@ -134,6 +134,8 @@ class StoryboardService:
             "expected_sha256": sha,
             "expected_byte_size": len(data),
             "content_type": asset["content_type"],
+            "width": asset.get("width"),
+            "height": asset.get("height"),
             "provenance": provenance,
             "source_filename": image.filename,
             "scene_id": scene_id,
@@ -185,14 +187,73 @@ class StoryboardService:
             }
         result = deepcopy(board)
         bindings = wf.storyboard_bindings or {}
+        from app.clients.video_composer_client import VideoComposerClient, VideoComposerError
+        from app.services.production_capabilities import capabilities_for
+        profile_name = capabilities_for(wf).get("render_profile") or self.config.video_composer_render_profile
+        result["render_profile"] = None
+        try:
+            async with VideoComposerClient(self.config) as composer:
+                profiles = await composer.get_render_profiles()
+            selected = next((p for p in profiles if p.name == profile_name), None)
+            if selected:
+                result["render_profile"] = {"name": selected.name, "width": selected.width, "height": selected.height}
+        except VideoComposerError:
+            pass  # Asset editing remains available; the render phase checks readiness.
         result["ready"] = all(s["id"] in bindings for s in result["scenes"])
         for scene in result["scenes"]:
-            scene["asset"] = bindings.get(scene["id"])
+            scene["asset"] = deepcopy(bindings.get(scene["id"]))
+            asset = scene["asset"]
+            if asset and not asset.get("width"):
+                async with httpx.AsyncClient(base_url=self.config.media_indexer_api_url, timeout=10) as client:
+                    try:
+                        response = await client.get(f"/media-assets/{asset['media_id']}")
+                        response.raise_for_status()
+                        metadata = response.json()
+                        asset.update(width=metadata.get("width"), height=metadata.get("height"))
+                    except httpx.HTTPError:
+                        pass
+            scene["quality_warnings"] = []
+            if asset and asset.get("width") and asset.get("height"):
+                width, height = asset["width"], asset["height"]
+                if min(width, height) < 720:
+                    scene["quality_warnings"].append("low_resolution")
+                if max(width / height, height / width) > 3:
+                    scene["quality_warnings"].append("extreme_aspect_ratio")
+                profile = result["render_profile"]
+                if profile and max(profile["width"] / width, profile["height"] / height) > 2:
+                    scene["quality_warnings"].append("heavy_upscale_required")
             scene["preview_url"] = (
                 f"/workflow/{workflow_id}/storyboard/scenes/{scene['id']}/image"
                 if scene["asset"]
                 else None
             )
+        durations = [s["end_seconds"] - s["start_seconds"] for s in result["scenes"]]
+        motion = {"none": 0, "pan": 0, "zoom": 0}
+        issues = []
+        for scene, duration in zip(result["scenes"], durations):
+            intent = scene["motion_intent"]
+            motion["none"] += int(intent == "none")
+            motion["pan"] += int(intent.startswith("pan_"))
+            motion["zoom"] += int("push_in" in intent or "pull_out" in intent)
+            for code in scene["quality_warnings"]:
+                issues.append({"severity": "warning", "code": code, "scene_id": scene["id"]})
+            for code in scene.get("alignment_warnings", []):
+                issues.append({"severity": "warning", "code": code, "scene_id": scene["id"]})
+            if duration < 1.5 or duration > 15:
+                issues.append({"severity": "warning", "code": "scene_pacing", "scene_id": scene["id"]})
+            if not scene["asset"]:
+                issues.append({"severity": "error", "code": "image_missing", "scene_id": scene["id"]})
+        from app.services.presentation_spec import build_presentation_spec
+        from app.services.production_capabilities import burned_in_captions_for
+        presentation = build_presentation_spec(wf, duration_seconds=board["duration_seconds"], burned_in_captions=burned_in_captions_for(wf))
+        captions = presentation.captions if presentation else None
+        result["quality"] = {
+            "scene_count": len(durations), "average_scene_duration": sum(durations) / len(durations),
+            "min_scene_duration": min(durations), "max_scene_duration": max(durations),
+            "motion_distribution": motion, "timeline_coverage": sum(durations) / board["duration_seconds"],
+            "caption_cue_count": len(captions.cues) if captions else 0,
+            "audio_mastering_status": (wf.mastering_metrics or {}).get("status"), "issues": issues,
+        }
         return result
 
     async def timeline(self, workflow_id, *, create=False):
@@ -217,6 +278,17 @@ class StoryboardService:
             }
         )
         timeline = await self.timelines.get_by_request_fingerprint(fingerprint)
+        if timeline is None:
+            # Earlier V1 artifacts included the upload filename. Reuse them only
+            # when every original input still matches; new writes omit filenames.
+            legacy_fingerprint = identity({
+                "storyboard": board["identity"],
+                "bindings": bindings,
+                "version": "storyboard_timeline_v1",
+            })
+            legacy = await self.timelines.get_by_request_fingerprint(legacy_fingerprint)
+            if legacy is not None and legacy.status == "completed":
+                return legacy
         if (timeline and timeline.status == "completed") or not create:
             return timeline
         alignment = await self.alignments.current(workflow_id)

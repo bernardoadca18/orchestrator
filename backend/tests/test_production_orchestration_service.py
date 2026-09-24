@@ -1124,6 +1124,25 @@ async def test_explicit_cancelled_resume_still_blocks_stale_gap_timeline() -> No
 
 
 @pytest.mark.asyncio
+async def test_blocked_storyboard_resume_recovers_missing_timeline_without_audio() -> None:
+    workflow = _workflow(phase="render", status="blocked")
+    workflow.production_capabilities = {"delivery_mode": "rendered_video", "visual_mode": "storyboard"}
+    timeline = _timeline(workflow.id)
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+    service.storyboards = SimpleNamespace(
+        current=AsyncMock(return_value={"identity": "current"}),
+        view=AsyncMock(return_value={"ready": True}),
+    )
+    service.timelines.current = AsyncMock(return_value=None)
+    await service.resume(workflow)
+    assert workflow.production_phase == "production_timeline"
+    assert workflow.production_status == "queued"
+    service.audio_processor.assert_not_awaited()
+    service.alignments.ensure.assert_not_awaited()
+    service.visual.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_blocked_resume_preserves_the_blocked_phase() -> None:
     workflow = _workflow(phase="visual_plan", status="blocked")
     timeline = _timeline(workflow.id)

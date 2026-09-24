@@ -102,6 +102,35 @@ def test_multiple_blocks():
     assert result["scenes"][-1]["end_seconds"] == 10
 
 
+def test_anchor_accepts_minor_internal_asr_substitution_but_requires_boundaries():
+    wf, alignment = fixture()
+    text = "You find a cobbled street. People carry baskets toward the market square."
+    wf.roteiro_snapshot["blocos"][0]["conteudo"] = text
+    wf.blocos[0].texto = wf.blocos[0].synthesis_text = text
+    wf.duracao_audio_segundos = wf.blocos[0].narration_end_seconds = 13.0
+    words = text.replace(" a ", " the ").split()
+    wf.transcricao.palavras_timestamps = [
+        dict(palavra=w, inicio=i, fim=i + 0.8) for i, w in enumerate(words)
+    ]
+    imported = wf.roteiro_snapshot["imported_storyboard"]
+    imported["scenes"] = [imported["scenes"][0]]
+    imported["scenes"][0]["narration_anchor"].update(start_char=0, end_char=len(text), text=text)
+    imported.pop("identity")
+    imported["identity"] = identity(imported)
+    scene = resolve_storyboard(wf, alignment)["scenes"][0]
+    assert scene["alignment_coverage"] > 0.9
+    assert scene["anchor_start_seconds"] == 0
+    assert scene["anchor_end_seconds"] == len(words) - 0.2
+    assert scene["alignment_warnings"] == ["internal_anchor_words_unaligned"]
+    wf.transcricao.palavras_timestamps[4]["palavra"] = "building"
+    with pytest.raises(StoryboardError):
+        resolve_storyboard(wf, alignment)
+    wf.transcricao.palavras_timestamps[4]["palavra"] = words[4]
+    wf.transcricao.palavras_timestamps[0]["palavra"] = "Someone"
+    with pytest.raises(StoryboardError):
+        resolve_storyboard(wf, alignment)
+
+
 @pytest.mark.parametrize(
     "failure", ["stale", "nan", "missing_word", "anchor", "audio", "alignment"]
 )
@@ -201,11 +230,36 @@ async def test_routing_waits_for_assets_without_visual_director():
 
 
 @pytest.mark.asyncio
+async def test_current_timeline_reuses_legacy_filename_identity_only_for_same_inputs():
+    from app.services.storyboard_service import StoryboardService
+
+    bindings = {"scene-1": {"media_id": "image-a", "source_filename": "scene-1.png"}}
+    board = {"identity": "board-a", "scenes": [{"id": "scene-1"}]}
+    legacy_key = identity(
+        {"storyboard": board["identity"], "bindings": bindings, "version": "storyboard_timeline_v1"}
+    )
+    timeline = NS(status="completed")
+    service = StoryboardService(AsyncMock())
+    service.workflow = AsyncMock(return_value=NS(storyboard_bindings=bindings))
+    service.current = AsyncMock(return_value=board)
+    service.timelines = NS(
+        get_by_request_fingerprint=AsyncMock(
+            side_effect=lambda key: timeline if key == legacy_key else None,
+        )
+    )
+    assert await service.timeline(uuid4()) is timeline
+    bindings["scene-1"]["media_id"] = "image-b"
+    assert await service.timeline(uuid4()) is None
+
+
+@pytest.mark.asyncio
 async def test_upload_replace_remove_and_no_semantic_index(respx_mock):
-    import io
     import hashlib
+    import io
+
     import httpx
-    from starlette.datastructures import UploadFile, Headers
+    from starlette.datastructures import Headers, UploadFile
+
     from app.services.storyboard_service import StoryboardService
 
     wf = NS(
@@ -269,8 +323,9 @@ async def test_upload_replace_remove_and_no_semantic_index(respx_mock):
 @pytest.mark.parametrize("failure", ["mime", "scene", "sha", "project", "active"])
 async def test_invalid_asset_rejected(respx_mock, failure):
     import io
-    import httpx
-    from starlette.datastructures import UploadFile, Headers
+
+    from starlette.datastructures import Headers, UploadFile
+
     from app.services.storyboard_service import StoryboardService
 
     wf = NS(

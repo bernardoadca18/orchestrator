@@ -2262,6 +2262,26 @@ async def obter_manual_edit_package(
     }
 
 
+@router.get("/{workflow_id}/manual-edit-package/download")
+async def baixar_manual_edit_zip(
+    workflow_id: uuid.UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+):
+    from fastapi.responses import StreamingResponse
+    from app.services.package_zip import stream_package_zip
+
+    # Reuse exactly the individual-download integrity checks before sending headers.
+    files = []
+    for filename in ("narration.wav", *FILENAMES):
+        response = await baixar_manual_edit_file(workflow_id, filename, session)
+        files.append((filename, Path(response.path)))
+    return StreamingResponse(
+        stream_package_zip(files),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="neovids-{workflow_id}.zip"'},
+    )
+
+
 @router.get("/{workflow_id}/manual-edit-package/files/{filename}")
 async def baixar_manual_edit_file(
     workflow_id: uuid.UUID,

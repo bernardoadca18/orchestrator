@@ -446,7 +446,10 @@ class ProductionOrchestrationService:
             )
 
         phase = workflow.production_phase
-        if source_status in {None, "cancelled"}:
+        if source_status in {None, "cancelled"} or (
+            source_status == "blocked"
+            and capabilities_for(workflow)["visual_mode"] == "storyboard"
+        ):
             phase = await self._earliest_missing_phase(workflow)
 
         # A cancelled render may have finished or failed remotely while polls
