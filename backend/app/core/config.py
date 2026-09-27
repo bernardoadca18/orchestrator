@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     ideas_hub_http_backoff_seconds: float = 0.25
 
     voice_api_url: str = "http://localhost:8889"
-    voice_profile: str = "bernardo_xvec_v4"
+    voice_profile: str = "bernardo_pt_icl_v1"
     voice_profile_en_us: str = "bernardo_en_xvec_v2"
     voice_generation_profile: str = "narration_v2"
     voice_language: str = "Portuguese"
