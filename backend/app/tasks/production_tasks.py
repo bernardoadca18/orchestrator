@@ -8,7 +8,7 @@ import uuid
 
 from celery.signals import worker_ready
 
-from app.core.celery_app import celery_app
+from app.core.celery_app import celery_app, is_control_worker
 from app.core.config import settings
 from app.core.database import task_session
 from app.core.logging_config import set_workflow_id
@@ -85,5 +85,7 @@ async def recover_productions() -> None:
 
 @worker_ready.connect
 def setup_production_recovery(sender, **kwargs) -> None:
+    if is_control_worker(sender):
+        return
     logger.info("worker configured; recovering Stage 17 productions")
     asyncio.run(recover_productions())

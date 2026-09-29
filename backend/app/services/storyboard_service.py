@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from copy import deepcopy
 
@@ -76,6 +78,73 @@ class StoryboardService:
             response.raise_for_status()
         return project_id
 
+    @staticmethod
+    async def image_identity(image):
+        if image.content_type not in {"image/png", "image/jpeg", "image/webp"}:
+            raise StoryboardError("storyboard_asset_invalid", "Unsupported image MIME")
+        digest = hashlib.sha256()
+        size = 0
+        while chunk := await image.read(1024 * 1024):
+            size += len(chunk)
+            if size > 25_000_000:
+                raise StoryboardError(
+                    "storyboard_asset_invalid", "Image must be between 1 byte and 25 MB"
+                )
+            digest.update(chunk)
+        await image.seek(0)
+        if size == 0:
+            raise StoryboardError(
+                "storyboard_asset_invalid", "Image must be between 1 byte and 25 MB"
+            )
+        return digest.hexdigest(), size
+
+    @staticmethod
+    def image_provenance(workflow_id):
+        return {
+            "source_owner": "operator",
+            "source_class": "pov_storyboard",
+            "asset_class": "pov_scene",
+            "declared_metadata": {"workflow_id": str(workflow_id)},
+        }
+
+    async def ingest_image(self, client, project_id, image, sha, size, provenance):
+        # UploadFile is already spooled by Starlette. HTTPX reads from that file;
+        # no second whole-image bytes object is made in the Orchestrator.
+        await image.seek(0)
+        response = await client.post(
+            f"/projects/{project_id}/images",
+            files={"image": (image.filename, image.file, image.content_type)},
+            data={"enqueue_semantic_index": "false", "provenance": json.dumps(provenance)},
+        )
+        response.raise_for_status()
+        asset = response.json()["media_asset"]
+        if (
+            asset["sha256"] != sha
+            or asset["byte_size"] != size
+            or asset["project_id"] != str(project_id)
+            or asset["media_kind"] != "image"
+            or asset["content_type"] not in {"image/png", "image/jpeg", "image/webp"}
+        ):
+            raise StoryboardError(
+                "storyboard_asset_integrity_mismatch", "Ingested image identity differs"
+            )
+        return asset
+
+    @staticmethod
+    def image_binding(scene_id, image, asset, sha, size, provenance):
+        return {
+            "media_id": asset["id"],
+            "project_id": asset["project_id"],
+            "expected_sha256": sha,
+            "expected_byte_size": size,
+            "content_type": asset["content_type"],
+            "width": asset.get("width"),
+            "height": asset.get("height"),
+            "provenance": provenance,
+            "source_filename": image.filename,
+            "scene_id": scene_id,
+        }
+
     async def upload(self, workflow_id, scene_id, image):
         wf = await self.workflow(workflow_id)
         board = await self.current(workflow_id)
@@ -85,64 +154,99 @@ class StoryboardService:
             raise StoryboardError(
                 "storyboard_asset_invalid", "Wait for production to pause before changing assets"
             )
-        if image.content_type not in {"image/png", "image/jpeg", "image/webp"}:
-            raise StoryboardError("storyboard_asset_invalid", "Unsupported image MIME")
-        data = await image.read(25_000_001)
-        if not data or len(data) > 25_000_000:
-            raise StoryboardError(
-                "storyboard_asset_invalid", "Image must be between 1 byte and 25 MB"
-            )
+        sha, size = await self.image_identity(image)
         project_id = await self.asset_project(wf)
-        import hashlib
-        import json
-
-        sha = hashlib.sha256(data).hexdigest()
         # Binary provenance is immutable. Scene membership lives in the replaceable binding,
         # so one image can intentionally serve several scenes without provenance conflicts.
-        provenance = {
-            "source_owner": "operator",
-            "source_class": "pov_storyboard",
-            "asset_class": "pov_scene",
-            "declared_metadata": {"workflow_id": str(wf.id)},
-        }
+        provenance = self.image_provenance(wf.id)
         async with httpx.AsyncClient(
             base_url=self.config.media_indexer_api_url, timeout=120
         ) as client:
-            response = await client.post(
-                f"/projects/{project_id}/images",
-                files={"image": (image.filename, data, image.content_type)},
-                data={"enqueue_semantic_index": "false", "provenance": json.dumps(provenance)},
-            )
-            response.raise_for_status()
-            asset = response.json()["media_asset"]
-        if (
-            asset["sha256"] != sha
-            or asset["byte_size"] != len(data)
-            or asset["project_id"] != str(project_id)
-            or asset["media_kind"] != "image"
-            or asset["content_type"] not in {"image/png", "image/jpeg", "image/webp"}
-        ):
-            raise StoryboardError(
-                "storyboard_asset_integrity_mismatch", "Ingested image identity differs"
-            )
+            asset = await self.ingest_image(client, project_id, image, sha, size, provenance)
         # Serialize binding changes after the upload; never hold the DB lock during HTTP.
         wf = await self.lock_for_binding(workflow_id, board["identity"])
         bindings = dict(wf.storyboard_bindings or {})
-        bindings[scene_id] = {
-            "media_id": asset["id"],
-            "project_id": asset["project_id"],
-            "expected_sha256": sha,
-            "expected_byte_size": len(data),
-            "content_type": asset["content_type"],
-            "width": asset.get("width"),
-            "height": asset.get("height"),
-            "provenance": provenance,
-            "source_filename": image.filename,
-            "scene_id": scene_id,
-        }
+        bindings[scene_id] = self.image_binding(scene_id, image, asset, sha, size, provenance)
         wf.storyboard_bindings = bindings
         await self._invalidate(wf)
         return await self.view(workflow_id)
+
+    async def upload_batch(self, workflow_id, scene_ids, images):
+        if not 1 <= len(images) <= 20 or len(scene_ids) != len(images):
+            raise StoryboardError("storyboard_asset_invalid", "Batch needs 1-20 scene/image pairs")
+        if len(set(scene_ids)) != len(scene_ids):
+            raise StoryboardError("storyboard_asset_invalid", "Duplicate scene ID in batch")
+        wf = await self.workflow(workflow_id)
+        board = await self.current(workflow_id)
+        known = {scene["id"] for scene in board["scenes"]} if board else set()
+        if any(scene_id not in known for scene_id in scene_ids):
+            raise StoryboardError("storyboard_asset_invalid", "Unknown or stale scene")
+        if wf.production_status in {"queued", "running"}:
+            raise StoryboardError("storyboard_asset_invalid", "Production is active")
+
+        prepared = []
+        total_size = 0
+        current_bindings = wf.storyboard_bindings or {}
+        for scene_id, image in zip(scene_ids, images, strict=True):
+            sha, size = await self.image_identity(image)
+            total_size += size
+            if total_size > 100_000_000:
+                raise StoryboardError("storyboard_asset_invalid", "Batch exceeds 100 MB")
+            existing = current_bindings.get(scene_id)
+            if existing and (
+                existing.get("expected_sha256"), existing.get("expected_byte_size")
+            ) != (sha, size):
+                raise StoryboardError(
+                    "storyboard_asset_invalid", f"{scene_id} already has a different image"
+                )
+            prepared.append((scene_id, image, sha, size, existing))
+
+        new_items = [item for item in prepared if item[4] is None]
+        ingested = {}
+        if new_items:
+            project_id = await self.asset_project(wf)
+            provenance = self.image_provenance(wf.id)
+            async with httpx.AsyncClient(
+                base_url=self.config.media_indexer_api_url, timeout=120
+            ) as client:
+                for scene_id, image, sha, size, _ in new_items:
+                    # External publication may partially succeed. No DB binding changes
+                    # occur until every response passes binary identity validation.
+                    try:
+                        asset = await self.ingest_image(
+                            client, project_id, image, sha, size, provenance
+                        )
+                    except httpx.HTTPError as exc:
+                        raise StoryboardError(
+                            "storyboard_asset_ingest_failed",
+                            f"{scene_id}: Media Indexer ingest failed; retry batch",
+                        ) from exc
+                    ingested[scene_id] = self.image_binding(
+                        scene_id, image, asset, sha, size, provenance
+                    )
+            wf = await self.lock_for_binding(workflow_id, board["identity"])
+            bindings = dict(wf.storyboard_bindings or {})
+            for scene_id, _, sha, size, _ in prepared:
+                existing = bindings.get(scene_id)
+                if existing and (
+                    existing.get("expected_sha256"), existing.get("expected_byte_size")
+                ) != (sha, size):
+                    raise StoryboardError(
+                        "storyboard_asset_invalid", f"{scene_id} changed during upload; retry"
+                    )
+            bindings.update(ingested)
+            wf.storyboard_bindings = bindings
+            await self._invalidate(wf)
+        return {
+            "board": await self.view(workflow_id),
+            "results": [
+                {
+                    "scene_id": scene_id,
+                    "status": "ingested" if scene_id in ingested else "already_bound",
+                }
+                for scene_id in scene_ids
+            ],
+        }
 
     async def remove(self, workflow_id, scene_id):
         wf = await self.workflow(workflow_id)
@@ -161,6 +265,7 @@ class StoryboardService:
 
     async def lock_for_binding(self, workflow_id, board_identity):
         from sqlalchemy import select
+
         from app.models.workflow import WorkflowExecucao
         wf = (await self.session.execute(select(WorkflowExecucao).where(
             WorkflowExecucao.id == workflow_id
@@ -230,7 +335,7 @@ class StoryboardService:
         durations = [s["end_seconds"] - s["start_seconds"] for s in result["scenes"]]
         motion = {"none": 0, "pan": 0, "zoom": 0}
         issues = []
-        for scene, duration in zip(result["scenes"], durations):
+        for scene, duration in zip(result["scenes"], durations, strict=True):
             intent = scene["motion_intent"]
             motion["none"] += int(intent == "none")
             motion["pan"] += int(intent.startswith("pan_"))

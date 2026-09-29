@@ -6,7 +6,7 @@ from celery.signals import worker_ready
 from sqlalchemy import select
 
 from app.clients.thumbnail_director import ThumbnailClientError, ThumbnailDirectorClient
-from app.core.celery_app import celery_app
+from app.core.celery_app import celery_app, is_control_worker
 from app.core.database import task_session
 from app.models.workflow import WorkflowThumbnailPackage
 
@@ -88,4 +88,6 @@ async def recover():
 
 @worker_ready.connect
 def recover_thumbnails(sender, **kwargs):
+    if is_control_worker(sender):
+        return
     asyncio.run(recover())

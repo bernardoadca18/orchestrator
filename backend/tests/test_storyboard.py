@@ -1,4 +1,6 @@
 import copy
+import hashlib
+import io
 from types import SimpleNamespace as NS
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -360,3 +362,113 @@ async def test_invalid_asset_rejected(respx_mock, failure):
     with pytest.raises(StoryboardError):
         await service.upload(wf.id, "wrong" if failure == "scene" else "scene-1", image)
     assert wf.storyboard_bindings == {}
+
+
+@pytest.mark.asyncio
+async def test_batch_upload_binds_once_and_replay_is_idempotent(respx_mock):
+    import httpx
+    from starlette.datastructures import Headers, UploadFile
+
+    from app.services.storyboard_service import StoryboardService
+
+    wf = NS(
+        id=uuid4(), storyboard_bindings={}, production_status="blocked",
+        production_phase="storyboard_assets",
+        resolved_storyboard={
+            "identity": "test", "scenes": [{"id": "scene-1"}, {"id": "scene-2"}]
+        },
+    )
+    project = uuid4()
+    service = StoryboardService(AsyncMock())
+    service.workflow = AsyncMock(return_value=wf)
+    service.current = AsyncMock(return_value=wf.resolved_storyboard)
+    service.lock_for_binding = AsyncMock(return_value=wf)
+    service.asset_project = AsyncMock(return_value=project)
+    service.view = AsyncMock(return_value={"ready": True})
+
+    def response(request):
+        assert b'name="enqueue_semantic_index"\r\n\r\nfalse' in request.content
+        payload = b"first" if b"first" in request.content else b"second"
+        return httpx.Response(202, json={"media_asset": {
+            "id": str(uuid4()), "project_id": str(project), "media_kind": "image",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload), "content_type": "image/png",
+        }})
+
+    route = respx_mock.post(
+        f"{service.config.media_indexer_api_url}/projects/{project}/images"
+    ).mock(side_effect=response)
+
+    def images():
+        return [UploadFile(io.BytesIO(payload), filename=f"scene-{index}.png",
+                           headers=Headers({"content-type": "image/png"}))
+                for index, payload in enumerate((b"first", b"second"), 1)]
+
+    result = await service.upload_batch(wf.id, ["scene-1", "scene-2"], images())
+    assert result["board"]["ready"] is True
+    assert [row["status"] for row in result["results"]] == ["ingested", "ingested"]
+    assert set(wf.storyboard_bindings) == {"scene-1", "scene-2"}
+    assert route.call_count == 2
+    replay = await service.upload_batch(wf.id, ["scene-1", "scene-2"], images())
+    assert [row["status"] for row in replay["results"]] == ["already_bound", "already_bound"]
+    assert route.call_count == 2
+    with pytest.raises(StoryboardError):
+        await service.upload_batch(wf.id, ["scene-1"], [UploadFile(
+            io.BytesIO(b"different"), filename="scene-1.png",
+            headers=Headers({"content-type": "image/png"}),
+        )])
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_batch_partial_ingest_does_not_publish_bindings(respx_mock):
+    import httpx
+    from starlette.datastructures import Headers, UploadFile
+
+    from app.services.storyboard_service import StoryboardService
+
+    wf = NS(
+        id=uuid4(), storyboard_bindings={}, production_status="blocked",
+        resolved_storyboard={
+            "identity": "test", "scenes": [{"id": "scene-1"}, {"id": "scene-2"}]
+        },
+    )
+    project = uuid4()
+    service = StoryboardService(AsyncMock())
+    service.workflow = AsyncMock(return_value=wf)
+    service.current = AsyncMock(return_value=wf.resolved_storyboard)
+    service.lock_for_binding = AsyncMock(return_value=wf)
+    service.asset_project = AsyncMock(return_value=project)
+    service.view = AsyncMock(return_value={"ready": True})
+    calls = 0
+    fail_second = True
+
+    def response(request):
+        nonlocal calls
+        calls += 1
+        if fail_second and calls == 2:
+            return httpx.Response(503)
+        payload = b"first" if b"first" in request.content else b"second"
+        return httpx.Response(202, json={"media_asset": {
+            "id": str(uuid4()), "project_id": str(project), "media_kind": "image",
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "byte_size": len(payload), "content_type": "image/png",
+        }})
+
+    respx_mock.post(
+        f"{service.config.media_indexer_api_url}/projects/{project}/images"
+    ).mock(side_effect=response)
+
+    def images():
+        return [UploadFile(io.BytesIO(payload), filename=f"scene-{index}.png",
+                           headers=Headers({"content-type": "image/png"}))
+                for index, payload in enumerate((b"first", b"second"), 1)]
+
+    with pytest.raises(StoryboardError) as failure:
+        await service.upload_batch(wf.id, ["scene-1", "scene-2"], images())
+    assert failure.value.category == "storyboard_asset_ingest_failed"
+    assert wf.storyboard_bindings == {}
+    fail_second = False
+    result = await service.upload_batch(wf.id, ["scene-1", "scene-2"], images())
+    assert result["board"]["ready"] is True
+    assert set(wf.storyboard_bindings) == {"scene-1", "scene-2"}

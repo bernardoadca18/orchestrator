@@ -43,3 +43,40 @@ test("polling backoff is exponential and bounded", () => {
   assert.equal(pollingDelayMs(100, 250, 2), 250);
   assert.equal(pollingDelayMs(100, 250, 8), 250);
 });
+
+test("hidden tabs pause and refresh immediately when visible", async () => {
+  const prior = Object.getOwnPropertyDescriptor(globalThis, "document");
+  const fake = new EventTarget() as Document;
+  Object.defineProperty(fake, "hidden", { value: true, writable: true });
+  Object.defineProperty(globalThis, "document", { value: fake, configurable: true });
+  let calls = 0;
+  let stop: () => void = () => {};
+  try {
+    stop = startSerialPolling(async () => { calls += 1; }, { intervalMs: 5 });
+    await wait(15);
+    assert.equal(calls, 0);
+    Object.defineProperty(fake, "hidden", { value: false, writable: true });
+    fake.dispatchEvent(new Event("visibilitychange"));
+    await wait(1);
+    assert.equal(calls, 1);
+    Object.defineProperty(fake, "hidden", { value: true, writable: true });
+    await wait(15);
+    assert.equal(calls, 1);
+  } finally {
+    stop();
+    if (prior) Object.defineProperty(globalThis, "document", prior);
+    else Reflect.deleteProperty(globalThis, "document");
+  }
+});
+
+test("poll interval follows the latest server-owned state", async () => {
+  let delay = 5;
+  let calls = 0;
+  const stop = startSerialPolling(async () => {
+    calls += 1;
+    delay = 50;
+  }, { intervalMs: () => delay });
+  await wait(20);
+  assert.equal(calls, 1);
+  stop();
+});

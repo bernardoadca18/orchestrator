@@ -40,12 +40,15 @@ export function StoryboardPanel({ workflowId, phase, onChange }: { workflowId: s
   async function uploadBatch() {
     setBusy(true); setError(null);
     try {
+      const form = new FormData();
       for (const item of mapped) {
-        const form = new FormData(); form.append('image', item.file);
-        const response = await fetch(`${BASE_URL}/workflow/${workflowId}/storyboard/scenes/${item.scene!.id}/image`, { method: 'POST', body: form });
-        if (!response.ok) throw new Error(`${item.file.name}: ${JSON.stringify((await response.json()).detail)}`);
-        setBoard(await response.json());
+        form.append('scene_ids', item.scene!.id);
+        form.append('images', item.file);
       }
+      const response = await fetch(`${BASE_URL}/workflow/${workflowId}/storyboard/images/batch`, { method: 'POST', body: form });
+      if (!response.ok) throw new Error(JSON.stringify((await response.json()).detail));
+      const result = await response.json() as { board: Board; results: Array<{ scene_id: string; status: string }> };
+      setBoard(result.board);
       setBatch([]); onChange();
     } catch (e) { setError(String(e)); }
     finally { setBusy(false); }
@@ -64,10 +67,11 @@ export function StoryboardPanel({ workflowId, phase, onChange }: { workflowId: s
       <ul>{board.quality.issues.map((i, n) => <li key={n}>{i.severity}: {i.scene_id} — {i.code}</li>)}</ul>
     </details>}
     {board?.scenes.length ? <details><summary>Enviar várias imagens</summary>
-      <p>Use o ID da cena como nome: scene-001.png, scene-002.png. Confira as associações antes de enviar; imagens existentes serão substituídas.</p>
+      <p>Use o ID da cena como nome: scene-001.png, scene-002.png. Confira as associações antes de enviar. Para substituir uma imagem existente, use o envio da cena.</p>
       <input type="file" multiple accept="image/png,image/jpeg,image/webp" disabled={busy} onChange={e => setBatch(Array.from(e.target.files || []))} />
       <ul>{mapped.map((m, i) => <li key={i}>{m.file.name} → {m.scene?.id || 'sem correspondência'}</li>)}</ul>
-      <button disabled={busy || !batchValid} onClick={() => void uploadBatch()}>Confirmar envio das imagens</button>
+      <button disabled={busy || !batchValid || mapped.length > 20} onClick={() => void uploadBatch()}>{busy ? 'Enviando imagens…' : `Confirmar envio de ${mapped.length} imagens`}</button>
+      {mapped.length > 20 && <p>Envie até 20 imagens por lote.</p>}
     </details> : null}
     {!board?.scenes.length && <p>{board?.status === 'stale' ? 'Timing desatualizado. Retome a produção para resolver contra o áudio atual.' : 'As cenas aparecerão após o alinhamento da narração.'}</p>}
     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 20 }}>

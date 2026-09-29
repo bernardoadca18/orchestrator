@@ -8,7 +8,7 @@ import uuid
 
 from celery.signals import worker_ready
 
-from app.core.celery_app import celery_app
+from app.core.celery_app import celery_app, is_control_worker
 from app.core.database import task_session
 from app.core.logging_config import set_workflow_id
 from app.repositories.workflow_repository import WorkflowRepository
@@ -50,5 +50,7 @@ async def recover_audio_edit_updates() -> None:
 
 @worker_ready.connect
 def setup_audio_edit_recovery(sender, **kwargs) -> None:
+    if is_control_worker(sender):
+        return
     logger.info("worker configured; recovering audio edit updates")
     asyncio.run(recover_audio_edit_updates())

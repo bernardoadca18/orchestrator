@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import uuid
 from dataclasses import replace
@@ -434,6 +435,51 @@ async def test_hybrid_pre_render_gate_validates_static_contract_and_asset_identi
 
     timeline.placements[0] = _static_placement(duration=9)
     assert "placement_0_image_hold_invalid" in service._hybrid_timeline_errors(timeline)
+
+
+@pytest.mark.asyncio
+async def test_static_asset_validation_is_bounded_and_keeps_error_order() -> None:
+    workflow = _workflow(phase="render", status="running")
+    timeline = _timeline(workflow.id)
+    timeline.placements = []
+    ids = [uuid.UUID(int=index + 100) for index in range(10)]
+    for media_id in reversed(ids):
+        placement = _static_placement()
+        placement.source_media_id = media_id
+        timeline.placements.append(placement)
+    service = _service(workflow, timeline, FakeComposer(_remote(workflow.id, timeline)))
+
+    class Provider:
+        active = 0
+        maximum = 0
+
+        async def get_asset(self, media_id):
+            self.active += 1
+            self.maximum = max(self.maximum, self.active)
+            try:
+                await asyncio.sleep(0.001 * (10 - media_id.int % 10))
+                if media_id == ids[1]:
+                    raise TimeoutError
+                return MediaAssetMetadata(
+                    id=media_id,
+                    project_id=uuid.UUID(int=10),
+                    media_kind="image",
+                    content_type="image/png",
+                    byte_size=123,
+                    sha256="b" * 64 if media_id == ids[4] else "a" * 64,
+                    width=1080,
+                    height=1350,
+                )
+            finally:
+                self.active -= 1
+
+    provider = Provider()
+    service.media_provider = provider
+    assert await service._validate_static_image_assets(timeline) == [
+        f"{ids[1]}:provider_TimeoutError",
+        f"{ids[4]}:identity_mismatch",
+    ]
+    assert 1 < provider.maximum <= 4
 
 
 @pytest.mark.parametrize(

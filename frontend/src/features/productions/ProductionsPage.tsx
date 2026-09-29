@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { OperatorWorkflowSummary, operatorApi } from "../../api/operator";
 import { workflowPath } from "../../app/routes";
@@ -29,18 +29,18 @@ export default function ProductionsPage() {
     setSearchParams(next, { replace: true });
   };
 
-  const load = useCallback(async (signal?: AbortSignal) => {
-    const next = await operatorApi.listWorkflows({ state, search, ordering }, signal);
-    setItems(next);
-    setError(null);
-    setLoading(false);
-  }, [state, search, ordering]);
-
-  useEffect(() => startSerialPolling(load, {
-    intervalMs: 10_000,
-    maxBackoffMs: 60_000,
+  useEffect(() => {
+    let active = true;
+    return startSerialPolling(async (signal) => {
+      const next = await operatorApi.listWorkflows({ state, search, ordering }, signal);
+      active = next.some(item => ["queued", "running"].includes(item.production_status || ""));
+      setItems(next); setError(null); setLoading(false);
+    }, {
+    intervalMs: () => active ? 10_000 : 60_000,
+    maxBackoffMs: 120_000,
     onError: (reason) => { setError(reason instanceof Error ? reason.message : "Falha ao carregar produções"); setLoading(false); },
-  }), [load]);
+    });
+  }, [state, search, ordering]);
 
   return <div className="page">
     <PageHeader title="Produções" description="Fila operacional baseada no snapshot persistido de cada roteiro." actions={<Link className="primary-link" to="/productions/new">Iniciar nova produção</Link>} />

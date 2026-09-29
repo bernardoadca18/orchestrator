@@ -47,7 +47,7 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://orchestrator-redis:6379/0
       IDEAS_HUB_API_URL: ${IDEAS_HUB_API_URL_DOCKER:-http://host.docker.internal:8000}
       VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
       MEDIA_INDEXER_API_URL: ${MEDIA_INDEXER_API_URL_DOCKER:-http://host.docker.internal:8012}
@@ -74,7 +74,7 @@ services:
       retries: 12
       start_period: 20s
 
-  worker:
+  worker: &orchestrator-worker
     build: ./backend
     container_name: orchestrator-worker
     restart: "no"
@@ -84,13 +84,13 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+asyncpg://orchestrator:orchestrator@orchestrator-db:5432/orchestrator
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: redis://orchestrator-redis:6379/0
       IDEAS_HUB_API_URL: ${IDEAS_HUB_API_URL_DOCKER:-http://host.docker.internal:8000}
       VOICE_API_URL: ${VOICE_API_URL_DOCKER:-http://host.docker.internal:8889}
       MEDIA_INDEXER_API_URL: ${MEDIA_INDEXER_API_URL_DOCKER:-http://host.docker.internal:8012}
       VIDEO_COMPOSER_API_URL: ${VIDEO_COMPOSER_API_URL_DOCKER:-http://host.docker.internal:8013}
       TRANSCRIPTION_LOCAL_FILES_ONLY: ${TRANSCRIPTION_LOCAL_FILES_ONLY:-false}
-    command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --concurrency=1 -l info
+    command: celery -A app.core.celery_app.celery_app worker -Q audio_producao --hostname=audio@%h --concurrency=1 -l info
     depends_on:
       db:
         condition: service_healthy
@@ -107,7 +107,23 @@ services:
       test:
         [
           "CMD-SHELL",
-          "celery -A app.core.celery_app.celery_app inspect ping --timeout 5 --destination celery@$$HOSTNAME | grep -q pong",
+          "celery -A app.core.celery_app.celery_app inspect ping --timeout 5 --destination audio@$$HOSTNAME | grep -q pong",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 6
+      start_period: 30s
+
+  control-worker:
+    <<: *orchestrator-worker
+    container_name: orchestrator-control-worker
+    stop_grace_period: 1m
+    command: celery -A app.core.celery_app.celery_app worker -Q production_control --hostname=control@%h --concurrency=1 -l info
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "celery -A app.core.celery_app.celery_app inspect ping --timeout 5 --destination control@$$HOSTNAME | grep -q pong",
         ]
       interval: 30s
       timeout: 10s

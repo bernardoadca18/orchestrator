@@ -169,6 +169,29 @@ class WorkflowRepository:
             stmt = stmt.options(selectinload(WorkflowExecucao.blocos))
         return (await self.session.execute(stmt)).scalars().all()
 
+    async def listar_pagina_operador(
+        self,
+        *,
+        production_status: str | None,
+        ordering: str,
+        limit: int,
+        offset: int,
+    ) -> Sequence[WorkflowExecucao]:
+        """Page cheap operator queries before loading blocks and projections."""
+        stmt = select(WorkflowExecucao)
+        if production_status:
+            stmt = stmt.where(WorkflowExecucao.production_status == production_status)
+        if ordering == "created_desc":
+            stmt = stmt.order_by(WorkflowExecucao.criado_em.desc(), WorkflowExecucao.id.desc())
+        else:
+            stmt = stmt.order_by(
+                WorkflowExecucao.atualizado_em.desc(),
+                WorkflowExecucao.criado_em.desc(),
+                WorkflowExecucao.id.desc(),
+            )
+        stmt = stmt.offset(offset).limit(limit).options(selectinload(WorkflowExecucao.blocos))
+        return (await self.session.execute(stmt)).scalars().all()
+
     async def atualizar_status(self, workflow_id: uuid.UUID, status: str, **campos) -> None:
         wf = await self.obter_por_id(workflow_id)
         if wf is None:

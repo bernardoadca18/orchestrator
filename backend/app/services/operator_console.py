@@ -447,8 +447,25 @@ class OperatorConsoleService:
         limit: int = 100,
         offset: int = 0,
     ) -> list[OperatorWorkflowSummaryOut]:
-        workflows = list(await self.workflows.listar(com_blocos=True))
+        sql_page = (
+            isinstance(self.session, AsyncSession)
+            and not state
+            and not search
+            and not review_status
+            and ordering in {"updated_desc", "created_desc"}
+        )
+        if sql_page:
+            workflows = list(await self.workflows.listar_pagina_operador(
+                production_status=production_status,
+                ordering=ordering,
+                limit=limit,
+                offset=offset,
+            ))
+        else:
+            workflows = list(await self.workflows.listar(com_blocos=True))
         summaries = [await self.summary(workflow) for workflow in workflows]
+        if sql_page:
+            return summaries
         if search:
             needle = search.casefold().strip()
             summaries = [

@@ -18,7 +18,9 @@ export default function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
-  useEffect(() => startSerialPolling(async (signal) => {
+  useEffect(() => {
+    let hasActiveProduction = true;
+    return startSerialPolling(async (signal) => {
     const [nextStats, nextHealth, nextWorkflows] = await Promise.all([
       api.obterDashboardStats(signal),
       api.obterDependencias(signal),
@@ -27,13 +29,15 @@ export default function Dashboard() {
     setStats(nextStats);
     setHealth(nextHealth);
     setWorkflows(nextWorkflows);
+    hasActiveProduction = nextWorkflows.some(w => isActiveProductionStatus(w.production_status));
     setError(null);
     setUpdatedAt(new Date());
   }, {
-    intervalMs: 10_000,
-    maxBackoffMs: 60_000,
+    intervalMs: () => hasActiveProduction ? 10_000 : 60_000,
+    maxBackoffMs: 120_000,
     onError: (reason) => setError(reason instanceof Error ? reason.message : "Falha ao atualizar dashboard"),
-  }), []);
+    });
+  }, []);
 
   if (!stats && error) return <div className="page"><Alert tone="danger">{error}</Alert></div>;
   if (!stats) return <div className="page"><LoadingState label="Carregando dashboard…" /></div>;

@@ -14,7 +14,7 @@ from app.clients.voice_client import (
     VoiceClientTransientError,
     VoiceJobNotFoundError,
 )
-from app.core.celery_app import celery_app
+from app.core.celery_app import celery_app, is_control_worker
 from app.core.database import task_session
 from app.core.logging_config import set_workflow_id
 from app.repositories.workflow_repository import WorkflowRepository
@@ -98,5 +98,7 @@ async def reconciliar_blocos_orfaos() -> None:
 
 @worker_ready.connect
 def setup_reconciliacao(sender, **kwargs) -> None:
+    if is_control_worker(sender):
+        return
     logger.info("worker configured; reconciling durable voice jobs")
     asyncio.run(reconciliar_blocos_orfaos())

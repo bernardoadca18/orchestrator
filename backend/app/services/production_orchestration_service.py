@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import hashlib
 import json
@@ -25,8 +26,6 @@ from app.core.config import Settings, settings
 from app.models.workflow import ProductionTimeline, WorkflowExecucao, WorkflowRender
 from app.repositories.workflow_render_repository import WorkflowRenderRepository
 from app.repositories.workflow_repository import WorkflowRepository
-from app.services.storyboard import StoryboardError
-from app.services.storyboard_service import StoryboardService
 from app.services.audio_service import processar_workflow
 from app.services.manual_edit_package import ManualEditPackageError, ManualEditPackageService
 from app.services.narration_alignment_service import NarrationAlignmentService
@@ -41,6 +40,8 @@ from app.services.production_timeline_coverage import (
 )
 from app.services.production_timeline_service import ProductionTimelineService
 from app.services.program_audio import ProgramAudioError, build_audio_mix_plan
+from app.services.storyboard import StoryboardError
+from app.services.storyboard_service import StoryboardService
 from app.services.visual_director_service import (
     VisualDirectorService,
 )
@@ -798,13 +799,13 @@ class ProductionOrchestrationService:
                 int(provenance.get("expected_byte_size", -1)),
                 str(provenance.get("content_type", "")),
             )
-        errors: list[str] = []
-        for media_id, identity in sorted(expected.items(), key=lambda value: str(value[0])):
+        async def validate_one(
+            media_id: uuid.UUID, identity: tuple[uuid.UUID, str, int, str]
+        ) -> str | None:
             try:
                 asset = await self.media_provider.get_asset(media_id)
             except Exception as exc:
-                errors.append(f"{media_id}:provider_{type(exc).__name__}")
-                continue
+                return f"{media_id}:provider_{type(exc).__name__}"
             project_id, sha256, byte_size, content_type = identity
             if (
                 asset.project_id != project_id
@@ -813,7 +814,21 @@ class ProductionOrchestrationService:
                 or asset.byte_size != byte_size
                 or asset.content_type != content_type
             ):
-                errors.append(f"{media_id}:identity_mismatch")
+                return f"{media_id}:identity_mismatch"
+            return None
+
+        # Each window releases its HTTP requests before the next one starts.
+        # gather preserves input order even when remote responses complete out of order.
+        ordered = sorted(expected.items(), key=lambda value: str(value[0]))
+        errors: list[str] = []
+        for start in range(0, len(ordered), 4):
+            results = await asyncio.gather(
+                *(
+                    validate_one(media_id, identity)
+                    for media_id, identity in ordered[start : start + 4]
+                )
+            )
+            errors.extend(error for error in results if error is not None)
         return errors
 
     async def _reconcile_or_submit(

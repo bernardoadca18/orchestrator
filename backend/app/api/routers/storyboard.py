@@ -4,7 +4,7 @@ import uuid
 from typing import Annotated
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,22 @@ async def upload_image(
         return await StoryboardService(session).upload(workflow_id, scene_id, image)
     except StoryboardError as exc:
         raise HTTPException(409, {"category": exc.category, "message": str(exc)}) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Media Indexer image ingest failed") from exc
+
+
+@router.post("/{workflow_id}/storyboard/images/batch")
+async def upload_images_batch(
+    workflow_id: uuid.UUID,
+    session: DB,
+    scene_ids: Annotated[list[str], Form()],
+    images: Annotated[list[UploadFile], File()],
+):
+    try:
+        return await StoryboardService(session).upload_batch(workflow_id, scene_ids, images)
+    except StoryboardError as exc:
+        code = 502 if exc.category == "storyboard_asset_ingest_failed" else 409
+        raise HTTPException(code, {"category": exc.category, "message": str(exc)}) from exc
     except httpx.HTTPError as exc:
         raise HTTPException(502, "Media Indexer image ingest failed") from exc
 

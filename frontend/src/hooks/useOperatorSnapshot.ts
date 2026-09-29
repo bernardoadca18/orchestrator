@@ -11,13 +11,15 @@ export function useOperatorSnapshot(workflowId: string) {
 
   useEffect(() => {
     if (!workflowId) return;
+    let active = true;
     return startSerialPolling(async (signal) => {
       const snapshot = await operatorApi.getWorkflow(workflowId, signal);
+      active = ["queued", "running"].includes(snapshot.workflow.production_status || "");
       setData(snapshot);
       setError(null);
     }, {
-      intervalMs: 4_000,
-      maxBackoffMs: 30_000,
+      intervalMs: () => active ? 4_000 : 60_000,
+      maxBackoffMs: 120_000,
       onError: (reason) => setError(reason instanceof Error ? reason.message : "Falha ao atualizar produção"),
     });
   }, [workflowId, refreshRevision]);
