@@ -4,7 +4,7 @@ from app.services.audio_service import derive_quality_retry_seed
 
 def test_production_voice_defaults_are_frozen_and_overrideable() -> None:
     defaults = Settings(_env_file=None)
-    assert defaults.voice_profile == "bernardo_pt_icl_v1"
+    assert defaults.voice_profile == "bernardo_xvec_v4"
     assert defaults.voice_generation_profile == "narration_v2"
     assert defaults.voice_seed == 303
     assert defaults.voice_language == "Portuguese"
@@ -37,7 +37,7 @@ def test_workflow_locale_resolves_current_pt_and_english_voice():
     pt = resolve_narration_voice("pt-BR", config)
     en = resolve_narration_voice("en-US", config)
     assert (pt.voice_profile, pt.generation_profile, pt.language, pt.seed) == (
-        "bernardo_pt_icl_v1",
+        "bernardo_xvec_v4",
         "narration_v2",
         "Portuguese",
         303,
