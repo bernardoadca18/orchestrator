@@ -1,9 +1,9 @@
 export const workflowSections = [
   ["overview", "Visão geral"],
   ["narration", "Narração"],
-  ["visuals", "Visuais e Timeline"],
+  ["visuals", "Visuais e timeline"],
   ["presentation", "Apresentação"],
-  ["program-audio", "Program Audio"],
+  ["program-audio", "Áudio final"],
   ["render", "Render e QA"],
   ["thumbnails", "Thumbnails"],
   ["history", "Histórico"],

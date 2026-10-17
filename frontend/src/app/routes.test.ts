@@ -7,13 +7,17 @@ test("legacy workflow route redirects to the overview deep link", () => {
 });
 
 test("every workflow workspace section has a refresh-safe URL", () => {
-  assert.deepEqual(workflowSections.map(([section]) => workflowPath("abc", section)), [
-    "/productions/abc/overview",
-    "/productions/abc/narration",
-    "/productions/abc/visuals",
-    "/productions/abc/presentation",
-    "/productions/abc/program-audio",
-    "/productions/abc/render",
-    "/productions/abc/history",
-  ]);
+  assert.deepEqual(
+    workflowSections.map(([section]) => workflowPath("abc", section)),
+    [
+      "/productions/abc/overview",
+      "/productions/abc/narration",
+      "/productions/abc/visuals",
+      "/productions/abc/presentation",
+      "/productions/abc/program-audio",
+      "/productions/abc/render",
+      "/productions/abc/thumbnails",
+      "/productions/abc/history",
+    ],
+  );
 });

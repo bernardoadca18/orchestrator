@@ -3,11 +3,12 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import { initTheme } from "./theme/theme";
 import "./styles.css";
+import "./studio.css";
 
 initTheme();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <App />
-  </React.StrictMode>
+  </React.StrictMode>,
 );
